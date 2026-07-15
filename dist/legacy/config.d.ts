@@ -1,0 +1,8 @@
+export type DatabaseTarget = "local" | "production";
+export declare const config: {
+    nodeEnv: string;
+    databaseTarget: DatabaseTarget;
+    port: number;
+    readonly databaseUrl: string;
+    corsOrigin: string | string[];
+};

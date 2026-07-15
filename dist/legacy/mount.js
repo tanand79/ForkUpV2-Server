@@ -1,0 +1,73 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.mountLegacyApi = mountLegacyApi;
+const express_1 = __importDefault(require("express"));
+const cors_1 = __importDefault(require("cors"));
+const path_1 = __importDefault(require("path"));
+const config_1 = require("./config");
+const builder_1 = require("./routes/builder");
+const business_1 = require("./routes/business");
+const campaigns_1 = require("./routes/campaigns");
+const manage_1 = require("./routes/manage");
+const improve_story_1 = require("./routes/improve-story");
+const receipts_1 = require("./routes/receipts");
+const auth_1 = require("./routes/auth");
+const profiles_1 = require("./routes/profiles");
+const receipts_2 = require("./lib/receipts");
+const pool_1 = require("./db/pool");
+function mountLegacyApi(app) {
+    (0, receipts_2.ensureUploadsDir)();
+    app.use((0, cors_1.default)({
+        origin: config_1.config.corsOrigin,
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
+    }));
+    app.use(express_1.default.json({ limit: "12mb" }));
+    app.use((req, _res, next) => {
+        if (req.url.length > 1 && req.url.endsWith("/")) {
+            req.url = req.url.replace(/\/+(?=\?|$)/, "");
+        }
+        next();
+    });
+    app.use("/uploads", express_1.default.static(path_1.default.join(process.cwd(), "uploads")));
+    app.get("/", (_req, res) => {
+        res.json({ status: "ok", service: "forkup-api" });
+    });
+    app.get("/api/health", async (_req, res) => {
+        const hasDatabaseUrl = Boolean(process.env.DATABASE_URL_PRODUCTION?.trim() ||
+            process.env.DATABASE_URL_LOCAL?.trim() ||
+            process.env.DATABASE_URL?.trim());
+        let databaseOk = false;
+        let databaseError;
+        if (hasDatabaseUrl) {
+            try {
+                await pool_1.pool.query("SELECT 1 AS ok");
+                databaseOk = true;
+            }
+            catch (err) {
+                databaseError = err instanceof Error ? err.message : String(err);
+                console.error("Database health check failed:", err);
+            }
+        }
+        res.json({
+            status: databaseOk ? "ok" : hasDatabaseUrl ? "degraded" : "ok",
+            env: config_1.config.nodeEnv,
+            databaseTarget: config_1.config.databaseTarget,
+            databaseConfigured: hasDatabaseUrl,
+            databaseOk,
+            ...(databaseError ? { databaseError } : {}),
+        });
+    });
+    app.use("/api/campaigns", campaigns_1.campaignsRouter);
+    app.use("/api/builder", builder_1.builderRouter);
+    app.use("/api/profiles", profiles_1.profilesRouter);
+    app.use("/api/auth", auth_1.authRouter);
+    app.use("/api/business", business_1.businessRouter);
+    app.use("/api", receipts_1.receiptsRouter);
+    app.use("/api", improve_story_1.improveStoryRouter);
+    app.use("/api/manage", manage_1.manageRouter);
+}
+//# sourceMappingURL=mount.js.map
