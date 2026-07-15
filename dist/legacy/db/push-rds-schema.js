@@ -60,7 +60,22 @@ async function run() {
 run().catch((err) => {
     console.error("\nRDS schema push failed:", err);
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("password authentication failed") ||
+    if (msg.includes("Missing database URL")) {
+        console.error(`
+How to set it (PowerShell — same window, then re-run npm):
+
+  $env:DATABASE_URL_PRODUCTION="postgresql://USER:PASSWORD@RDS_ENDPOINT:5432/forkup?ssl=true"
+  npm run db:push-rds:schema:dry
+
+Or add this line once to Forkup-Server/.env (gitignored, never commit):
+
+  DATABASE_URL_PRODUCTION=postgresql://USER:PASSWORD@RDS_ENDPOINT:5432/forkup?ssl=true
+
+Replace USER / PASSWORD / RDS_ENDPOINT with your real RDS values.
+URL-encode special chars in the password (@ → %40, # → %23, / → %2F).
+`);
+    }
+    else if (msg.includes("password authentication failed") ||
         msg.includes("no pg_hba.conf entry") ||
         msg.includes("ECONNREFUSED") ||
         msg.includes("timeout")) {
