@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "test",
+    "dist",
+    "**/*spec.ts",
+    "src/legacy/index.ts",
+    "src/legacy/db/cli.ts",
+    "src/legacy/db/migrate.ts",
+    "src/legacy/db/seed.ts",
+    "src/legacy/db/migrate-patch.ts",
+    "src/legacy/db/migrate-foundation.ts",
+    "src/legacy/db/list-tables.ts",
+    "src/legacy/db/run-production.ts",
+    "src/legacy/db/reset-local.ts"
+  ]
+}
