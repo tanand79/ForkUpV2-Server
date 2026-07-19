@@ -9,6 +9,7 @@ import {
 } from "../lib/receipts";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { resolveAuthUser, bearerToken } from "../lib/auth";
+import { resolveStoredImageUrl } from "../lib/s3";
 import { pool } from "../db/pool";
 
 export const receiptsRouter = Router();
@@ -88,10 +89,10 @@ type ReceiptRow = QueryResultRow & {
   supporter_name: string | null;
 };
 
-function mapReceipt(row: ReceiptRow) {
+async function mapReceipt(row: ReceiptRow) {
   return {
     id: row.id,
-    imageUrl: row.uploaded_image_url,
+    imageUrl: await resolveStoredImageUrl(row.uploaded_image_url),
     ocrStatus: row.ocr_status,
     reviewStatus: row.review_status,
     subtotal: row.subtotal != null ? Number(row.subtotal) : null,
@@ -185,7 +186,7 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
     }
 
     const mime = typeof imageMimeType === "string" ? imageMimeType : "image/jpeg";
-    const imageUrl = saveReceiptImage(imageBase64, mime);
+    const imageUrl = await saveReceiptImage(imageBase64, mime);
 
     const { rows: receiptResult } = await connection.query<{ id: number }>(
       `INSERT INTO receipts (
@@ -227,7 +228,7 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
       eligibleSubtotal: ocr.eligibleSubtotal || null,
       calculatedDonation: donation,
       donationPercentage: giveback,
-      imageUrl,
+      imageUrl: await resolveStoredImageUrl(imageUrl),
       message: ocr.notes,
     });
   } catch (err) {
@@ -275,7 +276,7 @@ receiptsRouter.get("/campaigns/:slug/receipts", async (req, res) => {
       params,
     );
 
-    res.json(rows.map(mapReceipt));
+    res.json(await Promise.all(rows.map(mapReceipt)));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch receipts" });

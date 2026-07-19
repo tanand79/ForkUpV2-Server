@@ -9,6 +9,7 @@ import { manageRouter } from "./routes/manage";
 import { improveStoryRouter } from "./routes/improve-story";
 import { generateCampaignDraftRouter } from "./routes/generate-campaign-draft";
 import { receiptsRouter } from "./routes/receipts";
+import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
 import { profilesRouter } from "./routes/profiles";
 import { libraryRouter } from "./routes/library";
@@ -75,6 +76,7 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/auth", authRouter);
   app.use("/api/business", businessRouter);
   app.use("/api", receiptsRouter);
+  app.use("/api/uploads", uploadsRouter);
   app.use("/api", improveStoryRouter);
   app.use("/api", generateCampaignDraftRouter);
   app.use("/api/manage", manageRouter);

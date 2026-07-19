@@ -6,4 +6,9 @@ export declare const config: {
     readonly databaseUrl: string;
     corsOrigin: string | string[];
     readonly automationSecret: string;
+    s3: {
+        region: string;
+        bucket: string;
+        presignTtlSeconds: number;
+    };
 };

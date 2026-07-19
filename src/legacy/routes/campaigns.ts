@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
+import { resolveStoredImageUrl } from "../lib/s3";
 import type {
   CampaignDetail,
   CampaignListItem,
@@ -111,13 +112,16 @@ function mapLocation(row: LocationRow): ParticipatingLocation {
   };
 }
 
-function mapListItem(row: CampaignRow, locationCount: number): CampaignListItem {
+async function mapListItem(
+  row: CampaignRow,
+  locationCount: number,
+): Promise<CampaignListItem> {
   return {
     slug: row.slug,
     name: row.campaign_name,
     nonprofit: row.organization_name,
     nonprofitVerified: row.verification_status === "verified",
-    image: row.cover_image_url,
+    image: await resolveStoredImageUrl(row.cover_image_url),
     dateRange: formatDateRange(row.campaign_start_date, row.campaign_end_date),
     raised: Number(row.raised),
     goal: Number(row.campaign_goal),
@@ -203,7 +207,7 @@ async function fetchCampaignBySlug(slug: string, options?: { publicOnly?: boolea
   ]);
 
   return {
-    ...mapListItem(campaign, locations.length),
+    ...(await mapListItem(campaign, locations.length)),
     description: campaign.campaign_story,
     methods,
     participatingLocations: locations,

@@ -12,6 +12,7 @@ exports.rejectReceipt = rejectReceipt;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const financial_calculations_1 = require("./financial-calculations");
+const s3_1 = require("./s3");
 exports.UPLOADS_DIR = path_1.default.join(process.cwd(), "uploads", "receipts");
 function ensureUploadsDir() {
     try {
@@ -21,13 +22,17 @@ function ensureUploadsDir() {
         console.warn("Could not create uploads directory:", err);
     }
 }
-function saveReceiptImage(base64, mimeType) {
+async function saveReceiptImage(base64, mimeType) {
+    const data = base64.replace(/^data:[^;]+;base64,/, "");
+    const buffer = Buffer.from(data, "base64");
+    if ((0, s3_1.isS3Enabled)()) {
+        return (0, s3_1.uploadImageToS3)(buffer, mimeType, "receipts");
+    }
     ensureUploadsDir();
     const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
     const filename = `receipt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
     const filepath = path_1.default.join(exports.UPLOADS_DIR, filename);
-    const data = base64.replace(/^data:[^;]+;base64,/, "");
-    fs_1.default.writeFileSync(filepath, Buffer.from(data, "base64"));
+    fs_1.default.writeFileSync(filepath, buffer);
     return `/uploads/receipts/${filename}`;
 }
 function calculateDonation(eligibleSubtotal, givebackPercentage) {

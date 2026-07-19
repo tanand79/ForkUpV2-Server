@@ -15,6 +15,7 @@ const manage_1 = require("./routes/manage");
 const improve_story_1 = require("./routes/improve-story");
 const generate_campaign_draft_1 = require("./routes/generate-campaign-draft");
 const receipts_1 = require("./routes/receipts");
+const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
 const profiles_1 = require("./routes/profiles");
 const library_1 = require("./routes/library");
@@ -70,6 +71,7 @@ function mountLegacyApi(app) {
     app.use("/api/auth", auth_1.authRouter);
     app.use("/api/business", business_1.businessRouter);
     app.use("/api", receipts_1.receiptsRouter);
+    app.use("/api/uploads", uploads_1.uploadsRouter);
     app.use("/api", improve_story_1.improveStoryRouter);
     app.use("/api", generate_campaign_draft_1.generateCampaignDraftRouter);
     app.use("/api/manage", manage_1.manageRouter);

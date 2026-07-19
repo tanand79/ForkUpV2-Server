@@ -6,6 +6,7 @@ const ocr_1 = require("../lib/ocr");
 const receipts_1 = require("../lib/receipts");
 const mailer_1 = require("../lib/mailer");
 const auth_1 = require("../lib/auth");
+const s3_1 = require("../lib/s3");
 const pool_1 = require("../db/pool");
 exports.receiptsRouter = (0, express_1.Router)();
 async function notifySupporterOfReceiptReview(receiptId, action) {
@@ -54,10 +55,10 @@ async function notifySupporterOfReceiptReview(receiptId, action) {
         onlyOnce: true,
     });
 }
-function mapReceipt(row) {
+async function mapReceipt(row) {
     return {
         id: row.id,
-        imageUrl: row.uploaded_image_url,
+        imageUrl: await (0, s3_1.resolveStoredImageUrl)(row.uploaded_image_url),
         ocrStatus: row.ocr_status,
         reviewStatus: row.review_status,
         subtotal: row.subtotal != null ? Number(row.subtotal) : null,
@@ -121,7 +122,7 @@ exports.receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
             supporterId = supporterResult[0].id;
         }
         const mime = typeof imageMimeType === "string" ? imageMimeType : "image/jpeg";
-        const imageUrl = (0, receipts_1.saveReceiptImage)(imageBase64, mime);
+        const imageUrl = await (0, receipts_1.saveReceiptImage)(imageBase64, mime);
         const { rows: receiptResult } = await connection.query(`INSERT INTO receipts (
         campaign_id, method_id, business_id, location_id, supporter_id,
         uploaded_image_url, ocr_status, review_status
@@ -151,7 +152,7 @@ exports.receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
             eligibleSubtotal: ocr.eligibleSubtotal || null,
             calculatedDonation: donation,
             donationPercentage: giveback,
-            imageUrl,
+            imageUrl: await (0, s3_1.resolveStoredImageUrl)(imageUrl),
             message: ocr.notes,
         });
     }
@@ -190,7 +191,7 @@ exports.receiptsRouter.get("/campaigns/:slug/receipts", async (req, res) => {
        LEFT JOIN supporters s ON s.id = r.supporter_id
        WHERE r.campaign_id = $1${statusClause}
        ORDER BY r.uploaded_at DESC`, params);
-        res.json(rows.map(mapReceipt));
+        res.json(await Promise.all(rows.map(mapReceipt)));
     }
     catch (err) {
         console.error(err);

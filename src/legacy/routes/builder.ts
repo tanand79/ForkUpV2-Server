@@ -10,6 +10,7 @@ import {
 } from "../lib/methods";
 import { addCalendarDays, subtractCalendarDays, toDateOnlyString } from "../lib/date-only";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
+import { resolveStoredImageUrl } from "../lib/s3";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import {
   fetchApprovedLibraryItems,
@@ -514,7 +515,7 @@ builderRouter.get("/campaigns/:slug", async (req, res) => {
       campaignGoal: Number(campaign.campaign_goal ?? 0),
       startDate: formatDate(campaign.campaign_start_date),
       endDate: formatDate(campaign.campaign_end_date),
-      coverImageUrl: campaign.cover_image_url,
+      coverImageUrl: await resolveStoredImageUrl(campaign.cover_image_url),
       status: campaign.campaign_status,
       origin: originRows.length > 0 ? "business_invite" : "nonprofit",
       methods: methods.map((m) => m.method_type),

@@ -7,6 +7,7 @@ const slug_1 = require("../lib/slug");
 const methods_1 = require("../lib/methods");
 const date_only_1 = require("../lib/date-only");
 const auth_1 = require("../lib/auth");
+const s3_1 = require("../lib/s3");
 const mailer_1 = require("../lib/mailer");
 const organization_library_1 = require("../lib/organization-library");
 const pool_1 = require("../db/pool");
@@ -294,7 +295,7 @@ exports.builderRouter.get("/campaigns/:slug", async (req, res) => {
             campaignGoal: Number(campaign.campaign_goal ?? 0),
             startDate: formatDate(campaign.campaign_start_date),
             endDate: formatDate(campaign.campaign_end_date),
-            coverImageUrl: campaign.cover_image_url,
+            coverImageUrl: await (0, s3_1.resolveStoredImageUrl)(campaign.cover_image_url),
             status: campaign.campaign_status,
             origin: originRows.length > 0 ? "business_invite" : "nonprofit",
             methods: methods.map((m) => m.method_type),
