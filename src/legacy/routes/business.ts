@@ -6,6 +6,7 @@ import {
   generateInvitationToken,
 } from "../lib/invitations";
 import { bearerToken, resolveAuthUser, type AuthUser } from "../lib/auth";
+import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { METHOD_LABELS, METHOD_REQUIRES_BUSINESS } from "../lib/methods";
 import { uniqueCampaignSlug } from "../lib/slug";
 import { toDateOnlyString } from "../lib/date-only";
@@ -46,6 +47,43 @@ type CollaborationRow = InvitationRow & {
 
 function formatDate(value: string | Date | null): string | null {
   return toDateOnlyString(value);
+}
+
+/**
+ * Notifies the nonprofit contact that a business has accepted or declined its
+ * campaign invitation. Uses the mailer, which never throws into the flow.
+ */
+async function notifyNonprofitOfBusinessResponse(
+  campaignId: number,
+  businessId: number,
+  response: "accepted" | "declined",
+): Promise<void> {
+  const { rows } = await pool.query<QueryResultRow>(
+    `SELECT n.organization_name, n.contact_email, n.contact_name,
+            c.campaign_name, c.slug AS campaign_slug, b.business_name
+     FROM campaigns c
+     JOIN nonprofits n ON n.id = c.nonprofit_id
+     JOIN businesses b ON b.id = $2
+     WHERE c.id = $1`,
+    [campaignId, businessId],
+  );
+  const row = rows[0];
+  const email = typeof row?.contact_email === "string" ? row.contact_email.trim() : "";
+  if (!row || !email) return;
+  const dashUrl = `${resolveFrontendBaseUrl()}/?step=business-invite-flow&campaign=${row.campaign_slug}`;
+  await sendEmail({
+    to: email,
+    name: typeof row.contact_name === "string" ? row.contact_name : null,
+    subject: `${row.business_name} ${response} your ForkUp campaign invitation`,
+    body:
+      `Hi ${row.organization_name},\n\n` +
+      `${row.business_name} has ${response} your invitation to participate in "${row.campaign_name}".\n\n` +
+      `View your campaign partners here:\n${dashUrl}\n\n` +
+      `— ForkUp`,
+    emailType: `business_invite_${response}`,
+    campaignId,
+    stakeholderRole: "nonprofit",
+  });
 }
 
 function mapInvitation(row: InvitationRow) {
@@ -528,6 +566,8 @@ businessRouter.post("/invitations/:token/accept", async (req, res) => {
     await evaluateCampaignInvitationPhase(connection, campaignId);
     await connection.query("COMMIT");
 
+    await notifyNonprofitOfBusinessResponse(campaignId, access.businessId, "accepted");
+
     res.json({ success: true, acceptanceStatus: "accepted" });
   } catch (err) {
     await connection.query("ROLLBACK");
@@ -577,6 +617,8 @@ businessRouter.post("/invitations/:token/decline", async (req, res) => {
 
     await evaluateCampaignInvitationPhase(connection, campaignId);
     await connection.query("COMMIT");
+
+    await notifyNonprofitOfBusinessResponse(campaignId, access.businessId, "declined");
 
     res.json({ success: true, acceptanceStatus: "declined" });
   } catch (err) {
@@ -820,9 +862,32 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
 
     await connection.query("COMMIT");
 
+    const acceptPath = `/?step=nonprofit-accepts-invite&token=${token}`;
+    const nonprofitEmail =
+      typeof nonprofit.contact_email === "string" ? nonprofit.contact_email.trim() : "";
+    if (nonprofitEmail) {
+      const acceptUrl = `${resolveFrontendBaseUrl()}${acceptPath}`;
+      await sendEmail({
+        to: nonprofitEmail,
+        name: typeof nonprofit.contact_name === "string" ? nonprofit.contact_name : null,
+        subject: `${business.business_name} invited ${nonprofit.organization_name} to a ForkUp campaign`,
+        body:
+          `Hi ${nonprofit.organization_name},\n\n` +
+          `${business.business_name} would like to run a ${methodLabel} campaign with you on ForkUp` +
+          `${giveback ? ` (giveback: ${giveback}%)` : ""}.\n\n` +
+          (body.message?.trim() ? `Message from ${business.business_name}:\n${body.message.trim()}\n\n` : "") +
+          `Review and respond to the invitation here:\n${acceptUrl}\n\n` +
+          `— ForkUp`,
+        emailType: "nonprofit_campaign_invitation",
+        campaignId,
+        stakeholderRole: "nonprofit",
+        relatedToken: token,
+      });
+    }
+
     res.status(201).json({
       token,
-      acceptPath: `/?step=nonprofit-accepts-invite&token=${token}`,
+      acceptPath,
       campaignSlug: slug,
       campaignName,
     });

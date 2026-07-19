@@ -21,6 +21,26 @@ async function columnExists(table: string, column: string): Promise<boolean> {
 const PROFILE_ALTERATIONS: { table: string; column: string; ddl: string }[] = [
   {
     table: "nonprofits",
+    column: "ein",
+    ddl: "ALTER TABLE nonprofits ADD COLUMN ein VARCHAR(20)",
+  },
+  {
+    table: "nonprofits",
+    column: "city",
+    ddl: "ALTER TABLE nonprofits ADD COLUMN city VARCHAR(100)",
+  },
+  {
+    table: "nonprofits",
+    column: "state",
+    ddl: "ALTER TABLE nonprofits ADD COLUMN state VARCHAR(50)",
+  },
+  {
+    table: "nonprofits",
+    column: "zip",
+    ddl: "ALTER TABLE nonprofits ADD COLUMN zip VARCHAR(20)",
+  },
+  {
+    table: "nonprofits",
     column: "facebook_url",
     ddl: "ALTER TABLE nonprofits ADD COLUMN facebook_url VARCHAR(512)",
   },

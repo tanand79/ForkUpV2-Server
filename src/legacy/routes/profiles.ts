@@ -1,6 +1,8 @@
 import { Router } from "express";
 import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
+import { bearerToken, resolveAuthUser } from "../lib/auth";
+import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 
 export const profilesRouter = Router();
 
@@ -14,6 +16,10 @@ type NonprofitRow = QueryResultRow & {
   contact_email: string | null;
   contact_phone: string | null;
   cause_category: string | null;
+  ein: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
   verification_status: string;
   claim_status: string;
   profile_status: string | null;
@@ -37,6 +43,10 @@ function mapNonprofit(row: NonprofitRow) {
     contactEmail: row.contact_email,
     contactPhone: row.contact_phone,
     causeCategory: row.cause_category,
+    ein: row.ein ?? null,
+    city: row.city ?? null,
+    state: row.state ?? null,
+    zip: row.zip ?? null,
     verificationStatus: row.verification_status,
     claimStatus: row.claim_status,
     profileStatus: row.profile_status ?? "preloaded",
@@ -84,6 +94,7 @@ profilesRouter.get("/nonprofits/readiness", async (req, res) => {
 
     let state: "complete" | "needs_review" | "preloaded_unclaimed" | "not_found";
     if (isPreloadedUnclaimed) state = "preloaded_unclaimed";
+    else if (np.verification_status === "needs_review") state = "needs_review";
     else if (missingFields.length > 0) state = "needs_review";
     else state = "complete";
 
@@ -121,6 +132,209 @@ function normalizeWebsiteDomain(raw: string): string {
       .replace(/^www\./, "")
       .split("/")[0] ?? "";
   }
+}
+
+/** Extract the domain portion of an email address (lowercased). */
+function emailDomain(email: string | null | undefined): string {
+  if (!email || !email.includes("@")) return "";
+  return email.split("@")[1]?.trim().toLowerCase() ?? "";
+}
+
+/** Extract a normalized domain from a stored website value. */
+function websiteDomain(website: string | null | undefined): string {
+  if (!website) return "";
+  return normalizeWebsiteDomain(website);
+}
+
+type MatchStrength = "strong" | "partial" | "weak";
+
+/** Reduce an EIN to digits only for tolerant comparison (e.g. "12-3456789"). */
+function normalizeEin(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return raw.replace(/\D/g, "");
+}
+
+type SearchTerms = { q: string; domain: string; ein: string; location: string };
+
+/**
+ * Score how confidently a nonprofit row matches the user's query terms.
+ * Any single strong signal (exact name/slug, exact domain, exact EIN) wins.
+ */
+function computeMatchStrength(row: NonprofitRow, terms: SearchTerms): MatchStrength {
+  const name = (row.organization_name ?? "").toLowerCase().trim();
+  const slug = (row.slug ?? "").toLowerCase().trim();
+  const rowDomain = websiteDomain(row.website);
+  const rowEin = normalizeEin(row.ein);
+  const qn = terms.q.toLowerCase().trim();
+  const loc = terms.location.toLowerCase().trim();
+  const rowLocation = [row.city, row.state, row.zip]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  // Strong signals
+  if (terms.ein && rowEin && rowEin === terms.ein) return "strong";
+  if (qn && (name === qn || slug === qn)) return "strong";
+  if (terms.domain && rowDomain && rowDomain === terms.domain) return "strong";
+
+  // Partial signals
+  if (qn && (name.includes(qn) || qn.includes(name) || slug.includes(qn))) return "partial";
+  if (terms.domain && rowDomain && (rowDomain.includes(terms.domain) || terms.domain.includes(rowDomain)))
+    return "partial";
+  if (terms.domain && slug.includes(terms.domain.split(".")[0] ?? "")) return "partial";
+  if (loc && rowLocation && (rowLocation.includes(loc) || loc.includes(rowLocation))) return "partial";
+
+  // Weak signals
+  if (qn) {
+    const tokens = qn.split(/\s+/).filter((t) => t.length > 2);
+    if (tokens.some((t) => name.includes(t))) return "weak";
+  }
+  if (loc && rowLocation) {
+    const locTokens = loc.split(/\s+/).filter((t) => t.length > 1);
+    if (locTokens.some((t) => rowLocation.includes(t))) return "weak";
+  }
+  return "weak";
+}
+
+const STRENGTH_RANK: Record<MatchStrength, number> = { strong: 0, partial: 1, weak: 2 };
+
+/**
+ * Data-backed "business website" check: does this domain belong to a known
+ * business? Used to warn a user who enters a business site while claiming a
+ * nonprofit. Returns the matching business summary or null.
+ */
+async function findBusinessByDomain(domain: string) {
+  if (!domain) return null;
+  const { rows } = await pool.query<QueryResultRow>(
+    `SELECT id, business_name, slug FROM businesses
+     WHERE website IS NOT NULL AND LOWER(website) LIKE $1
+     ORDER BY business_name LIMIT 1`,
+    [`%${domain}%`],
+  );
+  const row = rows[0];
+  return row
+    ? { id: Number(row.id), businessName: String(row.business_name), slug: String(row.slug) }
+    : null;
+}
+
+/**
+ * Best-effort internal alert to FORKUP_ADMIN_EMAIL when a medium/high-risk
+ * request lands. sendEmail never throws, so this cannot break the claim flow.
+ */
+async function notifyAdminOfAccessRequest(params: {
+  organizationType: "nonprofit" | "business";
+  organizationId: number | null;
+  organizationName: string;
+  requestType: "claim" | "access";
+  riskLevel: "low" | "medium" | "high";
+  requesterName: string | null;
+  requesterEmail: string | null;
+  riskReason: string | null;
+}): Promise<void> {
+  const adminEmail = process.env.FORKUP_ADMIN_EMAIL?.trim();
+  if (!adminEmail) return;
+  const baseUrl = resolveFrontendBaseUrl();
+  await sendEmail({
+    to: adminEmail,
+    subject: `[Internal] ${params.riskLevel.toUpperCase()} ${params.requestType} request — ${params.organizationName}`,
+    body:
+      `A new ${params.riskLevel}-risk ${params.requestType} request needs review.\n\n` +
+      `Organization: ${params.organizationName} (${params.organizationType}` +
+      `${params.organizationId ? ` #${params.organizationId}` : ""})\n` +
+      `Requester: ${params.requesterName ?? "—"} <${params.requesterEmail ?? "—"}>\n` +
+      `Reason: ${params.riskReason ?? "—"}\n\n` +
+      `Review it in the ForkUp Trust & Verification Queue: ${baseUrl}\n`,
+    emailType: "trust_request_internal",
+    stakeholderRole: "admin",
+  });
+}
+
+/** Record an access/claim request for later ForkUp-admin review. */
+async function logNonprofitAccessRequest(params: {
+  organizationId: number | null;
+  organizationName: string;
+  requestType: "claim" | "access";
+  riskLevel: "low" | "medium" | "high";
+  status: "pending" | "approved" | "denied";
+  requestedByUserId: number | null;
+  requesterName: string | null;
+  requesterEmail: string | null;
+  relationship: string | null;
+  riskReason: string | null;
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO organization_access_requests (
+      organization_type, organization_id, organization_name, request_type,
+      risk_level, status, requested_by_user_id, requester_name, requester_email,
+      relationship, risk_reason
+    ) VALUES ('nonprofit', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      params.organizationId,
+      params.organizationName,
+      params.requestType,
+      params.riskLevel,
+      params.status,
+      params.requestedByUserId,
+      params.requesterName,
+      params.requesterEmail,
+      params.relationship,
+      params.riskReason,
+    ],
+  );
+  await notifyAdminOfAccessRequest({
+    organizationType: "nonprofit",
+    organizationId: params.organizationId,
+    organizationName: params.organizationName,
+    requestType: params.requestType,
+    riskLevel: params.riskLevel,
+    requesterName: params.requesterName,
+    requesterEmail: params.requesterEmail,
+    riskReason: params.riskReason,
+  });
+}
+
+/** Record a business access/claim request for later ForkUp-admin review. */
+async function logBusinessAccessRequest(params: {
+  organizationId: number | null;
+  organizationName: string;
+  requestType: "claim" | "access";
+  riskLevel: "low" | "medium" | "high";
+  status: "pending" | "approved" | "denied";
+  requestedByUserId: number | null;
+  requesterName: string | null;
+  requesterEmail: string | null;
+  relationship: string | null;
+  riskReason: string | null;
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO organization_access_requests (
+      organization_type, organization_id, organization_name, request_type,
+      risk_level, status, requested_by_user_id, requester_name, requester_email,
+      relationship, risk_reason
+    ) VALUES ('business', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [
+      params.organizationId,
+      params.organizationName,
+      params.requestType,
+      params.riskLevel,
+      params.status,
+      params.requestedByUserId,
+      params.requesterName,
+      params.requesterEmail,
+      params.relationship,
+      params.riskReason,
+    ],
+  );
+  await notifyAdminOfAccessRequest({
+    organizationType: "business",
+    organizationId: params.organizationId,
+    organizationName: params.organizationName,
+    requestType: params.requestType,
+    riskLevel: params.riskLevel,
+    requesterName: params.requesterName,
+    requesterEmail: params.requesterEmail,
+    riskReason: params.riskReason,
+  });
 }
 
 /**
@@ -198,6 +412,86 @@ profilesRouter.get("/nonprofits", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch nonprofits" });
+  }
+});
+
+/**
+ * Unified "Find your organization" search by name and/or website.
+ * Returns candidates each annotated with a match strength (strong/partial/weak),
+ * sorted strongest-first, plus an optional business-website warning.
+ */
+profilesRouter.get("/nonprofits/search", async (req, res) => {
+  try {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const website = typeof req.query.website === "string" ? req.query.website.trim() : "";
+    const einRaw = typeof req.query.ein === "string" ? req.query.ein.trim() : "";
+    const location = typeof req.query.location === "string" ? req.query.location.trim() : "";
+
+    if (!q && !website && !einRaw && !location) {
+      res.status(400).json({ error: "q, website, ein, or location is required" });
+      return;
+    }
+
+    const domain = website ? normalizeWebsiteDomain(website) : "";
+    const ein = normalizeEin(einRaw);
+    const clauses: string[] = [];
+    const params: string[] = [];
+
+    if (q) {
+      const like = `%${q}%`;
+      params.push(like, like, like);
+      clauses.push(
+        `(organization_name ILIKE $${params.length - 2} OR slug ILIKE $${params.length - 1} OR contact_email ILIKE $${params.length})`,
+      );
+    }
+    if (domain) {
+      params.push(`%${domain}%`);
+      clauses.push(`LOWER(website) LIKE $${params.length}`);
+      params.push(`%${domain.split(".")[0] ?? ""}%`);
+      clauses.push(`LOWER(slug) LIKE $${params.length}`);
+    }
+    if (ein) {
+      params.push(`%${ein}%`);
+      clauses.push(`REGEXP_REPLACE(COALESCE(ein, ''), '\\D', '', 'g') LIKE $${params.length}`);
+    }
+    if (location) {
+      const locLike = `%${location}%`;
+      params.push(locLike, locLike, locLike);
+      clauses.push(
+        `(city ILIKE $${params.length - 2} OR state ILIKE $${params.length - 1} OR zip ILIKE $${params.length})`,
+      );
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" OR ")}` : "WHERE 1=1";
+    const { rows: rows } = await pool.query<NonprofitRow>(
+      `SELECT * FROM nonprofits ${where} ORDER BY organization_name LIMIT 25`,
+      params,
+    );
+
+    const terms: SearchTerms = { q, domain, ein, location };
+    const candidates = rows
+      .map((row) => ({
+        ...mapNonprofit(row),
+        matchStrength: computeMatchStrength(row, terms),
+      }))
+      .sort((a, b) => STRENGTH_RANK[a.matchStrength] - STRENGTH_RANK[b.matchStrength]);
+
+    const businessWarning = domain ? await findBusinessByDomain(domain) : null;
+
+    res.json({
+      query: q,
+      website,
+      ein: einRaw,
+      location,
+      normalizedDomain: domain || null,
+      matchCount: candidates.length,
+      candidates,
+      businessWarning,
+      requiresConfirmation: true,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to search organizations" });
   }
 });
 
@@ -304,6 +598,246 @@ profilesRouter.post("/nonprofits/claim", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to claim or create nonprofit profile" });
+  }
+});
+
+/**
+ * Trust-gated claim / request-access for nonprofits.
+ *
+ * Trust levels:
+ *  - low     -> auto-ready: claim proceeds normally.
+ *  - medium  -> profile saved but flagged verification_status='needs_review'
+ *               (launch/settlement gating is enforced downstream); logged for review.
+ *  - high    -> org already claimed by another user: NOT modified; an access
+ *               request is recorded for ForkUp-admin review.
+ *
+ * This is additive and separate from POST /nonprofits/claim (unchanged).
+ */
+profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
+  try {
+    const body = req.body as {
+      organizationName?: string;
+      contactName?: string;
+      contactEmail?: string;
+      mission?: string;
+      causeCategory?: string;
+      website?: string;
+      existingSlug?: string;
+      relationship?: string;
+      ein?: string;
+      city?: string;
+      state?: string;
+      zip?: string;
+    };
+
+    if (!body.organizationName?.trim()) {
+      res.status(400).json({ error: "Organization name is required" });
+      return;
+    }
+    if (!body.contactEmail?.includes("@")) {
+      res.status(400).json({ error: "Valid contact email is required" });
+      return;
+    }
+
+    const authUser = await resolveAuthUser(bearerToken(req));
+    const requestedByUserId = authUser?.id ?? null;
+
+    const email = body.contactEmail.trim().toLowerCase();
+    const requesterEmailDomain = emailDomain(email);
+    const providedDomain = websiteDomain(body.website);
+    const relationship = body.relationship?.trim() || null;
+    const requesterName = body.contactName?.trim() || null;
+    const ein = body.ein?.trim() || null;
+    const city = body.city?.trim() || null;
+    const stateValue = body.state?.trim() || null;
+    const zip = body.zip?.trim() || null;
+
+    const businessWarning = providedDomain ? await findBusinessByDomain(providedDomain) : null;
+
+    type ClaimRow = NonprofitRow & { claimed_by_user_id: number | null };
+
+    // --- Claiming an existing organization ---
+    if (body.existingSlug?.trim()) {
+      const { rows: existing } = await pool.query<ClaimRow>(
+        "SELECT * FROM nonprofits WHERE slug = $1 LIMIT 1",
+        [body.existingSlug.trim()],
+      );
+      if (existing.length === 0) {
+        res.status(404).json({ error: "Organization not found" });
+        return;
+      }
+      const org = existing[0];
+      const alreadyClaimedByOther =
+        org.claim_status === "claimed" &&
+        org.claimed_by_user_id != null &&
+        org.claimed_by_user_id !== requestedByUserId;
+
+      // HIGH risk: already claimed by someone else -> do not modify, queue review.
+      if (alreadyClaimedByOther) {
+        await logNonprofitAccessRequest({
+          organizationId: org.id,
+          organizationName: org.organization_name,
+          requestType: "access",
+          riskLevel: "high",
+          status: "pending",
+          requestedByUserId,
+          requesterName,
+          requesterEmail: email,
+          relationship,
+          riskReason: "Organization already claimed by another user",
+        });
+        res.status(202).json({
+          action: "access_requested",
+          riskLevel: "high",
+          nonprofit: mapNonprofit(org),
+          businessWarning,
+          message:
+            "This organization is already claimed. Your access request has been submitted for ForkUp review.",
+        });
+        return;
+      }
+
+      const orgDomain = websiteDomain(org.website) || providedDomain;
+      const domainMatch =
+        Boolean(requesterEmailDomain) && Boolean(orgDomain) && requesterEmailDomain === orgDomain;
+      const riskLevel: "low" | "medium" = domainMatch ? "low" : "medium";
+
+      await pool.query(
+        `UPDATE nonprofits SET
+          organization_name = $1,
+          contact_name = COALESCE($2, contact_name),
+          contact_email = $3,
+          mission = COALESCE($4, mission),
+          cause_category = COALESCE($5, cause_category),
+          website = COALESCE($6, website),
+          ein = COALESCE($7, ein),
+          city = COALESCE($8, city),
+          state = COALESCE($9, state),
+          zip = COALESCE($10, zip),
+          claim_status = 'claimed',
+          profile_status = 'claimed',
+          verification_status = CASE WHEN $11 = 'medium' THEN 'needs_review' ELSE verification_status END,
+          claimed_by_user_id = COALESCE($12, claimed_by_user_id),
+          claim_date = COALESCE(claim_date, NOW()),
+          updated_at = NOW()
+         WHERE id = $13`,
+        [
+          body.organizationName.trim(),
+          requesterName,
+          email,
+          body.mission ?? null,
+          body.causeCategory ?? null,
+          body.website ?? null,
+          ein,
+          city,
+          stateValue,
+          zip,
+          riskLevel,
+          requestedByUserId,
+          org.id,
+        ],
+      );
+
+      if (riskLevel === "medium") {
+        await logNonprofitAccessRequest({
+          organizationId: org.id,
+          organizationName: body.organizationName.trim(),
+          requestType: "claim",
+          riskLevel: "medium",
+          status: "pending",
+          requestedByUserId,
+          requesterName,
+          requesterEmail: email,
+          relationship,
+          riskReason: "Contact email domain does not match organization website",
+        });
+      }
+
+      const { rows: updated } = await pool.query<NonprofitRow>(
+        "SELECT * FROM nonprofits WHERE id = $1",
+        [org.id],
+      );
+      res.json({
+        action: riskLevel === "medium" ? "claimed_pending_verification" : "claimed",
+        riskLevel,
+        nonprofit: mapNonprofit(updated[0]),
+        businessWarning,
+      });
+      return;
+    }
+
+    // --- Creating a new organization ---
+    const slug = slugify(body.organizationName);
+    const { rows: slugTaken } = await pool.query<ClaimRow>(
+      "SELECT * FROM nonprofits WHERE slug = $1 OR contact_email = $2 LIMIT 1",
+      [slug, email],
+    );
+    if (slugTaken.length > 0) {
+      // An org with this slug/email already exists — treat as an existing-org claim
+      // to avoid unique-constraint errors. Re-route through the existing-slug branch.
+      res.status(409).json({
+        error: "An organization with this name or email already exists",
+        existingSlug: slugTaken[0].slug,
+      });
+      return;
+    }
+
+    const domainMatch =
+      Boolean(requesterEmailDomain) && Boolean(providedDomain) && requesterEmailDomain === providedDomain;
+    const riskLevel: "low" | "medium" = domainMatch ? "low" : "medium";
+
+    const { rows: result } = await pool.query<{ id: number }>(
+      `INSERT INTO nonprofits (
+        organization_name, slug, mission, cause_category, website,
+        ein, city, state, zip,
+        contact_name, contact_email, verification_status, claim_status, profile_status,
+        claimed_by_user_id, claim_date
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'claimed', 'claimed', $13, NOW()) RETURNING id`,
+      [
+        body.organizationName.trim(),
+        slug,
+        body.mission ?? null,
+        body.causeCategory ?? null,
+        body.website ?? null,
+        ein,
+        city,
+        stateValue,
+        zip,
+        requesterName ?? body.organizationName.trim(),
+        email,
+        riskLevel === "medium" ? "needs_review" : "unclaimed",
+        requestedByUserId,
+      ],
+    );
+
+    if (riskLevel === "medium") {
+      await logNonprofitAccessRequest({
+        organizationId: result[0].id,
+        organizationName: body.organizationName.trim(),
+        requestType: "claim",
+        riskLevel: "medium",
+        status: "pending",
+        requestedByUserId,
+        requesterName,
+        requesterEmail: email,
+        relationship,
+        riskReason: "New organization created with a non-matching or missing website domain",
+      });
+    }
+
+    const { rows: created } = await pool.query<NonprofitRow>(
+      "SELECT * FROM nonprofits WHERE id = $1",
+      [result[0].id],
+    );
+    res.status(201).json({
+      action: riskLevel === "medium" ? "created_pending_verification" : "created",
+      riskLevel,
+      nonprofit: mapNonprofit(created[0]),
+      businessWarning,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to process claim or access request" });
   }
 });
 
@@ -595,6 +1129,261 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to claim or create business profile" });
+  }
+});
+
+/**
+ * Trust-gated claim / request-access for businesses — the symmetric counterpart
+ * of POST /nonprofits/claim-request.
+ *
+ * Trust levels:
+ *  - low     -> auto-ready: claim proceeds normally.
+ *  - medium  -> profile saved but flagged claim_status='needs_review'; logged
+ *               for ForkUp-admin review (businesses have no separate
+ *               verification_status, so claim_status carries the review flag).
+ *  - high    -> business already claimed by another user: NOT modified; an
+ *               access request is recorded for ForkUp-admin review.
+ *
+ * This is additive and separate from POST /businesses/claim (unchanged).
+ */
+profilesRouter.post("/businesses/claim-request", async (req, res) => {
+  try {
+    const body = req.body as {
+      businessName?: string;
+      contactName?: string;
+      contactEmail?: string;
+      businessType?: string;
+      website?: string;
+      existingSlug?: string;
+      relationship?: string;
+      locationName?: string;
+      city?: string;
+      state?: string;
+      supportsDineAndDonate?: boolean;
+      supportsShopAndDonate?: boolean;
+      supportsServiceGiveback?: boolean;
+      supportsGuestBartending?: boolean;
+    };
+
+    if (!body.businessName?.trim()) {
+      res.status(400).json({ error: "Business name is required" });
+      return;
+    }
+    if (!body.contactEmail?.includes("@")) {
+      res.status(400).json({ error: "Valid contact email is required" });
+      return;
+    }
+
+    const authUser = await resolveAuthUser(bearerToken(req));
+    const requestedByUserId = authUser?.id ?? null;
+
+    const email = body.contactEmail.trim().toLowerCase();
+    const requesterEmailDomain = emailDomain(email);
+    const providedDomain = websiteDomain(body.website);
+    const relationship = body.relationship?.trim() || null;
+    const requesterName = body.contactName?.trim() || null;
+    const slug = body.existingSlug?.trim() || slugify(body.businessName);
+
+    type ClaimBusinessRow = BusinessRow & { claimed_by_user_id: number | null };
+
+    const { rows: existing } = await pool.query<ClaimBusinessRow>(
+      "SELECT * FROM businesses WHERE slug = $1 OR contact_email = $2 LIMIT 1",
+      [slug, email],
+    );
+
+    // --- Claiming / updating an existing business ---
+    if (existing.length > 0) {
+      const biz = existing[0];
+      const alreadyClaimedByOther =
+        biz.claim_status === "claimed" &&
+        biz.claimed_by_user_id != null &&
+        biz.claimed_by_user_id !== requestedByUserId;
+
+      // HIGH risk: already claimed by someone else -> do not modify, queue review.
+      if (alreadyClaimedByOther) {
+        await logBusinessAccessRequest({
+          organizationId: biz.id,
+          organizationName: biz.business_name,
+          requestType: "access",
+          riskLevel: "high",
+          status: "pending",
+          requestedByUserId,
+          requesterName,
+          requesterEmail: email,
+          relationship,
+          riskReason: "Business already claimed by another user",
+        });
+        const { rows: locations } = await pool.query<QueryResultRow>(
+          "SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name",
+          [biz.id],
+        );
+        res.status(202).json({
+          action: "access_requested",
+          riskLevel: "high",
+          business: mapBusiness(biz, locations),
+          message:
+            "This business is already claimed. Your access request has been submitted for ForkUp review.",
+        });
+        return;
+      }
+
+      const orgDomain = websiteDomain(biz.website) || providedDomain;
+      const domainMatch =
+        Boolean(requesterEmailDomain) && Boolean(orgDomain) && requesterEmailDomain === orgDomain;
+      const riskLevel: "low" | "medium" = domainMatch ? "low" : "medium";
+
+      await pool.query(
+        `UPDATE businesses SET
+          business_name = $1,
+          contact_name = COALESCE($2, contact_name),
+          contact_email = $3,
+          business_type = COALESCE($4, business_type),
+          website = COALESCE($5, website),
+          supports_dine_and_donate = COALESCE($6, supports_dine_and_donate),
+          supports_shop_and_donate = COALESCE($7, supports_shop_and_donate),
+          supports_service_giveback = COALESCE($8, supports_service_giveback),
+          supports_guest_bartending = COALESCE($9, supports_guest_bartending),
+          claim_status = CASE WHEN $10 = 'medium' THEN 'needs_review' ELSE 'claimed' END,
+          business_status = 'active',
+          profile_status = 'claimed',
+          claimed_by_user_id = COALESCE($11, claimed_by_user_id),
+          claim_date = COALESCE(claim_date, NOW()),
+          updated_at = NOW()
+         WHERE id = $12`,
+        [
+          body.businessName.trim(),
+          requesterName,
+          email,
+          body.businessType ?? null,
+          body.website ?? null,
+          body.supportsDineAndDonate ? true : biz.supports_dine_and_donate,
+          body.supportsShopAndDonate ? true : biz.supports_shop_and_donate,
+          body.supportsServiceGiveback ? true : biz.supports_service_giveback,
+          body.supportsGuestBartending ? true : biz.supports_guest_bartending,
+          riskLevel,
+          requestedByUserId,
+          biz.id,
+        ],
+      );
+
+      const { rows: locCount } = await pool.query<QueryResultRow>(
+        "SELECT COUNT(*) AS c FROM business_locations WHERE business_id = $1",
+        [biz.id],
+      );
+      if (Number(locCount[0]?.c ?? 0) === 0) {
+        await pool.query(
+          `INSERT INTO business_locations (business_id, location_name, city, state)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            biz.id,
+            body.locationName?.trim() || "Main Location",
+            body.city?.trim() || "TBD",
+            body.state?.trim() || "TBD",
+          ],
+        );
+      }
+
+      if (riskLevel === "medium") {
+        await logBusinessAccessRequest({
+          organizationId: biz.id,
+          organizationName: body.businessName.trim(),
+          requestType: "claim",
+          riskLevel: "medium",
+          status: "pending",
+          requestedByUserId,
+          requesterName,
+          requesterEmail: email,
+          relationship,
+          riskReason: "Contact email domain does not match business website",
+        });
+      }
+
+      const { rows: updated } = await pool.query<BusinessRow>(
+        "SELECT * FROM businesses WHERE id = $1",
+        [biz.id],
+      );
+      const { rows: locations } = await pool.query<QueryResultRow>(
+        "SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name",
+        [biz.id],
+      );
+      res.json({
+        action: riskLevel === "medium" ? "claimed_pending_verification" : "claimed",
+        riskLevel,
+        business: mapBusiness(updated[0], locations),
+      });
+      return;
+    }
+
+    // --- Creating a new business ---
+    const domainMatch =
+      Boolean(requesterEmailDomain) && Boolean(providedDomain) && requesterEmailDomain === providedDomain;
+    const riskLevel: "low" | "medium" = domainMatch ? "low" : "medium";
+
+    const { rows: result } = await pool.query<{ id: number }>(
+      `INSERT INTO businesses (
+        business_name, slug, business_type, website, contact_name, contact_email,
+        business_status, claim_status, profile_status, claimed_by_user_id, claim_date,
+        supports_dine_and_donate, supports_shop_and_donate,
+        supports_service_giveback, supports_guest_bartending
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 'claimed', $8, NOW(), $9, $10, $11, $12) RETURNING id`,
+      [
+        body.businessName.trim(),
+        slug,
+        body.businessType ?? null,
+        body.website ?? null,
+        requesterName ?? body.businessName.trim(),
+        email,
+        riskLevel === "medium" ? "needs_review" : "claimed",
+        requestedByUserId,
+        Boolean(body.supportsDineAndDonate),
+        Boolean(body.supportsShopAndDonate),
+        Boolean(body.supportsServiceGiveback),
+        Boolean(body.supportsGuestBartending),
+      ],
+    );
+
+    await pool.query(
+      `INSERT INTO business_locations (business_id, location_name, city, state)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        result[0].id,
+        body.locationName?.trim() || "Main Location",
+        body.city?.trim() || "TBD",
+        body.state?.trim() || "TBD",
+      ],
+    );
+
+    if (riskLevel === "medium") {
+      await logBusinessAccessRequest({
+        organizationId: result[0].id,
+        organizationName: body.businessName.trim(),
+        requestType: "claim",
+        riskLevel: "medium",
+        status: "pending",
+        requestedByUserId,
+        requesterName,
+        requesterEmail: email,
+        relationship,
+        riskReason: "New business created with a non-matching or missing website domain",
+      });
+    }
+
+    const { rows: created } = await pool.query<BusinessRow>(
+      "SELECT * FROM businesses WHERE id = $1",
+      [result[0].id],
+    );
+    const { rows: locations } = await pool.query<QueryResultRow>(
+      "SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name",
+      [result[0].id],
+    );
+    res.status(201).json({
+      action: riskLevel === "medium" ? "created_pending_verification" : "created",
+      riskLevel,
+      business: mapBusiness(created[0], locations),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to process business claim or access request" });
   }
 });
 

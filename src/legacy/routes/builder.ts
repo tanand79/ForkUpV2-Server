@@ -8,10 +8,59 @@ import {
   METHOD_REQUIRES_BUSINESS,
   requiresAnyBusiness,
 } from "../lib/methods";
-import { subtractCalendarDays, toDateOnlyString } from "../lib/date-only";
+import { addCalendarDays, subtractCalendarDays, toDateOnlyString } from "../lib/date-only";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
+import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
+import {
+  fetchApprovedLibraryItems,
+  pickLaunchSnippet,
+  pickImpactSnippet,
+} from "../lib/organization-library";
 import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
+
+type InviteEmailRow = QueryResultRow & {
+  token: string;
+  business_name: string;
+  location_name: string;
+  acceptance_status: string;
+  contact_email: string | null;
+};
+
+/**
+ * Emails each newly invited business its acceptance link. Only targets rows in
+ * the 'invited' state and is idempotent per token (onlyOnce), so re-launching a
+ * campaign will not re-send. Failures are swallowed by the mailer.
+ */
+async function sendBusinessInviteEmails(
+  rows: InviteEmailRow[],
+  campaignId: number,
+  campaignName: string,
+): Promise<void> {
+  const base = resolveFrontendBaseUrl();
+  for (const row of rows) {
+    if (row.acceptance_status !== "invited") continue;
+    const email = typeof row.contact_email === "string" ? row.contact_email.trim() : "";
+    if (!email) continue;
+    const acceptUrl = `${base}/?step=business-acceptance&token=${row.token}`;
+    await sendEmail({
+      to: email,
+      name: row.business_name,
+      subject: `${row.business_name}, you're invited to support "${campaignName}" on ForkUp`,
+      body:
+        `Hi ${row.business_name},\n\n` +
+        `You've been invited to participate in the ForkUp campaign "${campaignName}"` +
+        `${row.location_name ? ` (${row.location_name})` : ""}.\n\n` +
+        `Review the campaign terms and accept or decline here:\n${acceptUrl}\n\n` +
+        `— ForkUp`,
+      emailType: "business_campaign_invitation",
+      campaignId,
+      stakeholderRole: "business",
+      relatedToken: row.token,
+      onlyOnce: true,
+    });
+  }
+}
 
 export const builderRouter = Router();
 
@@ -66,12 +115,62 @@ function formatDate(value: string | Date | null | undefined): string | null {
   return toDateOnlyString(value);
 }
 
+type SuccessDraftAction = {
+  action_type: string;
+  title: string;
+  content: string;
+  scheduled_date: string;
+};
+
+/** Midpoint calendar date between two YYYY-MM-DD strings (rounded down). */
+function midpointDate(startDate: string, endDate: string): string {
+  const start = toDateOnlyString(startDate);
+  const end = toDateOnlyString(endDate);
+  if (!start || !end) return startDate;
+  const startMs = new Date(`${start}T00:00:00`).getTime();
+  const endMs = new Date(`${end}T00:00:00`).getTime();
+  const spanDays = Math.max(0, Math.round((endMs - startMs) / 86_400_000));
+  return addCalendarDays(start, Math.floor(spanDays / 2));
+}
+
+/**
+ * Extra reminders that ship pre-flagged for automated sending. These are appended
+ * alongside (never replacing) the existing launch/one-week/final-push actions.
+ */
+function buildAutomatedReminders(
+  startDate: string,
+  endDate: string,
+  impactSnippet: string | null,
+): SuccessDraftAction[] {
+  const start = toDateOnlyString(startDate);
+  const end = toDateOnlyString(endDate);
+  if (!start || !end) return [];
+  return [
+    {
+      action_type: "mid_campaign_reminder",
+      title: "Mid-Campaign Reminder",
+      content: `We're halfway there — remind supporters to visit participating businesses and upload their receipts.${
+        impactSnippet ? `\n\n${impactSnippet}` : ""
+      }`,
+      scheduled_date: midpointDate(start, end),
+    },
+    {
+      action_type: "receipt_reminder",
+      title: "Receipt Upload Reminder",
+      content:
+        "The campaign has wrapped up — remind supporters to upload any remaining receipts so their visits count toward the goal.",
+      scheduled_date: addCalendarDays(end, 2),
+    },
+  ];
+}
+
 async function insertSuccessEngineDraft(
   connection: PoolClient,
   campaignId: number,
   campaignName: string,
   startDate: string,
   endDate: string,
+  nonprofitId?: number,
 ) {
   const { rows: existing } = await connection.query<QueryResultRow>(
     "SELECT id FROM success_engine_actions WHERE campaign_id = $1 LIMIT 1",
@@ -79,7 +178,14 @@ async function insertSuccessEngineDraft(
   );
   if (existing.length > 0) return;
 
-  const launchContent = `Your campaign "${campaignName}" is live. Share it with supporters and encourage them to participate at your confirmed businesses.`;
+  const approvedItems = nonprofitId
+    ? await fetchApprovedLibraryItems("nonprofit", nonprofitId)
+    : [];
+  const snippet = nonprofitId ? pickLaunchSnippet(approvedItems) : null;
+  const impactSnippet = nonprofitId ? pickImpactSnippet(approvedItems) : null;
+  const launchContent = `Your campaign "${campaignName}" is live. Share it with supporters and encourage them to participate at your confirmed businesses.${
+    snippet ? `\n\n${snippet}` : ""
+  }`;
   const actions = [
     {
       action_type: "launch_email",
@@ -90,14 +196,17 @@ async function insertSuccessEngineDraft(
     {
       action_type: "one_week_reminder",
       title: "One Week Reminder",
-      content:
-        "One week left — remind supporters to visit participating businesses and upload receipts.",
+      content: `One week left — remind supporters to visit participating businesses and upload receipts.${
+        impactSnippet ? `\n\n${impactSnippet}` : ""
+      }`,
       scheduled_date: endDate,
     },
     {
       action_type: "final_push_reminder",
       title: "Final Push Reminder",
-      content: "Final days of the campaign — share progress and encourage last-minute participation.",
+      content: `Final days of the campaign — share progress and encourage last-minute participation.${
+        impactSnippet ? `\n\n${impactSnippet}` : ""
+      }`,
       scheduled_date: endDate,
     },
   ];
@@ -105,6 +214,13 @@ async function insertSuccessEngineDraft(
     await connection.query(
       `INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status)
        VALUES ($1, $2, 'email', $3, $4, $5, 'ready')`,
+      [campaignId, action.action_type, action.scheduled_date, action.title, action.content],
+    );
+  }
+  for (const action of buildAutomatedReminders(startDate, endDate, impactSnippet)) {
+    await connection.query(
+      `INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status, auto_send)
+       VALUES ($1, $2, 'email', $3, $4, $5, 'ready', TRUE)`,
       [campaignId, action.action_type, action.scheduled_date, action.title, action.content],
     );
   }
@@ -620,6 +736,7 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
         body.campaignName.trim(),
         body.startDate,
         body.endDate,
+        nonprofitId,
       );
       await maybePromoteCampaignToLive(connection, campaignId);
       const { rows: statusRows } = await connection.query<QueryResultRow>(
@@ -631,8 +748,8 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
 
     await connection.query("COMMIT");
 
-    const { rows: inviteRows } = await connection.query<QueryResultRow>(
-      `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status
+    const { rows: inviteRows } = await connection.query<InviteEmailRow>(
+      `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status, b.contact_email
        FROM campaign_business_locations cbl
        JOIN invitation_tokens it ON it.campaign_business_location_id = cbl.id
        JOIN businesses b ON b.id = cbl.business_id
@@ -640,6 +757,10 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
        WHERE cbl.campaign_id = $1`,
       [campaignId],
     );
+
+    if (body.launch) {
+      await sendBusinessInviteEmails(inviteRows, campaignId, body.campaignName ?? slug);
+    }
 
     res.json({
       slug,
@@ -891,7 +1012,12 @@ builderRouter.post("/campaigns", async (req, res) => {
       );
       campaignStatus = String(statusRows[0]?.campaign_status ?? campaignStatus) as LaunchStatus;
 
-      const launchContent = `Your campaign "${body.campaignName}" is live. Share it with supporters and encourage them to participate at your confirmed businesses.`;
+      const approvedItems = await fetchApprovedLibraryItems("nonprofit", nonprofitId);
+      const launchSnippet = pickLaunchSnippet(approvedItems);
+      const impactSnippet = pickImpactSnippet(approvedItems);
+      const launchContent = `Your campaign "${body.campaignName}" is live. Share it with supporters and encourage them to participate at your confirmed businesses.${
+        launchSnippet ? `\n\n${launchSnippet}` : ""
+      }`;
       const actions: {
         action_type: string;
         title: string;
@@ -907,14 +1033,17 @@ builderRouter.post("/campaigns", async (req, res) => {
         {
           action_type: "one_week_reminder",
           title: "One Week Reminder",
-          content:
-            "One week left — remind supporters to visit participating businesses and upload receipts.",
+          content: `One week left — remind supporters to visit participating businesses and upload receipts.${
+            impactSnippet ? `\n\n${impactSnippet}` : ""
+          }`,
           scheduled_date: body.endDate,
         },
         {
           action_type: "final_push_reminder",
           title: "Final Push Reminder",
-          content: "Final days of the campaign — share progress and encourage last-minute participation.",
+          content: `Final days of the campaign — share progress and encourage last-minute participation.${
+            impactSnippet ? `\n\n${impactSnippet}` : ""
+          }`,
           scheduled_date: body.endDate,
         },
       ];
@@ -931,12 +1060,25 @@ builderRouter.post("/campaigns", async (req, res) => {
           ],
         );
       }
+      for (const action of buildAutomatedReminders(body.startDate, body.endDate, impactSnippet)) {
+        await connection.query(
+          `INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status, auto_send)
+           VALUES ($1, $2, 'email', $3, $4, $5, 'ready', TRUE)`,
+          [
+            campaignId,
+            action.action_type,
+            action.scheduled_date,
+            action.title,
+            action.content,
+          ],
+        );
+      }
     }
 
     await connection.query("COMMIT");
 
-    const { rows: inviteRows } = await connection.query<QueryResultRow>(
-      `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status
+    const { rows: inviteRows } = await connection.query<InviteEmailRow>(
+      `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status, b.contact_email
        FROM campaign_business_locations cbl
        JOIN invitation_tokens it ON it.campaign_business_location_id = cbl.id
        JOIN businesses b ON b.id = cbl.business_id
@@ -944,6 +1086,10 @@ builderRouter.post("/campaigns", async (req, res) => {
        WHERE cbl.campaign_id = $1`,
       [campaignId],
     );
+
+    if (body.launch) {
+      await sendBusinessInviteEmails(inviteRows, campaignId, body.campaignName ?? slug);
+    }
 
     res.status(201).json({
       slug,

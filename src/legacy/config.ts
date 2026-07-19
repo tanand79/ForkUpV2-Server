@@ -79,4 +79,8 @@ export const config = {
     return url;
   },
   corsOrigin: resolveCorsOrigins(),
+  /** Optional shared secret gating the automated success-engine sweep endpoint. */
+  get automationSecret(): string {
+    return (process.env.AUTOMATION_SECRET ?? "").trim();
+  },
 };

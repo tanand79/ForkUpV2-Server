@@ -67,5 +67,8 @@ exports.config = {
         return url;
     },
     corsOrigin: resolveCorsOrigins(),
+    get automationSecret() {
+        return (process.env.AUTOMATION_SECRET ?? "").trim();
+    },
 };
 //# sourceMappingURL=config.js.map

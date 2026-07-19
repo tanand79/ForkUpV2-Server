@@ -4,8 +4,56 @@ exports.receiptsRouter = void 0;
 const express_1 = require("express");
 const ocr_1 = require("../lib/ocr");
 const receipts_1 = require("../lib/receipts");
+const mailer_1 = require("../lib/mailer");
+const auth_1 = require("../lib/auth");
 const pool_1 = require("../db/pool");
 exports.receiptsRouter = (0, express_1.Router)();
+async function notifySupporterOfReceiptReview(receiptId, action) {
+    const { rows } = await pool_1.pool.query(`SELECT s.email AS supporter_email, s.first_name AS supporter_name,
+            b.business_name, c.campaign_name, c.slug AS campaign_slug,
+            r.calculated_donation, r.campaign_id
+     FROM receipts r
+     LEFT JOIN supporters s ON s.id = r.supporter_id
+     LEFT JOIN businesses b ON b.id = r.business_id
+     LEFT JOIN campaigns c ON c.id = r.campaign_id
+     WHERE r.id = $1`, [receiptId]);
+    const row = rows[0];
+    const email = typeof row?.supporter_email === "string" ? row.supporter_email.trim() : "";
+    if (!row || !email)
+        return;
+    const name = typeof row.supporter_name === "string" && row.supporter_name.trim()
+        ? row.supporter_name.trim()
+        : "there";
+    const businessName = row.business_name ?? "the participating business";
+    const campaignName = row.campaign_name ?? "the campaign";
+    const campaignUrl = row.campaign_slug
+        ? `${(0, mailer_1.resolveFrontendBaseUrl)()}/campaign/${row.campaign_slug}`
+        : (0, mailer_1.resolveFrontendBaseUrl)();
+    const approved = action === "approve";
+    const donation = Number(row.calculated_donation ?? 0);
+    const body = approved
+        ? `Hi ${name},\n\n` +
+            `Your receipt from ${businessName} for "${campaignName}" has been approved.` +
+            (donation > 0 ? ` It generated a donation of $${donation.toFixed(2)}.` : "") +
+            `\n\nThank you for supporting this campaign!\n${campaignUrl}\n\n— ForkUp`
+        : `Hi ${name},\n\n` +
+            `We were unable to approve your receipt from ${businessName} for "${campaignName}". ` +
+            `This can happen if the receipt was unclear or did not meet the campaign's eligibility rules.\n\n` +
+            `You're welcome to upload another receipt here:\n${campaignUrl}\n\n— ForkUp`;
+    await (0, mailer_1.sendEmail)({
+        to: email,
+        name: typeof row.supporter_name === "string" ? row.supporter_name : null,
+        subject: approved
+            ? `Your receipt for "${campaignName}" was approved`
+            : `Update on your receipt for "${campaignName}"`,
+        body,
+        emailType: approved ? "receipt_approved" : "receipt_rejected",
+        campaignId: row.campaign_id ?? null,
+        stakeholderRole: "supporter",
+        relatedToken: `receipt:${receiptId}:${action}`,
+        onlyOnce: true,
+    });
+}
 function mapReceipt(row) {
     return {
         id: row.id,
@@ -149,6 +197,51 @@ exports.receiptsRouter.get("/campaigns/:slug/receipts", async (req, res) => {
         res.status(500).json({ error: "Failed to fetch receipts" });
     }
 });
+exports.receiptsRouter.get("/receipts/mine", async (req, res) => {
+    try {
+        const user = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
+        if (!user) {
+            res.status(401).json({ error: "Sign in to view your receipts" });
+            return;
+        }
+        const { rows } = await pool_1.pool.query(`SELECT
+         r.id,
+         r.ocr_status,
+         r.review_status,
+         r.eligible_subtotal,
+         r.donation_percentage,
+         r.calculated_donation,
+         r.uploaded_at,
+         c.campaign_name,
+         c.slug AS campaign_slug,
+         b.business_name,
+         bl.location_name
+       FROM receipts r
+       JOIN supporters s ON s.id = r.supporter_id
+       LEFT JOIN campaigns c ON c.id = r.campaign_id
+       LEFT JOIN businesses b ON b.id = r.business_id
+       LEFT JOIN business_locations bl ON bl.id = r.location_id
+       WHERE LOWER(s.email) = LOWER($1)
+       ORDER BY r.uploaded_at DESC`, [user.email]);
+        res.json(rows.map((row) => ({
+            id: row.id,
+            ocrStatus: row.ocr_status,
+            reviewStatus: row.review_status,
+            eligibleSubtotal: row.eligible_subtotal != null ? Number(row.eligible_subtotal) : null,
+            donationPercentage: row.donation_percentage != null ? Number(row.donation_percentage) : null,
+            calculatedDonation: row.calculated_donation != null ? Number(row.calculated_donation) : null,
+            uploadedAt: row.uploaded_at,
+            campaignName: row.campaign_name ?? null,
+            campaignSlug: row.campaign_slug ?? null,
+            businessName: row.business_name ?? null,
+            locationName: row.location_name ?? null,
+        })));
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch your receipts" });
+    }
+});
 exports.receiptsRouter.post("/receipts/:id/review", async (req, res) => {
     const connection = await pool_1.pool.connect();
     try {
@@ -165,6 +258,7 @@ exports.receiptsRouter.post("/receipts/:id/review", async (req, res) => {
             await (0, receipts_1.rejectReceipt)(connection, Number(req.params.id));
         }
         await connection.query("COMMIT");
+        await notifySupporterOfReceiptReview(Number(req.params.id), action === "approve" ? "approve" : "reject");
         res.json({ success: true, action });
     }
     catch (err) {

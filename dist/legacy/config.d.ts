@@ -5,4 +5,5 @@ export declare const config: {
     port: number;
     readonly databaseUrl: string;
     corsOrigin: string | string[];
+    readonly automationSecret: string;
 };
