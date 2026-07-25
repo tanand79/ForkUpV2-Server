@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.campaignsRouter = void 0;
 const express_1 = require("express");
 const pool_1 = require("../db/pool");
+const s3_1 = require("../lib/s3");
 exports.campaignsRouter = (0, express_1.Router)();
 function toDateInput(value) {
     if (!value)
@@ -60,13 +61,13 @@ function mapLocation(row) {
         acceptanceStatus: row.acceptance_status,
     };
 }
-function mapListItem(row, locationCount) {
+async function mapListItem(row, locationCount) {
     return {
         slug: row.slug,
         name: row.campaign_name,
         nonprofit: row.organization_name,
         nonprofitVerified: row.verification_status === "verified",
-        image: row.cover_image_url,
+        image: await (0, s3_1.resolveStoredImageUrl)(row.cover_image_url),
         dateRange: formatDateRange(row.campaign_start_date, row.campaign_end_date),
         raised: Number(row.raised),
         goal: Number(row.campaign_goal),
@@ -136,7 +137,7 @@ async function fetchCampaignBySlug(slug, options) {
         fetchAcceptedLocations(campaign.id),
     ]);
     return {
-        ...mapListItem(campaign, locations.length),
+        ...(await mapListItem(campaign, locations.length)),
         description: campaign.campaign_story,
         methods,
         participatingLocations: locations,

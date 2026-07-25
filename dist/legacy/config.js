@@ -67,5 +67,13 @@ exports.config = {
         return url;
     },
     corsOrigin: resolveCorsOrigins(),
+    get automationSecret() {
+        return (process.env.AUTOMATION_SECRET ?? "").trim();
+    },
+    s3: {
+        region: process.env.AWS_REGION?.trim() || "us-east-1",
+        bucket: process.env.S3_BUCKET?.trim() || "",
+        presignTtlSeconds: Number(process.env.S3_PRESIGN_TTL_SECONDS || 86400),
+    },
 };
 //# sourceMappingURL=config.js.map
