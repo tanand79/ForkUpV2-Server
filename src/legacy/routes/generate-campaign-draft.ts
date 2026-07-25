@@ -5,19 +5,15 @@ import {
   pickFeaturedImage,
   type LibraryOrgType,
 } from "../lib/organization-library";
+import { aiChat, aiProviderName, parseAiJson } from "../lib/ai-chat";
 
 export const generateCampaignDraftRouter = Router();
 
 /**
  * GoFundMe-style quick-start draft generator.
  *
- * Takes the handful of answers the organizer provides in the simplified
- * builder (what they're raising for, goal, dates, chosen methods) plus the
- * active organization's name/mission, and asks the Lovable AI gateway to
- * prepare a campaign title, story, and one-line purpose. The organizer then
- * reviews/edits — nothing is auto-published.
- *
- * Mirrors the pattern in improve-story.ts (same gateway + error handling).
+ * Uses AWS Bedrock when AWS_* credentials are set; otherwise Lovable fallback.
+ * Organizer reviews/edits — nothing is auto-published.
  */
 generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) => {
   try {
@@ -40,9 +36,11 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       return;
     }
 
-    const apiKey = process.env.LOVABLE_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({ error: "Missing LOVABLE_API_KEY" });
+    if (aiProviderName() === "none") {
+      res.status(503).json({
+        error:
+          "No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY.",
+      });
       return;
     }
 
@@ -59,8 +57,6 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       ? body.methods.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
       : [];
 
-    // Entity-specific AI: enrich the prompt with the organization's approved
-    // library content when we know which organization this draft is for.
     let libraryContext = "";
     let suggestedImageUrl: string | null = null;
     const orgType = body.organizationType === "business" ? "business" : "nonprofit";
@@ -95,55 +91,19 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       libraryContext,
     ].filter(Boolean);
 
-    const upstream = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Lovable-API-Key": apiKey,
-      },
-      body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userParts.join("\n") },
-        ],
-      }),
+    const raw = await aiChat({
+      system,
+      user: userParts.join("\n"),
+      json: true,
+      maxTokens: 2048,
+      temperature: 0.4,
     });
-
-    if (upstream.status === 429) {
-      res.status(429).json({ error: "Rate limited. Please try again in a moment." });
-      return;
-    }
-    if (upstream.status === 402) {
-      res.status(402).json({ error: "AI credits exhausted. Please add credits to continue." });
-      return;
-    }
-    if (!upstream.ok) {
-      res.status(502).json({ error: "Could not prepare the draft. Please try again." });
-      return;
-    }
-
-    const json = (await upstream.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
-    if (!raw) {
-      res.status(502).json({ error: "Could not prepare the draft. Please try again." });
-      return;
-    }
-
-    // Strip accidental code fences before parsing.
-    const cleaned = raw
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
 
     let draft: { title?: string; story?: string; purpose?: string } = {};
     try {
-      draft = JSON.parse(cleaned) as { title?: string; story?: string; purpose?: string };
+      draft = parseAiJson(raw);
     } catch {
-      // Fall back to using the raw text as the story if JSON parsing fails.
-      draft = { story: cleaned };
+      draft = { story: raw };
     }
 
     res.json({
@@ -151,6 +111,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       story: typeof draft.story === "string" ? draft.story.trim() : "",
       purpose: typeof draft.purpose === "string" ? draft.purpose.trim() : "",
       suggestedImageUrl,
+      provider: aiProviderName(),
     });
   } catch (error) {
     const message =

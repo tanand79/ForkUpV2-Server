@@ -1,7 +1,15 @@
 import { Router } from "express";
+import { aiChat, aiProviderName } from "../lib/ai-chat";
 
 export const improveStoryRouter = Router();
 
+/**
+ * Improve a campaign story via AWS Bedrock (preferred) or Lovable fallback.
+ *
+ * method: POST /api/improve-story
+ * request: { story: string }
+ * response: { improved: string, provider: string }
+ */
 improveStoryRouter.post("/improve-story", async (req, res) => {
   try {
     const story = typeof req.body?.story === "string" ? req.body.story.trim() : "";
@@ -9,9 +17,12 @@ improveStoryRouter.post("/improve-story", async (req, res) => {
       res.status(400).json({ error: "Invalid story text." });
       return;
     }
-    const apiKey = process.env.LOVABLE_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({ error: "Missing LOVABLE_API_KEY" });
+
+    if (aiProviderName() === "none") {
+      res.status(503).json({
+        error:
+          "No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY.",
+      });
       return;
     }
 
@@ -37,44 +48,14 @@ improveStoryRouter.post("/improve-story", async (req, res) => {
       "Return ONLY the improved story text, with no preamble, quotes, or commentary.",
     ].join("\n");
 
-    const upstream = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Lovable-API-Key": apiKey,
-      },
-      body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: story },
-        ],
-      }),
+    const improved = await aiChat({
+      system,
+      user: story,
+      maxTokens: 2048,
+      temperature: 0.4,
     });
 
-    if (upstream.status === 429) {
-      res.status(429).json({ error: "Rate limited. Please try again in a moment." });
-      return;
-    }
-    if (upstream.status === 402) {
-      res.status(402).json({ error: "AI credits exhausted. Please add credits to continue." });
-      return;
-    }
-    if (!upstream.ok) {
-      res.status(502).json({ error: "Could not improve the story. Please try again." });
-      return;
-    }
-
-    const json = (await upstream.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const improved = json.choices?.[0]?.message?.content?.trim();
-    if (!improved) {
-      res.status(502).json({ error: "Could not improve the story. Please try again." });
-      return;
-    }
-
-    res.json({ improved });
+    res.json({ improved, provider: aiProviderName() });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not improve the story.";
     res.status(400).json({ error: message });

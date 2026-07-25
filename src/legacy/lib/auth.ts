@@ -37,6 +37,8 @@ export type AuthUser = {
   id: number;
   email: string;
   fullName: string | null;
+  username: string | null;
+  isPlatformAdmin: boolean;
   organizations: {
     organizationType: "nonprofit" | "business";
     organizationId: number;
@@ -48,7 +50,8 @@ export async function resolveAuthUser(token: string | undefined): Promise<AuthUs
   if (!token?.trim()) return null;
 
   const { rows: sessions } = await pool.query<QueryResultRow>(
-    `SELECT s.user_id, s.expires_at, u.email, u.full_name
+    `SELECT s.user_id, s.expires_at, u.email, u.full_name, u.username,
+            COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin
      FROM auth_sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = $1`,
@@ -70,6 +73,8 @@ export async function resolveAuthUser(token: string | undefined): Promise<AuthUs
     id: userId,
     email: row.email,
     fullName: row.full_name,
+    username: row.username ?? null,
+    isPlatformAdmin: Boolean(row.is_platform_admin),
     organizations: orgs.map((o) => ({
       organizationType: o.organization_type,
       organizationId: Number(o.organization_id),

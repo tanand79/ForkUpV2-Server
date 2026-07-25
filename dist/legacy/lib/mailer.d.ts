@@ -12,8 +12,9 @@ export type SendEmailInput = {
 };
 export type SendEmailResult = {
     status: "sent" | "failed" | "skipped";
-    provider: "ses" | "noop";
+    provider: "ses" | "smtp" | "noop";
     messageId: string | null;
+    errorMessage?: string | null;
 };
 export declare function sendEmail(input: SendEmailInput): Promise<SendEmailResult>;
 export declare function resolveFrontendBaseUrl(): string;

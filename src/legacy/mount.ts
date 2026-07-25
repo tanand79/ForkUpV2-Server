@@ -8,11 +8,13 @@ import { campaignsRouter } from "./routes/campaigns";
 import { manageRouter } from "./routes/manage";
 import { improveStoryRouter } from "./routes/improve-story";
 import { generateCampaignDraftRouter } from "./routes/generate-campaign-draft";
+import { generateOrganizationDraftRouter } from "./routes/generate-organization-draft";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
 import { profilesRouter } from "./routes/profiles";
 import { libraryRouter } from "./routes/library";
+import { superadminRouter } from "./routes/superadmin";
 import { ensureUploadsDir } from "./lib/receipts";
 import { pool } from "./db/pool";
 
@@ -74,10 +76,12 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/profiles", profilesRouter);
   app.use("/api/library", libraryRouter);
   app.use("/api/auth", authRouter);
+  app.use("/api/superadmin", superadminRouter);
   app.use("/api/business", businessRouter);
   app.use("/api", receiptsRouter);
   app.use("/api/uploads", uploadsRouter);
   app.use("/api", improveStoryRouter);
   app.use("/api", generateCampaignDraftRouter);
+  app.use("/api", generateOrganizationDraftRouter);
   app.use("/api/manage", manageRouter);
 }

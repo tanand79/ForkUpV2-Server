@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS email_log (
   subject VARCHAR(512) NOT NULL,
   body TEXT NOT NULL,
   provider VARCHAR(20) NOT NULL DEFAULT 'ses'
-    CHECK (provider IN ('ses','noop')),
+    CHECK (provider IN ('ses','noop','smtp')),
   provider_message_id VARCHAR(255),
   status VARCHAR(20) NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued','sent','failed','skipped')),

@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateCampaignDraftRouter = void 0;
 const express_1 = require("express");
 const organization_library_1 = require("../lib/organization-library");
+const ai_chat_1 = require("../lib/ai-chat");
 exports.generateCampaignDraftRouter = (0, express_1.Router)();
 exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) => {
     try {
@@ -12,9 +13,10 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             res.status(400).json({ error: "Tell us what you're raising money for." });
             return;
         }
-        const apiKey = process.env.LOVABLE_API_KEY;
-        if (!apiKey) {
-            res.status(503).json({ error: "Missing LOVABLE_API_KEY" });
+        if ((0, ai_chat_1.aiProviderName)() === "none") {
+            res.status(503).json({
+                error: "No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY.",
+            });
             return;
         }
         const organizationName = typeof body.organizationName === "string" ? body.organizationName.trim() : "";
@@ -57,54 +59,26 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
             libraryContext,
         ].filter(Boolean);
-        const upstream = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Lovable-API-Key": apiKey,
-            },
-            body: JSON.stringify({
-                model: "google/gemini-3-flash-preview",
-                messages: [
-                    { role: "system", content: system },
-                    { role: "user", content: userParts.join("\n") },
-                ],
-            }),
+        const raw = await (0, ai_chat_1.aiChat)({
+            system,
+            user: userParts.join("\n"),
+            json: true,
+            maxTokens: 2048,
+            temperature: 0.4,
         });
-        if (upstream.status === 429) {
-            res.status(429).json({ error: "Rate limited. Please try again in a moment." });
-            return;
-        }
-        if (upstream.status === 402) {
-            res.status(402).json({ error: "AI credits exhausted. Please add credits to continue." });
-            return;
-        }
-        if (!upstream.ok) {
-            res.status(502).json({ error: "Could not prepare the draft. Please try again." });
-            return;
-        }
-        const json = (await upstream.json());
-        const raw = json.choices?.[0]?.message?.content?.trim() ?? "";
-        if (!raw) {
-            res.status(502).json({ error: "Could not prepare the draft. Please try again." });
-            return;
-        }
-        const cleaned = raw
-            .replace(/^```(?:json)?\s*/i, "")
-            .replace(/\s*```$/i, "")
-            .trim();
         let draft = {};
         try {
-            draft = JSON.parse(cleaned);
+            draft = (0, ai_chat_1.parseAiJson)(raw);
         }
         catch {
-            draft = { story: cleaned };
+            draft = { story: raw };
         }
         res.json({
             title: typeof draft.title === "string" ? draft.title.trim() : "",
             story: typeof draft.story === "string" ? draft.story.trim() : "",
             purpose: typeof draft.purpose === "string" ? draft.purpose.trim() : "",
             suggestedImageUrl,
+            provider: (0, ai_chat_1.aiProviderName)(),
         });
     }
     catch (error) {

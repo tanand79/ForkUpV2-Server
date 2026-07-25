@@ -1,5 +1,7 @@
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
+import nodemailer from "nodemailer";
 import { pool } from "../db/pool";
+import { getPlatformSettings } from "./platform-settings";
 
 export type StakeholderRole =
   | "nonprofit"
@@ -27,8 +29,10 @@ export type SendEmailInput = {
 
 export type SendEmailResult = {
   status: "sent" | "failed" | "skipped";
-  provider: "ses" | "noop";
+  provider: "ses" | "smtp" | "noop";
   messageId: string | null;
+  /** Present when status is failed (or skipped with a known reason). */
+  errorMessage?: string | null;
 };
 
 let sesClient: SESClient | null = null;
@@ -79,11 +83,6 @@ async function recordEmailLog(
   }
 }
 
-/**
- * Sends an email via AWS SES when configured, otherwise falls back to a no-op
- * (console log + skipped email_log row). Never throws into the caller so that
- * existing request flows are unaffected by email delivery problems.
- */
 async function alreadySent(input: SendEmailInput): Promise<boolean> {
   if (!input.onlyOnce || !input.relatedToken) return false;
   try {
@@ -103,11 +102,77 @@ async function alreadySent(input: SendEmailInput): Promise<boolean> {
   }
 }
 
-export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
-  if (await alreadySent(input)) {
-    return { status: "skipped", provider: "noop", messageId: null };
+async function resolveEmailProvider(): Promise<"ses" | "smtp" | "noop"> {
+  try {
+    const s = await getPlatformSettings(["email_provider"]);
+    const p = (s.email_provider || "").trim().toLowerCase();
+    if (p === "smtp" || p === "ses" || p === "noop") return p;
+  } catch {
+    /* fall through */
+  }
+  if (isSesConfigured()) return "ses";
+  return "noop";
+}
+
+async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
+  const s = await getPlatformSettings([
+    "smtp_host",
+    "smtp_port",
+    "smtp_user",
+    "smtp_pass",
+    "smtp_from",
+    "smtp_secure",
+  ]);
+  if (!s.smtp_host?.trim() || !s.smtp_from?.trim()) {
+    const result: SendEmailResult = {
+      status: "skipped",
+      provider: "smtp",
+      messageId: null,
+      errorMessage: "SMTP host/from not configured",
+    };
+    console.info(`[mailer] SMTP incomplete — skipping. type=${input.emailType} to=${input.to}`);
+    await recordEmailLog(input, result, result.errorMessage ?? null);
+    return result;
   }
 
+  try {
+    const transport = nodemailer.createTransport({
+      host: s.smtp_host,
+      port: Number(s.smtp_port || 587),
+      secure: s.smtp_secure === "true",
+      auth:
+        s.smtp_user && s.smtp_pass
+          ? { user: s.smtp_user, pass: s.smtp_pass }
+          : undefined,
+    });
+    const info = await transport.sendMail({
+      from: s.smtp_from,
+      to: input.to,
+      subject: input.subject,
+      text: input.body,
+    });
+    const result: SendEmailResult = {
+      status: "sent",
+      provider: "smtp",
+      messageId: typeof info.messageId === "string" ? info.messageId : null,
+    };
+    await recordEmailLog(input, result, null);
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[mailer] SMTP send failed. type=${input.emailType} to=${input.to}:`, message);
+    const result: SendEmailResult = {
+      status: "failed",
+      provider: "smtp",
+      messageId: null,
+      errorMessage: message,
+    };
+    await recordEmailLog(input, result, message);
+    return result;
+  }
+}
+
+async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
   if (!isSesConfigured()) {
     const result: SendEmailResult = {
       status: "skipped",
@@ -145,10 +210,32 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
       status: "failed",
       provider: "ses",
       messageId: null,
+      errorMessage: message,
     };
     await recordEmailLog(input, result, message);
     return result;
   }
+}
+
+/**
+ * Sends an email via Super Admin SMTP, AWS SES, or no-op — based on
+ * platform_settings.email_provider (fallback: SES if env configured).
+ * Never throws into the caller.
+ */
+export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
+  if (await alreadySent(input)) {
+    return { status: "skipped", provider: "noop", messageId: null };
+  }
+
+  const provider = await resolveEmailProvider();
+  if (provider === "noop") {
+    const result: SendEmailResult = { status: "skipped", provider: "noop", messageId: null };
+    console.info(`[mailer] Provider=noop — skipping. type=${input.emailType} to=${input.to}`);
+    await recordEmailLog(input, result, null);
+    return result;
+  }
+  if (provider === "smtp") return sendViaSmtp(input);
+  return sendViaSes(input);
 }
 
 /** Resolves the public frontend base URL used to build stakeholder links. */

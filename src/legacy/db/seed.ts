@@ -2,6 +2,14 @@ import type { PoolClient, QueryResultRow } from "pg";
 import { isDirectRun, type DbTaskOptions } from "./cli";
 import { pool } from "./pool";
 
+/**
+ * Demo seed data removed — production and local discovery should only show
+ * real campaigns created through the app.
+ *
+ * `npm run db:seed` is now a no-op unless arrays below are intentionally
+ * re-populated for a controlled QA fixture.
+ */
+
 type NonprofitSeed = {
   organization_name: string;
   slug: string;
@@ -58,268 +66,22 @@ type CampaignSeed = {
   }[];
 };
 
-const nonprofits: NonprofitSeed[] = [
-  {
-    organization_name: "West Chester Education Foundation",
-    slug: "west-chester-education-foundation",
-    mission: "Supporting teachers and students across West Chester Area School District.",
-    cause_category: "Education",
-    verification_status: "verified",
-  },
-  {
-    organization_name: "Bayside Animal Rescue",
-    slug: "bayside-animal-rescue",
-    mission: "Medical care, shelter, and adoption services for rescued animals.",
-    cause_category: "Animals",
-    verification_status: "verified",
-  },
-  {
-    organization_name: "Riverdale Youth Arts",
-    slug: "riverdale-youth-arts",
-    mission: "Free art classes and supplies for after-school youth programs.",
-    cause_category: "Arts",
-    verification_status: "verified",
-  },
-  {
-    organization_name: "GreenLeaf Food Bank",
-    slug: "greenleaf-food-bank",
-    mission: "Groceries for families facing food insecurity.",
-    cause_category: "Hunger Relief",
-    verification_status: "verified",
-  },
-];
+/** Former demo orgs — kept empty so seed does not recreate sample data. */
+const nonprofits: NonprofitSeed[] = [];
 
-const businesses: BusinessSeed[] = [
-  {
-    business_name: "Sovana Bistro",
-    slug: "sovana-bistro",
-    business_type: "Restaurant",
-    contact_email: "ops@sovanabistro.com",
-    default_giveback_percentage: 15,
-    supports_dine_and_donate: true,
-    supports_shop_and_donate: false,
-    supports_service_giveback: false,
-    supports_guest_bartending: true,
-    locations: [
-      { location_name: "Kennett Square", city: "Kennett Square", state: "PA", reservation_url: "https://resy.com" },
-    ],
-  },
-  {
-    business_name: "The Pear",
-    slug: "the-pear",
-    business_type: "Restaurant",
-    contact_email: "ops@thepear.com",
-    default_giveback_percentage: 15,
-    supports_dine_and_donate: true,
-    supports_shop_and_donate: false,
-    supports_service_giveback: false,
-    supports_guest_bartending: true,
-    locations: [
-      { location_name: "Dilworthtown", city: "West Chester", state: "PA", reservation_url: "https://resy.com" },
-    ],
-  },
-  {
-    business_name: "Olive & Oak",
-    slug: "olive-and-oak",
-    business_type: "Restaurant",
-    contact_email: "manager@oliveandoak.com",
-    default_giveback_percentage: 10,
-    supports_dine_and_donate: true,
-    supports_shop_and_donate: false,
-    supports_service_giveback: false,
-    supports_guest_bartending: false,
-    locations: [{ location_name: "Downtown", city: "Bayside", state: "CA" }],
-  },
-  {
-    business_name: "Harbor Coffee",
-    slug: "harbor-coffee",
-    business_type: "Cafe",
-    contact_email: "hello@harborcoffee.com",
-    default_giveback_percentage: 10,
-    supports_dine_and_donate: true,
-    supports_shop_and_donate: false,
-    supports_service_giveback: false,
-    supports_guest_bartending: false,
-    locations: [{ location_name: "Harbor District", city: "Bayside", state: "CA" }],
-  },
-  {
-    business_name: "Farm Table",
-    slug: "farm-table",
-    business_type: "Restaurant",
-    contact_email: "team@farmtable.com",
-    default_giveback_percentage: 12,
-    supports_dine_and_donate: true,
-    supports_shop_and_donate: false,
-    supports_service_giveback: false,
-    supports_guest_bartending: false,
-    locations: [{ location_name: "Pearl District", city: "Portland", state: "OR" }],
-  },
-  {
-    business_name: "Maker Studio",
-    slug: "maker-studio",
-    business_type: "Retail",
-    contact_email: "shop@makerstudio.com",
-    default_giveback_percentage: 8,
-    supports_dine_and_donate: false,
-    supports_shop_and_donate: true,
-    supports_service_giveback: false,
-    supports_guest_bartending: false,
-    locations: [{ location_name: "Main Street", city: "Riverdale", state: "NY" }],
-  },
-];
+/** Former demo businesses — kept empty. */
+const businesses: BusinessSeed[] = [];
 
-const campaigns: CampaignSeed[] = [
-  {
-    slug: "sovana-dine-and-donate-spring",
-    campaign_name: "Dine & Donate for West Chester Schools",
-    nonprofit_slug: "west-chester-education-foundation",
-    campaign_story:
-      "Join Sovana Bistro and The Pear for a community Dine & Donate campaign supporting West Chester Area School District teachers and students. Dine at participating locations and a portion of eligible sales goes directly to the foundation.",
-    campaign_goal: 25000,
-    campaign_start_date: "2026-05-01",
-    campaign_end_date: "2026-05-14",
-    campaign_status: "live",
-    cover_image_url: "campaign-restaurant.jpg",
-    raised: 18760,
-    supporters_going: 142,
-    expected_guests: 318,
-    verified_visits: 89,
-    top_event: true,
-    methods: [
-      {
-        method_type: "dine_and_donate",
-        method_name: "Dine & Donate",
-        method_status: "live",
-        requires_business_acceptance: true,
-      },
-    ],
-    participants: [
-      {
-        business_slug: "sovana-bistro",
-        location_name: "Kennett Square",
-        giveback_percentage: 15,
-        participation_hours: "Tue–Sun 11am–9pm",
-        acceptance_status: "accepted",
-      },
-      {
-        business_slug: "the-pear",
-        location_name: "Dilworthtown",
-        giveback_percentage: 15,
-        participation_hours: "Wed–Sun 5pm–10pm",
-        acceptance_status: "accepted",
-      },
-    ],
-  },
-  {
-    slug: "bayside-animal-rescue",
-    campaign_name: "Dine for Paws",
-    nonprofit_slug: "bayside-animal-rescue",
-    campaign_story:
-      "Two weeks of dining out to fund medical care, shelter, and adoption services for rescued animals across the Bay Area.",
-    campaign_goal: 20000,
-    campaign_start_date: "2026-05-01",
-    campaign_end_date: "2026-05-14",
-    campaign_status: "live",
-    cover_image_url: "campaign-animals.jpg",
-    raised: 12480,
-    supporters_going: 312,
-    expected_guests: 580,
-    verified_visits: 198,
-    top_event: true,
-    methods: [
-      {
-        method_type: "dine_and_donate",
-        method_name: "Dine & Donate",
-        method_status: "live",
-        requires_business_acceptance: true,
-      },
-    ],
-    participants: [
-      {
-        business_slug: "olive-and-oak",
-        location_name: "Downtown",
-        giveback_percentage: 10,
-        participation_hours: "All day",
-        acceptance_status: "accepted",
-      },
-      {
-        business_slug: "harbor-coffee",
-        location_name: "Harbor District",
-        giveback_percentage: 10,
-        participation_hours: "7am–3pm",
-        acceptance_status: "accepted",
-      },
-    ],
-  },
-  {
-    slug: "riverdale-youth-arts",
-    campaign_name: "Spring Arts Drive",
-    nonprofit_slug: "riverdale-youth-arts",
-    campaign_story:
-      "Help us fund free art classes, supplies, and instructors for kids in our after-school program this summer.",
-    campaign_goal: 15000,
-    campaign_start_date: "2026-04-28",
-    campaign_end_date: "2026-05-12",
-    campaign_status: "live",
-    cover_image_url: "campaign-arts.jpg",
-    raised: 8920,
-    supporters_going: 204,
-    expected_guests: 410,
-    verified_visits: 76,
-    top_event: false,
-    methods: [
-      {
-        method_type: "shop_and_donate",
-        method_name: "Shop & Donate",
-        method_status: "live",
-        requires_business_acceptance: true,
-      },
-    ],
-    participants: [
-      {
-        business_slug: "maker-studio",
-        location_name: "Main Street",
-        giveback_percentage: 8,
-        participation_hours: "10am–7pm",
-        acceptance_status: "accepted",
-      },
-    ],
-  },
-  {
-    slug: "greenleaf-food-bank",
-    campaign_name: "Fill the Table",
-    nonprofit_slug: "greenleaf-food-bank",
-    campaign_story:
-      "Every meal at participating restaurants funds groceries for families facing food insecurity in our community.",
-    campaign_goal: 30000,
-    campaign_start_date: "2026-05-05",
-    campaign_end_date: "2026-05-19",
-    campaign_status: "live",
-    cover_image_url: "campaign-foodbank.jpg",
-    raised: 23150,
-    supporters_going: 587,
-    expected_guests: 1120,
-    verified_visits: 342,
-    top_event: true,
-    methods: [
-      {
-        method_type: "dine_and_donate",
-        method_name: "Dine & Donate",
-        method_status: "live",
-        requires_business_acceptance: true,
-      },
-    ],
-    participants: [
-      {
-        business_slug: "farm-table",
-        location_name: "Pearl District",
-        giveback_percentage: 12,
-        participation_hours: "Lunch & dinner",
-        acceptance_status: "accepted",
-      },
-    ],
-  },
-];
+/** Former demo live campaigns — kept empty. */
+const campaigns: CampaignSeed[] = [];
+
+/** Known historical demo campaign slugs (for one-time cleanup). */
+export const DEMO_CAMPAIGN_SLUGS = [
+  "sovana-dine-and-donate-spring",
+  "bayside-animal-rescue",
+  "riverdale-youth-arts",
+  "greenleaf-food-bank",
+] as const;
 
 const SEED_TABLES = [
   "success_engine_actions",
@@ -344,17 +106,55 @@ async function resetPartialSeed(connection: PoolClient) {
   }
 }
 
+/**
+ * Remove only the known demo live campaigns (and cascade children via FKs).
+ * Does not wipe real organizer-created campaigns.
+ */
+export async function clearDemoCampaigns(options: DbTaskOptions = {}) {
+  const connection = await pool.connect();
+  try {
+    await connection.query("BEGIN");
+    const { rowCount } = await connection.query(
+      `DELETE FROM campaigns WHERE slug = ANY($1::text[])`,
+      [DEMO_CAMPAIGN_SLUGS],
+    );
+    await connection.query("COMMIT");
+    console.log(`Removed ${rowCount ?? 0} demo campaign(s).`);
+  } catch (err) {
+    await connection.query("ROLLBACK");
+    throw err;
+  } finally {
+    connection.release();
+    if (options.closePool !== false) {
+      await pool.end();
+    }
+  }
+}
+
 export async function seed(options: DbTaskOptions & { force?: boolean } = {}) {
   const connection = await pool.connect();
   try {
     await connection.query("BEGIN");
 
+    // Always strip known demo live campaigns so the public directory stays clean.
+    const cleared = await connection.query(`DELETE FROM campaigns WHERE slug = ANY($1::text[])`, [
+      DEMO_CAMPAIGN_SLUGS,
+    ]);
+
+    if (nonprofits.length === 0 && businesses.length === 0 && campaigns.length === 0) {
+      await connection.query("COMMIT");
+      console.log(
+        `Cleared ${cleared.rowCount ?? 0} demo campaign(s). Seed arrays empty — no sample data inserted.`,
+      );
+      return;
+    }
+
     const { rows: existing } = await connection.query<QueryResultRow>(
       "SELECT COUNT(*) AS count FROM campaigns",
     );
     if (!options.force && Number(existing[0].count) > 0) {
-      console.log("Campaigns already seeded, skipping.");
-      await connection.query("ROLLBACK");
+      console.log("Campaigns already present, skipping fixture insert.");
+      await connection.query("COMMIT");
       return;
     }
 
@@ -519,7 +319,9 @@ export async function seed(options: DbTaskOptions & { force?: boolean } = {}) {
     }
 
     await connection.query("COMMIT");
-    console.log(`Seeded ${nonprofits.length} nonprofits, ${businesses.length} businesses, ${campaigns.length} campaigns.`);
+    console.log(
+      `Seeded ${nonprofits.length} nonprofits, ${businesses.length} businesses, ${campaigns.length} campaigns.`,
+    );
   } catch (err) {
     await connection.query("ROLLBACK");
     throw err;

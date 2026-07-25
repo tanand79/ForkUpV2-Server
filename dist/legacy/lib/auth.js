@@ -40,7 +40,8 @@ function sessionExpiry() {
 async function resolveAuthUser(token) {
     if (!token?.trim())
         return null;
-    const { rows: sessions } = await pool_1.pool.query(`SELECT s.user_id, s.expires_at, u.email, u.full_name
+    const { rows: sessions } = await pool_1.pool.query(`SELECT s.user_id, s.expires_at, u.email, u.full_name, u.username,
+            COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin
      FROM auth_sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = $1`, [token.trim()]);
@@ -56,6 +57,8 @@ async function resolveAuthUser(token) {
         id: userId,
         email: row.email,
         fullName: row.full_name,
+        username: row.username ?? null,
+        isPlatformAdmin: Boolean(row.is_platform_admin),
         organizations: orgs.map((o) => ({
             organizationType: o.organization_type,
             organizationId: Number(o.organization_id),
