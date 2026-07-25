@@ -19,6 +19,7 @@ const receipts_1 = require("./routes/receipts");
 const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
 const profiles_1 = require("./routes/profiles");
+const us_nonprofit_suggest_1 = require("./routes/us-nonprofit-suggest");
 const library_1 = require("./routes/library");
 const superadmin_1 = require("./routes/superadmin");
 const receipts_2 = require("./lib/receipts");
@@ -68,6 +69,7 @@ function mountLegacyApi(app) {
     });
     app.use("/api/campaigns", campaigns_1.campaignsRouter);
     app.use("/api/builder", builder_1.builderRouter);
+    app.use("/api/profiles", us_nonprofit_suggest_1.usNonprofitSuggestRouter);
     app.use("/api/profiles", profiles_1.profilesRouter);
     app.use("/api/library", library_1.libraryRouter);
     app.use("/api/auth", auth_1.authRouter);

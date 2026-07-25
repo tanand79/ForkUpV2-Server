@@ -10,4 +10,9 @@ export declare function fetchApprovedLibraryItems(orgType: LibraryOrgType, orgId
 export declare function buildLibraryContext(items: ApprovedLibraryItem[]): string;
 export declare function pickLaunchSnippet(items: ApprovedLibraryItem[]): string | null;
 export declare function pickImpactSnippet(items: ApprovedLibraryItem[]): string | null;
+export declare function pickPromotionChannels(items: ApprovedLibraryItem[]): {
+    facebookUrl: string;
+    instagramHandle: string;
+    websiteUrl: string;
+};
 export declare function pickFeaturedImage(items: ApprovedLibraryItem[]): string | null;

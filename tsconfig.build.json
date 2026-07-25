@@ -12,6 +12,7 @@
     "src/legacy/db/migrate-patch.ts",
     "src/legacy/db/migrate-foundation.ts",
     "src/legacy/db/migrate-email.ts",
+    "src/legacy/db/migrate-email-smtp-provider.ts",
     "src/legacy/db/migrate-library.ts",
     "src/legacy/db/migrate-payouts.ts",
     "src/legacy/db/migrate-automation.ts",

@@ -97,6 +97,40 @@ export function pickImpactSnippet(items: ApprovedLibraryItem[]): string | null {
 }
 
 /**
+ * Picks promotion channel hints from approved library social_links items.
+ * Inputs: approved library rows. Outputs: optional facebook / instagram / website strings.
+ */
+export function pickPromotionChannels(items: ApprovedLibraryItem[]): {
+  facebookUrl: string;
+  instagramHandle: string;
+  websiteUrl: string;
+} {
+  const out = { facebookUrl: "", instagramHandle: "", websiteUrl: "" };
+  for (const item of items.filter((i) => i.category === "social_links")) {
+    const blob = `${item.title ?? ""} ${item.content ?? ""} ${item.sourceUrl ?? ""} ${item.assetUrl ?? ""}`;
+    const lower = blob.toLowerCase();
+    const urlMatch = blob.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() ?? "";
+    if (!out.facebookUrl && (lower.includes("facebook") || lower.includes("fb.com"))) {
+      out.facebookUrl = urlMatch || item.sourceUrl?.trim() || "";
+    }
+    if (!out.instagramHandle && lower.includes("instagram")) {
+      const handle = blob.match(/@[A-Za-z0-9._]+/)?.[0];
+      out.instagramHandle =
+        handle ||
+        (urlMatch.includes("instagram.com")
+          ? `@${urlMatch.replace(/\/$/, "").split("/").pop() ?? ""}`.replace(/^@@/, "@")
+          : "") ||
+        item.content?.trim() ||
+        "";
+    }
+    if (!out.websiteUrl && lower.includes("website") && urlMatch && !/facebook|instagram|twitter|linkedin/i.test(urlMatch)) {
+      out.websiteUrl = urlMatch;
+    }
+  }
+  return out;
+}
+
+/**
  * Picks an approved image URL to suggest as a campaign cover/featured image.
  * Prefers real photos over brand logos. Returns null when no approved image
  * asset exists.

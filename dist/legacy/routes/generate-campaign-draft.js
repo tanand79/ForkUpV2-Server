@@ -22,6 +22,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
         const organizationName = typeof body.organizationName === "string" ? body.organizationName.trim() : "";
         const mission = typeof body.mission === "string" ? body.mission.trim() : "";
         const causeCategory = typeof body.causeCategory === "string" ? body.causeCategory.trim() : "";
+        const website = typeof body.website === "string" ? body.website.trim() : "";
         const goal = body.goal != null && String(body.goal).trim() !== "" ? String(body.goal).trim() : "";
         const startDate = typeof body.startDate === "string" ? body.startDate.trim() : "";
         const endDate = typeof body.endDate === "string" ? body.endDate.trim() : "";
@@ -30,12 +31,14 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             : [];
         let libraryContext = "";
         let suggestedImageUrl = null;
+        let libraryPromotion = { facebookUrl: "", instagramHandle: "", websiteUrl: "" };
         const orgType = body.organizationType === "business" ? "business" : "nonprofit";
         const orgId = Number(body.organizationId);
         if (orgId) {
             const approved = await (0, organization_library_1.fetchApprovedLibraryItems)(orgType, orgId);
             libraryContext = (0, organization_library_1.buildLibraryContext)(approved);
             suggestedImageUrl = (0, organization_library_1.pickFeaturedImage)(approved);
+            libraryPromotion = (0, organization_library_1.pickPromotionChannels)(approved);
         }
         const system = [
             "You are an expert nonprofit fundraising campaign writer for the ForkUp platform.",
@@ -46,7 +49,10 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
             "- story: 120-220 words, warm and concrete, explaining why the cause matters and how support helps. No generic clichés or invented statistics.",
             "- purpose: a single short sentence summarizing the campaign goal.",
-            'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string}.',
+            "- facebookUrl: public Facebook page URL if you know the real one for this org; otherwise empty string. Never invent.",
+            "- instagramHandle: public Instagram handle like @orgname if you know the real one; otherwise empty string. Never invent.",
+            "- websiteUrl: official organization website URL if known from context; otherwise empty string.",
+            'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
             "Do not include markdown, code fences, preamble, or commentary.",
         ].join("\n");
         const userParts = [
@@ -54,6 +60,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             organizationName ? `Organization: ${organizationName}` : "",
             mission ? `Mission: ${mission}` : "",
             causeCategory ? `Cause category: ${causeCategory}` : "",
+            website ? `Organization website: ${website}` : "",
             goal ? `Fundraising goal: ${goal}` : "",
             startDate || endDate ? `Dates: ${startDate || "TBD"} to ${endDate || "TBD"}` : "",
             methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
@@ -73,11 +80,15 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
         catch {
             draft = { story: raw };
         }
+        const str = (v) => (typeof v === "string" ? v.trim() : "");
         res.json({
-            title: typeof draft.title === "string" ? draft.title.trim() : "",
-            story: typeof draft.story === "string" ? draft.story.trim() : "",
-            purpose: typeof draft.purpose === "string" ? draft.purpose.trim() : "",
+            title: str(draft.title),
+            story: str(draft.story),
+            purpose: str(draft.purpose),
             suggestedImageUrl,
+            facebookUrl: libraryPromotion.facebookUrl || str(draft.facebookUrl),
+            instagramHandle: libraryPromotion.instagramHandle || str(draft.instagramHandle),
+            websiteUrl: libraryPromotion.websiteUrl || str(draft.websiteUrl) || website,
             provider: (0, ai_chat_1.aiProviderName)(),
         });
     }

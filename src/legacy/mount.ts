@@ -13,6 +13,7 @@ import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
 import { profilesRouter } from "./routes/profiles";
+import { usNonprofitSuggestRouter } from "./routes/us-nonprofit-suggest";
 import { libraryRouter } from "./routes/library";
 import { superadminRouter } from "./routes/superadmin";
 import { ensureUploadsDir } from "./lib/receipts";
@@ -73,6 +74,8 @@ export function mountLegacyApi(app: Express) {
 
   app.use("/api/campaigns", campaignsRouter);
   app.use("/api/builder", builderRouter);
+  // Mount before profilesRouter so /nonprofits/us-suggest is not captured by /nonprofits/:slug.
+  app.use("/api/profiles", usNonprofitSuggestRouter);
   app.use("/api/profiles", profilesRouter);
   app.use("/api/library", libraryRouter);
   app.use("/api/auth", authRouter);

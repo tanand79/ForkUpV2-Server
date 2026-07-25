@@ -10,6 +10,7 @@ type NonprofitRow = QueryResultRow & {
   id: number;
   organization_name: string;
   slug: string;
+  logo_url?: string | null;
   mission: string | null;
   website: string | null;
   contact_name: string | null;
@@ -51,6 +52,7 @@ function mapNonprofit(row: NonprofitRow) {
     claimStatus: row.claim_status,
     profileStatus: row.profile_status ?? "preloaded",
     verified: row.verification_status === "verified",
+    logoUrl: row.logo_url ?? null,
   };
 }
 
@@ -376,7 +378,6 @@ profilesRouter.get("/nonprofits/lookup", async (req, res) => {
       ...mapNonprofit(row),
       dataSource: "forkup_database" as const,
       location: row.cause_category ?? null,
-      logoUrl: null as string | null,
     }));
 
     res.json({

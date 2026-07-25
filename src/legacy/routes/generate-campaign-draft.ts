@@ -3,6 +3,7 @@ import {
   fetchApprovedLibraryItems,
   buildLibraryContext,
   pickFeaturedImage,
+  pickPromotionChannels,
   type LibraryOrgType,
 } from "../lib/organization-library";
 import { aiChat, aiProviderName, parseAiJson } from "../lib/ai-chat";
@@ -14,6 +15,12 @@ export const generateCampaignDraftRouter = Router();
  *
  * Uses AWS Bedrock when AWS_* credentials are set; otherwise Lovable fallback.
  * Organizer reviews/edits — nothing is auto-published.
+ *
+ * method: POST /api/generate-campaign-draft
+ * request: { purpose, organizationName?, mission?, causeCategory?, goal?, startDate?,
+ *            endDate?, methods?, organizationType?, organizationId?, website? }
+ * response: { title, story, purpose, suggestedImageUrl, facebookUrl, instagramHandle,
+ *             websiteUrl, provider }
  */
 generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) => {
   try {
@@ -28,6 +35,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       methods?: string[];
       organizationType?: string;
       organizationId?: number;
+      website?: string;
     };
 
     const purpose = typeof body.purpose === "string" ? body.purpose.trim() : "";
@@ -49,6 +57,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
     const mission = typeof body.mission === "string" ? body.mission.trim() : "";
     const causeCategory =
       typeof body.causeCategory === "string" ? body.causeCategory.trim() : "";
+    const website = typeof body.website === "string" ? body.website.trim() : "";
     const goal =
       body.goal != null && String(body.goal).trim() !== "" ? String(body.goal).trim() : "";
     const startDate = typeof body.startDate === "string" ? body.startDate.trim() : "";
@@ -59,12 +68,14 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
 
     let libraryContext = "";
     let suggestedImageUrl: string | null = null;
+    let libraryPromotion = { facebookUrl: "", instagramHandle: "", websiteUrl: "" };
     const orgType = body.organizationType === "business" ? "business" : "nonprofit";
     const orgId = Number(body.organizationId);
     if (orgId) {
       const approved = await fetchApprovedLibraryItems(orgType as LibraryOrgType, orgId);
       libraryContext = buildLibraryContext(approved);
       suggestedImageUrl = pickFeaturedImage(approved);
+      libraryPromotion = pickPromotionChannels(approved);
     }
 
     const system = [
@@ -76,7 +87,10 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
       "- story: 120-220 words, warm and concrete, explaining why the cause matters and how support helps. No generic clichés or invented statistics.",
       "- purpose: a single short sentence summarizing the campaign goal.",
-      'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string}.',
+      "- facebookUrl: public Facebook page URL if you know the real one for this org; otherwise empty string. Never invent.",
+      "- instagramHandle: public Instagram handle like @orgname if you know the real one; otherwise empty string. Never invent.",
+      "- websiteUrl: official organization website URL if known from context; otherwise empty string.",
+      'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
       "Do not include markdown, code fences, preamble, or commentary.",
     ].join("\n");
 
@@ -85,6 +99,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       organizationName ? `Organization: ${organizationName}` : "",
       mission ? `Mission: ${mission}` : "",
       causeCategory ? `Cause category: ${causeCategory}` : "",
+      website ? `Organization website: ${website}` : "",
       goal ? `Fundraising goal: ${goal}` : "",
       startDate || endDate ? `Dates: ${startDate || "TBD"} to ${endDate || "TBD"}` : "",
       methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
@@ -99,18 +114,30 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       temperature: 0.4,
     });
 
-    let draft: { title?: string; story?: string; purpose?: string } = {};
+    let draft: {
+      title?: string;
+      story?: string;
+      purpose?: string;
+      facebookUrl?: string;
+      instagramHandle?: string;
+      websiteUrl?: string;
+    } = {};
     try {
       draft = parseAiJson(raw);
     } catch {
       draft = { story: raw };
     }
 
+    const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+
     res.json({
-      title: typeof draft.title === "string" ? draft.title.trim() : "",
-      story: typeof draft.story === "string" ? draft.story.trim() : "",
-      purpose: typeof draft.purpose === "string" ? draft.purpose.trim() : "",
+      title: str(draft.title),
+      story: str(draft.story),
+      purpose: str(draft.purpose),
       suggestedImageUrl,
+      facebookUrl: libraryPromotion.facebookUrl || str(draft.facebookUrl),
+      instagramHandle: libraryPromotion.instagramHandle || str(draft.instagramHandle),
+      websiteUrl: libraryPromotion.websiteUrl || str(draft.websiteUrl) || website,
       provider: aiProviderName(),
     });
   } catch (error) {

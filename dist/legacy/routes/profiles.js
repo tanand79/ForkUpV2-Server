@@ -31,6 +31,7 @@ function mapNonprofit(row) {
         claimStatus: row.claim_status,
         profileStatus: row.profile_status ?? "preloaded",
         verified: row.verification_status === "verified",
+        logoUrl: row.logo_url ?? null,
     };
 }
 exports.profilesRouter.get("/nonprofits/readiness", async (req, res) => {
@@ -273,7 +274,6 @@ exports.profilesRouter.get("/nonprofits/lookup", async (req, res) => {
             ...mapNonprofit(row),
             dataSource: "forkup_database",
             location: row.cause_category ?? null,
-            logoUrl: null,
         }));
         res.json({
             query: website,

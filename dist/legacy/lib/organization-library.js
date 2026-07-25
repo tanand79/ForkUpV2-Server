@@ -4,6 +4,7 @@ exports.fetchApprovedLibraryItems = fetchApprovedLibraryItems;
 exports.buildLibraryContext = buildLibraryContext;
 exports.pickLaunchSnippet = pickLaunchSnippet;
 exports.pickImpactSnippet = pickImpactSnippet;
+exports.pickPromotionChannels = pickPromotionChannels;
 exports.pickFeaturedImage = pickFeaturedImage;
 const pool_1 = require("../db/pool");
 async function fetchApprovedLibraryItems(orgType, orgId) {
@@ -62,6 +63,31 @@ function pickImpactSnippet(items) {
     if (!text)
         return null;
     return text.length > 400 ? `${text.slice(0, 397)}...` : text;
+}
+function pickPromotionChannels(items) {
+    const out = { facebookUrl: "", instagramHandle: "", websiteUrl: "" };
+    for (const item of items.filter((i) => i.category === "social_links")) {
+        const blob = `${item.title ?? ""} ${item.content ?? ""} ${item.sourceUrl ?? ""} ${item.assetUrl ?? ""}`;
+        const lower = blob.toLowerCase();
+        const urlMatch = blob.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() ?? "";
+        if (!out.facebookUrl && (lower.includes("facebook") || lower.includes("fb.com"))) {
+            out.facebookUrl = urlMatch || item.sourceUrl?.trim() || "";
+        }
+        if (!out.instagramHandle && lower.includes("instagram")) {
+            const handle = blob.match(/@[A-Za-z0-9._]+/)?.[0];
+            out.instagramHandle =
+                handle ||
+                    (urlMatch.includes("instagram.com")
+                        ? `@${urlMatch.replace(/\/$/, "").split("/").pop() ?? ""}`.replace(/^@@/, "@")
+                        : "") ||
+                    item.content?.trim() ||
+                    "";
+        }
+        if (!out.websiteUrl && lower.includes("website") && urlMatch && !/facebook|instagram|twitter|linkedin/i.test(urlMatch)) {
+            out.websiteUrl = urlMatch;
+        }
+    }
+    return out;
 }
 function pickFeaturedImage(items) {
     const preferred = items.find((i) => i.category === "photos_images" && i.assetUrl) ??
