@@ -5,6 +5,7 @@ import {
   calculateDonationPool,
   calculateGivebackBreakdown,
 } from "./financial-calculations";
+import { isS3Enabled, uploadImageToS3 } from "./s3";
 
 export const UPLOADS_DIR = path.join(process.cwd(), "uploads", "receipts");
 
@@ -16,13 +17,19 @@ export function ensureUploadsDir() {
   }
 }
 
-export function saveReceiptImage(base64: string, mimeType: string): string {
+export async function saveReceiptImage(base64: string, mimeType: string): Promise<string> {
+  const data = base64.replace(/^data:[^;]+;base64,/, "");
+  const buffer = Buffer.from(data, "base64");
+
+  if (isS3Enabled()) {
+    return uploadImageToS3(buffer, mimeType, "receipts");
+  }
+
   ensureUploadsDir();
   const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
   const filename = `receipt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const filepath = path.join(UPLOADS_DIR, filename);
-  const data = base64.replace(/^data:[^;]+;base64,/, "");
-  fs.writeFileSync(filepath, Buffer.from(data, "base64"));
+  fs.writeFileSync(filepath, buffer);
   return `/uploads/receipts/${filename}`;
 }
 

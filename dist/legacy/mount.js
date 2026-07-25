@@ -13,9 +13,14 @@ const business_1 = require("./routes/business");
 const campaigns_1 = require("./routes/campaigns");
 const manage_1 = require("./routes/manage");
 const improve_story_1 = require("./routes/improve-story");
+const generate_campaign_draft_1 = require("./routes/generate-campaign-draft");
+const generate_organization_draft_1 = require("./routes/generate-organization-draft");
 const receipts_1 = require("./routes/receipts");
+const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
 const profiles_1 = require("./routes/profiles");
+const library_1 = require("./routes/library");
+const superadmin_1 = require("./routes/superadmin");
 const receipts_2 = require("./lib/receipts");
 const pool_1 = require("./db/pool");
 function mountLegacyApi(app) {
@@ -64,10 +69,15 @@ function mountLegacyApi(app) {
     app.use("/api/campaigns", campaigns_1.campaignsRouter);
     app.use("/api/builder", builder_1.builderRouter);
     app.use("/api/profiles", profiles_1.profilesRouter);
+    app.use("/api/library", library_1.libraryRouter);
     app.use("/api/auth", auth_1.authRouter);
+    app.use("/api/superadmin", superadmin_1.superadminRouter);
     app.use("/api/business", business_1.businessRouter);
     app.use("/api", receipts_1.receiptsRouter);
+    app.use("/api/uploads", uploads_1.uploadsRouter);
     app.use("/api", improve_story_1.improveStoryRouter);
+    app.use("/api", generate_campaign_draft_1.generateCampaignDraftRouter);
+    app.use("/api", generate_organization_draft_1.generateOrganizationDraftRouter);
     app.use("/api/manage", manage_1.manageRouter);
 }
 //# sourceMappingURL=mount.js.map
