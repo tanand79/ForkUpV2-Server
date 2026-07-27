@@ -11,6 +11,7 @@ const config_1 = require("./config");
 const builder_1 = require("./routes/builder");
 const business_1 = require("./routes/business");
 const campaigns_1 = require("./routes/campaigns");
+const campaign_images_1 = require("./routes/campaign-images");
 const manage_1 = require("./routes/manage");
 const improve_story_1 = require("./routes/improve-story");
 const generate_campaign_draft_1 = require("./routes/generate-campaign-draft");
@@ -68,6 +69,7 @@ function mountLegacyApi(app) {
         });
     });
     app.use("/api/campaigns", campaigns_1.campaignsRouter);
+    app.use("/api/campaign-images", campaign_images_1.campaignImagesRouter);
     app.use("/api/builder", builder_1.builderRouter);
     app.use("/api/profiles", us_nonprofit_suggest_1.usNonprofitSuggestRouter);
     app.use("/api/profiles", profiles_1.profilesRouter);

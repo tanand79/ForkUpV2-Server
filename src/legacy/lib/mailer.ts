@@ -106,12 +106,13 @@ async function resolveEmailProvider(): Promise<"ses" | "smtp" | "noop"> {
   try {
     const s = await getPlatformSettings(["email_provider"]);
     const p = (s.email_provider || "").trim().toLowerCase();
-    if (p === "smtp" || p === "ses" || p === "noop") return p;
+    // SES is hidden in Super Admin — treat legacy "ses" as SMTP.
+    if (p === "noop") return "noop";
+    if (p === "smtp" || p === "ses") return "smtp";
   } catch {
     /* fall through */
   }
-  if (isSesConfigured()) return "ses";
-  return "noop";
+  return "smtp";
 }
 
 async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
@@ -218,9 +219,8 @@ async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
 }
 
 /**
- * Sends an email via Super Admin SMTP, AWS SES, or no-op — based on
- * platform_settings.email_provider (fallback: SES if env configured).
- * Never throws into the caller.
+ * Sends an email via Super Admin SMTP (or no-op). Legacy SES setting
+ * is treated as SMTP. Never throws into the caller.
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
   if (await alreadySent(input)) {

@@ -564,6 +564,16 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       res.status(400).json({ error: "Campaign cover image is required" });
       return;
     }
+    if (
+      body.coverImage.startsWith("blob:") ||
+      body.coverImage.startsWith("data:")
+    ) {
+      res.status(400).json({
+        error:
+          "Campaign cover image must be uploaded to storage before saving. Re-upload the featured image and try again.",
+      });
+      return;
+    }
     if (body.launch && !body.termsAccepted) {
       res.status(400).json({ error: "Terms must be accepted before launch" });
       return;
@@ -822,6 +832,16 @@ builderRouter.post("/campaigns", async (req, res) => {
     }
     if (!body.coverImage?.trim()) {
       res.status(400).json({ error: "Campaign cover image is required" });
+      return;
+    }
+    if (
+      body.coverImage.startsWith("blob:") ||
+      body.coverImage.startsWith("data:")
+    ) {
+      res.status(400).json({
+        error:
+          "Campaign cover image must be uploaded to storage before saving. Re-upload the featured image and try again.",
+      });
       return;
     }
     if (body.launch && !body.termsAccepted) {

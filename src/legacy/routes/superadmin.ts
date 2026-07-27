@@ -18,6 +18,13 @@
  * POST   /api/superadmin/change-password
  *
  * GET/PUT /api/superadmin/settings/ai
+ *   GET response: {
+ *     selectedModelId,
+ *     pricingSource: "aws" | "fallback" | "mixed",
+ *     pricingFetchedAt: ISO string,
+ *     models: [{ id, label, vendor, tier, blurb, inputPer1M, outputPer1M,
+ *                pricingSource, estimatedRunCost }]
+ *   }
  * GET/PUT /api/superadmin/settings/charges
  * GET/PUT /api/superadmin/settings/smtp
  * POST    /api/superadmin/settings/smtp/test
@@ -44,6 +51,7 @@ import {
   setPlatformSettings,
 } from "../lib/platform-settings";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
+import { getBedrockLivePricing } from "../lib/bedrock-pricing";
 
 export const superadminRouter = Router();
 
@@ -373,13 +381,26 @@ superadminRouter.get("/settings/ai", async (_req, res) => {
     const settings = await getPlatformSettings(["ai_model_id"]);
     const selected =
       settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+    // Live AWS Price List rates when credentials allow; else hardcoded fallbacks.
+    const pricing = await getBedrockLivePricing(AI_MODELS);
+    const rateById = new Map(pricing.rates.map((r) => [r.modelId, r]));
     res.json({
       selectedModelId: selected,
-      models: AI_MODELS.map((m) => ({
-        ...m,
-        estimatedRunCost:
-          (m.inputPer1M * 10_000 + m.outputPer1M * 3_500) / 1_000_000,
-      })),
+      pricingSource: pricing.pricingSource,
+      pricingFetchedAt: pricing.pricingFetchedAt,
+      models: AI_MODELS.map((m) => {
+        const rate = rateById.get(m.id);
+        const inputPer1M = rate?.inputPer1M ?? m.inputPer1M;
+        const outputPer1M = rate?.outputPer1M ?? m.outputPer1M;
+        return {
+          ...m,
+          inputPer1M,
+          outputPer1M,
+          pricingSource: rate?.source ?? "fallback",
+          estimatedRunCost:
+            (inputPer1M * 10_000 + outputPer1M * 3_500) / 1_000_000,
+        };
+      }),
     });
   } catch (err) {
     console.error(err);
@@ -455,8 +476,10 @@ superadminRouter.get("/settings/smtp", async (_req, res) => {
       "smtp_from",
       "smtp_secure",
     ]);
+    const rawProvider = (s.email_provider || "smtp").trim().toLowerCase();
     res.json({
-      emailProvider: s.email_provider || "ses",
+      // SES is hidden — expose only smtp | noop to the Super Admin UI.
+      emailProvider: rawProvider === "noop" ? "noop" : "smtp",
       smtpHost: s.smtp_host || "",
       smtpPort: Number(s.smtp_port || "587"),
       smtpUser: s.smtp_user || "",
@@ -464,9 +487,7 @@ superadminRouter.get("/settings/smtp", async (_req, res) => {
       smtpPassMasked: maskSecret(s.smtp_pass),
       smtpFrom: s.smtp_from || "",
       smtpSecure: s.smtp_secure === "true",
-      sesConfigured: Boolean(
-        process.env.SES_FROM_EMAIL?.trim() && process.env.AWS_REGION?.trim(),
-      ),
+      sesConfigured: false,
     });
   } catch (err) {
     console.error(err);
@@ -478,10 +499,13 @@ superadminRouter.put("/settings/smtp", async (req, res) => {
   try {
     const user = (req as typeof req & { platformAdmin: AuthUser }).platformAdmin;
     const body = req.body ?? {};
+    // SES is hidden — only smtp | noop are accepted; legacy "ses" coerces to smtp.
     const emailProvider =
-      body.emailProvider === "smtp" || body.emailProvider === "ses" || body.emailProvider === "noop"
-        ? body.emailProvider
-        : "ses";
+      body.emailProvider === "noop"
+        ? "noop"
+        : body.emailProvider === "smtp" || body.emailProvider === "ses"
+          ? "smtp"
+          : "smtp";
 
     const updates: Record<string, string> = {
       email_provider: emailProvider,

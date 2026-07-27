@@ -14,12 +14,14 @@
     "src/legacy/db/migrate-email.ts",
     "src/legacy/db/migrate-email-smtp-provider.ts",
     "src/legacy/db/migrate-library.ts",
+    "src/legacy/db/migrate-campaign-images.ts",
     "src/legacy/db/migrate-payouts.ts",
     "src/legacy/db/migrate-automation.ts",
     "src/legacy/db/migrate-superadmin.ts",
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",
     "src/legacy/db/run-production.ts",
-    "src/legacy/db/reset-local.ts"
+    "src/legacy/db/reset-local.ts",
+    "src/legacy/db/wipe-campaign-signin.ts"
   ]
 }

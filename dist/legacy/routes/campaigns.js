@@ -170,6 +170,50 @@ exports.campaignsRouter.get("/", async (req, res) => {
         res.status(500).json({ error: "Failed to fetch campaigns" });
     }
 });
+exports.campaignsRouter.get("/:slug/donations", async (req, res) => {
+    try {
+        const { rows: campaigns } = await pool_1.pool.query(`SELECT id, campaign_status FROM campaigns WHERE slug = $1`, [req.params.slug]);
+        if (campaigns.length === 0) {
+            res.status(404).json({ error: "Campaign not found" });
+            return;
+        }
+        const campaign = campaigns[0];
+        const status = String(campaign.campaign_status);
+        if (status !== "live" && status !== "closed") {
+            res.status(404).json({ error: "Campaign not found" });
+            return;
+        }
+        const campaignId = Number(campaign.id);
+        const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*) AS count FROM donations
+       WHERE campaign_id = $1 AND payment_status = 'completed' AND donation_type = 'virtual'`, [campaignId]);
+        const { rows: donations } = await pool_1.pool.query(`SELECT d.amount, d.notes, d.created_at, s.first_name
+       FROM donations d
+       LEFT JOIN supporters s ON s.id = d.supporter_id
+       WHERE d.campaign_id = $1
+         AND d.payment_status = 'completed'
+         AND d.donation_type = 'virtual'
+       ORDER BY d.created_at DESC
+       LIMIT $2`, [campaignId, limit]);
+        res.json({
+            totalCount: Number(countRows[0]?.count ?? 0),
+            donations: donations.map((row) => {
+                const anonymous = row.notes === "anonymous";
+                const donorName = anonymous || !row.first_name ? "Anonymous" : String(row.first_name);
+                return {
+                    donorName,
+                    amount: Number(row.amount),
+                    createdAt: row.created_at,
+                    anonymous,
+                };
+            }),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch donations" });
+    }
+});
 exports.campaignsRouter.post("/:slug/donations", async (req, res) => {
     const connection = await pool_1.pool.connect();
     try {

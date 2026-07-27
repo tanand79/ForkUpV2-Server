@@ -40,7 +40,14 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-enrich", async (req, res) =
             res.status(400).json({ error: "ein is required" });
             return;
         }
-        const enriched = await (0, us_nonprofit_directory_1.enrichUsNonprofitByEin)(ein);
+        const organizationName = typeof req.query.name === "string" ? req.query.name.trim() : "";
+        const city = typeof req.query.city === "string" ? req.query.city.trim() : "";
+        const state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+        const enriched = await (0, us_nonprofit_directory_1.enrichUsNonprofitByEin)(ein, {
+            organizationName: organizationName || undefined,
+            city: city || undefined,
+            state: state || undefined,
+        });
         if (!enriched) {
             res.status(404).json({ error: "No enrichment found for that EIN" });
             return;

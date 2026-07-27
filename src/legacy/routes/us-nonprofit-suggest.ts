@@ -51,7 +51,7 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
  * Enrich a US directory pick for the confirm form (website, logo, ZIP, mission).
  *
  * method: GET /api/profiles/nonprofits/us-enrich
- * query: { ein: string }
+ * query: { ein: string, name?: string, city?: string, state?: string }
  * response: UsNonprofitEnrichment
  */
 usNonprofitSuggestRouter.get("/nonprofits/us-enrich", async (req, res) => {
@@ -62,7 +62,16 @@ usNonprofitSuggestRouter.get("/nonprofits/us-enrich", async (req, res) => {
       return;
     }
 
-    const enriched = await enrichUsNonprofitByEin(ein);
+    const organizationName =
+      typeof req.query.name === "string" ? req.query.name.trim() : "";
+    const city = typeof req.query.city === "string" ? req.query.city.trim() : "";
+    const state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+
+    const enriched = await enrichUsNonprofitByEin(ein, {
+      organizationName: organizationName || undefined,
+      city: city || undefined,
+      state: state || undefined,
+    });
     if (!enriched) {
       res.status(404).json({ error: "No enrichment found for that EIN" });
       return;

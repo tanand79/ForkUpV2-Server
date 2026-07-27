@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.enrichUsNonprofitByEin = enrichUsNonprofitByEin;
 exports.suggestUsNonprofits = suggestUsNonprofits;
+const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
 const PROPUBLICA_SEARCH = "https://projects.propublica.org/nonprofits/api/v2/search.json";
 const PROPUBLICA_ORG = "https://projects.propublica.org/nonprofits/api/v2/organizations";
 const EVERY_ORG_DETAIL = "https://partners.every.org/v0.2/nonprofit";
@@ -131,7 +132,7 @@ async function fetchProPublicaDetail(einDigits) {
         zip: org.zipcode?.trim()?.slice(0, 10) || null,
     };
 }
-async function enrichUsNonprofitByEin(einRaw) {
+async function enrichUsNonprofitByEin(einRaw, options) {
     const digits = digitsOnlyEin(einRaw);
     if (!/^\d{9}$/.test(digits))
         return null;
@@ -144,12 +145,52 @@ async function enrichUsNonprofitByEin(einRaw) {
         providers.push("propublica");
     if (eo)
         providers.push("every_org");
-    if (!pp && !eo)
-        return null;
+    if (!pp && !eo) {
+        const orgName = options?.organizationName?.trim() || "";
+        if (!orgName)
+            return null;
+        const guessed = await (0, guess_nonprofit_website_1.guessNonprofitWebsite)({
+            organizationName: orgName,
+            ein: formatEinFromDigits(digits),
+            city: options?.city || null,
+            state: options?.state || null,
+        });
+        if (!guessed.website)
+            return null;
+        const providers = [];
+        if (guessed.provider)
+            providers.push(guessed.provider);
+        return {
+            ein: formatEinFromDigits(digits),
+            organizationName: orgName,
+            website: guessed.website,
+            logoUrl: null,
+            mission: null,
+            city: options?.city || null,
+            state: options?.state || null,
+            zip: null,
+            providers,
+        };
+    }
+    let website = eo?.website || null;
+    const orgName = options?.organizationName?.trim() || eo?.organizationName || pp?.organizationName || "";
+    if (!website && orgName) {
+        const guessed = await (0, guess_nonprofit_website_1.guessNonprofitWebsite)({
+            organizationName: orgName,
+            ein: formatEinFromDigits(digits),
+            city: options?.city || pp?.city || null,
+            state: options?.state || pp?.state || null,
+        });
+        if (guessed.website) {
+            website = guessed.website;
+            if (guessed.provider)
+                providers.push(guessed.provider);
+        }
+    }
     return {
         ein: formatEinFromDigits(digits),
         organizationName: eo?.organizationName || pp?.organizationName || null,
-        website: eo?.website || null,
+        website,
         logoUrl: eo?.logoUrl || null,
         mission: eo?.mission || null,
         city: pp?.city || null,

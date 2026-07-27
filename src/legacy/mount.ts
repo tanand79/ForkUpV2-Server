@@ -5,6 +5,7 @@ import { config } from "./config";
 import { builderRouter } from "./routes/builder";
 import { businessRouter } from "./routes/business";
 import { campaignsRouter } from "./routes/campaigns";
+import { campaignImagesRouter } from "./routes/campaign-images";
 import { manageRouter } from "./routes/manage";
 import { improveStoryRouter } from "./routes/improve-story";
 import { generateCampaignDraftRouter } from "./routes/generate-campaign-draft";
@@ -73,6 +74,7 @@ export function mountLegacyApi(app: Express) {
   });
 
   app.use("/api/campaigns", campaignsRouter);
+  app.use("/api/campaign-images", campaignImagesRouter);
   app.use("/api/builder", builderRouter);
   // Mount before profilesRouter so /nonprofits/us-suggest is not captured by /nonprofits/:slug.
   app.use("/api/profiles", usNonprofitSuggestRouter);

@@ -13,6 +13,7 @@ const pool_1 = require("../db/pool");
 const require_platform_admin_1 = require("../lib/require-platform-admin");
 const platform_settings_1 = require("../lib/platform-settings");
 const mailer_1 = require("../lib/mailer");
+const bedrock_pricing_1 = require("../lib/bedrock-pricing");
 exports.superadminRouter = (0, express_1.Router)();
 const AI_MODELS = [
     {
@@ -284,12 +285,24 @@ exports.superadminRouter.get("/settings/ai", async (_req, res) => {
     try {
         const settings = await (0, platform_settings_1.getPlatformSettings)(["ai_model_id"]);
         const selected = settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+        const pricing = await (0, bedrock_pricing_1.getBedrockLivePricing)(AI_MODELS);
+        const rateById = new Map(pricing.rates.map((r) => [r.modelId, r]));
         res.json({
             selectedModelId: selected,
-            models: AI_MODELS.map((m) => ({
-                ...m,
-                estimatedRunCost: (m.inputPer1M * 10_000 + m.outputPer1M * 3_500) / 1_000_000,
-            })),
+            pricingSource: pricing.pricingSource,
+            pricingFetchedAt: pricing.pricingFetchedAt,
+            models: AI_MODELS.map((m) => {
+                const rate = rateById.get(m.id);
+                const inputPer1M = rate?.inputPer1M ?? m.inputPer1M;
+                const outputPer1M = rate?.outputPer1M ?? m.outputPer1M;
+                return {
+                    ...m,
+                    inputPer1M,
+                    outputPer1M,
+                    pricingSource: rate?.source ?? "fallback",
+                    estimatedRunCost: (inputPer1M * 10_000 + outputPer1M * 3_500) / 1_000_000,
+                };
+            }),
         });
     }
     catch (err) {
@@ -365,8 +378,9 @@ exports.superadminRouter.get("/settings/smtp", async (_req, res) => {
             "smtp_from",
             "smtp_secure",
         ]);
+        const rawProvider = (s.email_provider || "smtp").trim().toLowerCase();
         res.json({
-            emailProvider: s.email_provider || "ses",
+            emailProvider: rawProvider === "noop" ? "noop" : "smtp",
             smtpHost: s.smtp_host || "",
             smtpPort: Number(s.smtp_port || "587"),
             smtpUser: s.smtp_user || "",
@@ -374,7 +388,7 @@ exports.superadminRouter.get("/settings/smtp", async (_req, res) => {
             smtpPassMasked: maskSecret(s.smtp_pass),
             smtpFrom: s.smtp_from || "",
             smtpSecure: s.smtp_secure === "true",
-            sesConfigured: Boolean(process.env.SES_FROM_EMAIL?.trim() && process.env.AWS_REGION?.trim()),
+            sesConfigured: false,
         });
     }
     catch (err) {
@@ -386,9 +400,11 @@ exports.superadminRouter.put("/settings/smtp", async (req, res) => {
     try {
         const user = req.platformAdmin;
         const body = req.body ?? {};
-        const emailProvider = body.emailProvider === "smtp" || body.emailProvider === "ses" || body.emailProvider === "noop"
-            ? body.emailProvider
-            : "ses";
+        const emailProvider = body.emailProvider === "noop"
+            ? "noop"
+            : body.emailProvider === "smtp" || body.emailProvider === "ses"
+                ? "smtp"
+                : "smtp";
         const updates = {
             email_provider: emailProvider,
             smtp_host: typeof body.smtpHost === "string" ? body.smtpHost.trim() : "",

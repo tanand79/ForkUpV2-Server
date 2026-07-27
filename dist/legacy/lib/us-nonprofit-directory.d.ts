@@ -31,7 +31,13 @@ export type UsNonprofitEnrichment = {
     zip: string | null;
     providers: string[];
 };
-export declare function enrichUsNonprofitByEin(einRaw: string): Promise<UsNonprofitEnrichment | null>;
+export type EnrichUsNonprofitOptions = {
+    ein: string;
+    organizationName?: string;
+    city?: string;
+    state?: string;
+};
+export declare function enrichUsNonprofitByEin(einRaw: string, options?: Omit<EnrichUsNonprofitOptions, "ein">): Promise<UsNonprofitEnrichment | null>;
 export type UsNonprofitSuggestParams = {
     q: string;
     state?: string;

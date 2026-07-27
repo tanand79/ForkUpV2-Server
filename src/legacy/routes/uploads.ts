@@ -1,18 +1,38 @@
+import fs from "fs";
+import path from "path";
 import { Router } from "express";
 import { isS3Enabled, uploadImageToS3 } from "../lib/s3";
 
 export const uploadsRouter = Router();
 
-/** Maps a client-supplied upload kind to an S3 key folder. */
+/** Maps a client-supplied upload kind to an S3 key folder / local subdir. */
 const KIND_PREFIX: Record<string, string> = {
   cover: "covers",
   logo: "logos",
 };
 
 /**
- * Uploads a base64-encoded image to S3 and returns its `s3://<key>` reference.
- * The caller stores that reference (e.g. as a campaign cover); the read paths
- * turn it into a presigned https URL. Returns 503 when S3 is not configured.
+ * Writes an image buffer under `uploads/<prefix>/` and returns a public
+ * `/uploads/<prefix>/<filename>` path (served by express.static in mount.ts).
+ * Used when S3 is not configured so local/dev cover uploads still persist.
+ */
+function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): string {
+  const dir = path.join(process.cwd(), "uploads", prefix);
+  fs.mkdirSync(dir, { recursive: true });
+  const ext = mimeType.includes("png")
+    ? "png"
+    : mimeType.includes("webp")
+      ? "webp"
+      : "jpg";
+  const filename = `${prefix.slice(0, -1) || "img"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  fs.writeFileSync(path.join(dir, filename), buffer);
+  return `/uploads/${prefix}/${filename}`;
+}
+
+/**
+ * POST /api/uploads/image
+ * Request: { imageBase64: string, imageMimeType?: string, kind?: "cover" | "logo" }
+ * Response: { url: string } — `s3://…` when S3 is configured, else `/uploads/…` disk path.
  */
 uploadsRouter.post("/image", async (req, res) => {
   try {
@@ -22,17 +42,19 @@ uploadsRouter.post("/image", async (req, res) => {
       res.status(400).json({ error: "Image is required" });
       return;
     }
-    if (!isS3Enabled()) {
-      res.status(503).json({ error: "Image uploads are not configured" });
-      return;
-    }
 
     const mime = typeof imageMimeType === "string" && imageMimeType ? imageMimeType : "image/jpeg";
     const prefix = (typeof kind === "string" && KIND_PREFIX[kind]) || "uploads";
     const data = imageBase64.replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(data, "base64");
 
-    const url = await uploadImageToS3(buffer, mime, prefix);
+    if (isS3Enabled()) {
+      const url = await uploadImageToS3(buffer, mime, prefix);
+      res.status(201).json({ url });
+      return;
+    }
+
+    const url = saveImageToDisk(buffer, mime, prefix);
     res.status(201).json({ url });
   } catch (err) {
     console.error(err);

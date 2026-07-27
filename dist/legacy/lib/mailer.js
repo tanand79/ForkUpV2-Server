@@ -65,14 +65,14 @@ async function resolveEmailProvider() {
     try {
         const s = await (0, platform_settings_1.getPlatformSettings)(["email_provider"]);
         const p = (s.email_provider || "").trim().toLowerCase();
-        if (p === "smtp" || p === "ses" || p === "noop")
-            return p;
+        if (p === "noop")
+            return "noop";
+        if (p === "smtp" || p === "ses")
+            return "smtp";
     }
     catch {
     }
-    if (isSesConfigured())
-        return "ses";
-    return "noop";
+    return "smtp";
 }
 async function sendViaSmtp(input) {
     const s = await (0, platform_settings_1.getPlatformSettings)([

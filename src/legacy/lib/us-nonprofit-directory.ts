@@ -10,6 +10,8 @@
  * - https://partners.every.org/v0.2/nonprofit/:ein
  */
 
+import { guessNonprofitWebsite } from "./guess-nonprofit-website";
+
 export type UsNonprofitSuggestion = {
   /** Always 0 — not a ForkUp DB row until the user claims/creates. */
   id: number;
@@ -239,11 +241,23 @@ async function fetchProPublicaDetail(einDigits: string): Promise<{
   };
 }
 
+export type EnrichUsNonprofitOptions = {
+  ein: string;
+  /** Used to AI-guess website when Every.org has none. */
+  organizationName?: string;
+  city?: string;
+  state?: string;
+};
+
 /**
  * Enrich a US IRS pick with website/logo (Every.org) + ZIP (ProPublica detail).
+ * When website is still missing, optionally AI-guess from organization name.
  * Safe when fields are missing — many small orgs simply have no public website/logo.
  */
-export async function enrichUsNonprofitByEin(einRaw: string): Promise<UsNonprofitEnrichment | null> {
+export async function enrichUsNonprofitByEin(
+  einRaw: string,
+  options?: Omit<EnrichUsNonprofitOptions, "ein">,
+): Promise<UsNonprofitEnrichment | null> {
   const digits = digitsOnlyEin(einRaw);
   if (!/^\d{9}$/.test(digits)) return null;
 
@@ -255,12 +269,50 @@ export async function enrichUsNonprofitByEin(einRaw: string): Promise<UsNonprofi
   if (pp) providers.push("propublica");
   if (eo) providers.push("every_org");
 
-  if (!pp && !eo) return null;
+  if (!pp && !eo) {
+    const orgName = options?.organizationName?.trim() || "";
+    if (!orgName) return null;
+    const guessed = await guessNonprofitWebsite({
+      organizationName: orgName,
+      ein: formatEinFromDigits(digits),
+      city: options?.city || null,
+      state: options?.state || null,
+    });
+    if (!guessed.website) return null;
+    const providers: string[] = [];
+    if (guessed.provider) providers.push(guessed.provider);
+    return {
+      ein: formatEinFromDigits(digits),
+      organizationName: orgName,
+      website: guessed.website,
+      logoUrl: null,
+      mission: null,
+      city: options?.city || null,
+      state: options?.state || null,
+      zip: null,
+      providers,
+    };
+  }
+
+  let website = eo?.website || null;
+  const orgName = options?.organizationName?.trim() || eo?.organizationName || pp?.organizationName || "";
+  if (!website && orgName) {
+    const guessed = await guessNonprofitWebsite({
+      organizationName: orgName,
+      ein: formatEinFromDigits(digits),
+      city: options?.city || pp?.city || null,
+      state: options?.state || pp?.state || null,
+    });
+    if (guessed.website) {
+      website = guessed.website;
+      if (guessed.provider) providers.push(guessed.provider);
+    }
+  }
 
   return {
     ein: formatEinFromDigits(digits),
     organizationName: eo?.organizationName || pp?.organizationName || null,
-    website: eo?.website || null,
+    website,
     logoUrl: eo?.logoUrl || null,
     mission: eo?.mission || null,
     city: pp?.city || null,
