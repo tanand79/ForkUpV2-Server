@@ -443,6 +443,35 @@ exports.superadminRouter.post("/settings/smtp/test", async (req, res) => {
         res.status(500).json({ error: "SMTP test failed" });
     }
 });
+exports.superadminRouter.get("/forkup-review-queue", async (_req, res) => {
+    try {
+        const { rows } = await pool_1.pool.query(`SELECT c.slug, c.campaign_name, c.business_timing_status, c.forkup_review_status,
+              c.campaign_start_date, c.event_date, c.campaign_status,
+              n.organization_name
+       FROM campaigns c
+       JOIN nonprofits n ON n.id = c.nonprofit_id
+       WHERE c.business_timing_status = 'needs_forkup_review'
+          OR c.forkup_review_status = 'pending'
+       ORDER BY c.updated_at DESC
+       LIMIT 100`);
+        res.json(rows.map((r) => ({
+            slug: String(r.slug),
+            name: String(r.campaign_name),
+            nonprofit: String(r.organization_name),
+            status: String(r.campaign_status),
+            businessTimingStatus: String(r.business_timing_status ?? "ok"),
+            forkupReviewStatus: String(r.forkup_review_status ?? "none"),
+            startDate: r.campaign_start_date
+                ? String(r.campaign_start_date).slice(0, 10)
+                : null,
+            eventDate: r.event_date ? String(r.event_date).slice(0, 10) : null,
+        })));
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load ForkUp review queue" });
+    }
+});
 exports.superadminRouter.get("/access-requests", async (req, res) => {
     try {
         const conditions = [];

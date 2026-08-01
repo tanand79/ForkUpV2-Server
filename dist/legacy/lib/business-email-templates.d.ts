@@ -1,0 +1,42 @@
+import type { MethodType } from "../types/campaign";
+export type BusinessEmailTemplateKey = "initial_invitation" | "invite_reminder" | "accepted_confirmation" | "declined_confirmation" | "missing_info" | "launch_kit" | "starting_soon" | "settlement_ready";
+export type BusinessEmailContext = {
+    businessName: string;
+    businessContactName?: string | null;
+    nonprofitName: string;
+    campaignTitle: string;
+    campaignPurpose?: string | null;
+    participationLabel: string;
+    dateRangeLabel: string;
+    respondByDate?: string | null;
+    startOrEventDate?: string | null;
+    reviewUrl: string;
+    dashboardUrl?: string | null;
+    materialsUrl?: string | null;
+    settlementReportUrl?: string | null;
+    eligibleSales?: string | null;
+    donationAmount?: string | null;
+    forkupFee?: string | null;
+    achAmount?: string | null;
+};
+export type RenderedBusinessEmail = {
+    subject: string;
+    body: string;
+    emailType: string;
+    templateKey: BusinessEmailTemplateKey;
+};
+export declare function participationLabelFromMethods(methods: MethodType[]): string;
+export declare function formatCampaignDateLabel(input: {
+    startDate?: string | null;
+    endDate?: string | null;
+    eventDate?: string | null;
+}): string;
+export declare function renderInitialInvitation(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderInviteReminder(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderAcceptedConfirmation(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderDeclinedConfirmation(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderMissingInfo(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderLaunchKit(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderStartingSoon(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderSettlementReady(ctx: BusinessEmailContext): RenderedBusinessEmail;
+export declare function renderBusinessEmail(key: BusinessEmailTemplateKey, ctx: BusinessEmailContext): RenderedBusinessEmail;

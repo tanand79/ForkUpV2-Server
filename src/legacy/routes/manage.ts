@@ -9,7 +9,15 @@ import {
   parseChangeRequestMessage,
   shiftCampaignDates,
 } from "../lib/parse-change-request";
-import type { CampaignStatus } from "../types/campaign";
+import {
+  buildSettlementBusinessEmail,
+  sendBusinessLifecycleBatch,
+} from "../lib/business-lifecycle-emails";
+import {
+  formatCampaignDateLabel,
+} from "../lib/business-email-templates";
+import { buildCampaignVisibility } from "../lib/campaign-visibility";
+import type { CampaignStatus, MethodType } from "../types/campaign";
 import { participantsRouter } from "./participants";
 import { config } from "../config";
 
@@ -18,12 +26,16 @@ export const manageRouter = Router();
 manageRouter.use("/campaigns/:slug/participants", participantsRouter);
 
 const PARTNER_STATUS_PRIORITY: Record<string, number> = {
-  changes_requested: 5,
+  changes_requested: 6,
+  needs_info: 5,
+  opened: 4,
   invited: 4,
   pending: 4,
+  ready: 3,
   accepted: 3,
   live: 2,
   completed: 2,
+  expired: 1,
   declined: 1,
 };
 
@@ -87,6 +99,12 @@ function mapPartnerInvitation(inv: QueryResultRow, campaignSlug: string) {
     givebackPercentage: Number(inv.giveback_percentage),
     participationHours: inv.participation_hours,
     acceptanceStatus: inv.acceptance_status,
+    inviteStatus: inv.invite_status ?? inv.acceptance_status,
+    respondByDate: toDateOnlyString(inv.respond_by_date) ?? null,
+    openedAt: inv.opened_at ?? null,
+    setupStatus: inv.setup_status ?? "pending",
+    marketingReadyStatus: inv.marketing_ready_status ?? "pending",
+    settlementReadyStatus: inv.settlement_ready_status ?? "pending",
     changeRequestMessage: inv.change_request_message ?? null,
     invitedAt: inv.created_at,
     token: inv.token,
@@ -109,6 +127,11 @@ type CampaignRow = QueryResultRow & {
   campaign_start_date: string | Date | null;
   campaign_end_date: string | Date | null;
   invitation_deadline: string | Date | null;
+  event_date?: string | Date | null;
+  business_timing_status?: string | null;
+  forkup_review_status?: string | null;
+  campaign_story?: string | null;
+  cover_image_url?: string | null;
 };
 
 manageRouter.get("/campaigns/:slug", async (req, res) => {
@@ -117,6 +140,8 @@ manageRouter.get("/campaigns/:slug", async (req, res) => {
       `SELECT c.id, c.slug, c.campaign_name, c.campaign_status, c.campaign_goal,
               c.raised, c.supporters_going, c.expected_guests, c.verified_visits,
               c.campaign_start_date, c.campaign_end_date, c.invitation_deadline,
+              c.event_date, c.business_timing_status, c.forkup_review_status,
+              c.campaign_story, c.cover_image_url,
               n.organization_name
        FROM campaigns c
        JOIN nonprofits n ON n.id = c.nonprofit_id
@@ -140,8 +165,14 @@ manageRouter.get("/campaigns/:slug", async (req, res) => {
       `SELECT
          cbl.id,
          cbl.acceptance_status,
+         cbl.invite_status,
          cbl.giveback_percentage,
          cbl.participation_hours,
+         cbl.respond_by_date,
+         cbl.opened_at,
+         cbl.setup_status,
+         cbl.marketing_ready_status,
+         cbl.settlement_ready_status,
          cbl.created_at,
          cbl.updated_at,
          b.business_name,
@@ -174,6 +205,52 @@ manageRouter.get("/campaigns/:slug", async (req, res) => {
       [campaign.id],
     );
 
+    const { rows: nextSeRows } = await pool.query<QueryResultRow>(
+      `SELECT id, title, scheduled_date, action_type
+       FROM success_engine_actions
+       WHERE campaign_id = $1
+         AND status IN ('ready', 'draft', 'pending')
+         AND (scheduled_date IS NULL OR scheduled_date >= CURRENT_DATE - INTERVAL '1 day')
+       ORDER BY
+         CASE WHEN scheduled_date IS NULL THEN 1 ELSE 0 END,
+         scheduled_date ASC,
+         id ASC
+       LIMIT 1`,
+      [campaign.id],
+    );
+    const nextSe = nextSeRows[0]
+      ? {
+          id: Number(nextSeRows[0].id),
+          title: String(nextSeRows[0].title),
+          scheduledDate: toDateOnlyString(nextSeRows[0].scheduled_date),
+          actionType: String(nextSeRows[0].action_type),
+        }
+      : null;
+
+    const methodTypes = methods.map((m) => m.method_type as MethodType);
+    const mappedInvitations = uniqueInvitations.map((inv) =>
+      mapPartnerInvitation(inv, campaign.slug),
+    );
+    const visibility = buildCampaignVisibility({
+      methods: methodTypes,
+      campaignStatus: String(campaign.campaign_status),
+      businessTimingStatus: campaign.business_timing_status,
+      forkupReviewStatus: campaign.forkup_review_status,
+      eventDate: toDateOnlyString(campaign.event_date),
+      endDate: toDateOnlyString(campaign.campaign_end_date),
+      coverPresent: Boolean(String(campaign.cover_image_url || "").trim()),
+      storyPresent: Boolean(String(campaign.campaign_story || "").trim()),
+      partners: mappedInvitations.map((inv) => ({
+        businessName: inv.businessName,
+        acceptanceStatus: inv.acceptanceStatus,
+        inviteStatus: inv.inviteStatus,
+        respondByDate: inv.respondByDate,
+        setupStatus: inv.setupStatus,
+        settlementReadyStatus: inv.settlementReadyStatus,
+      })),
+      nextSuccessEngineAction: nextSe,
+    });
+
     res.json({
       slug: campaign.slug,
       name: campaign.campaign_name,
@@ -186,20 +263,22 @@ manageRouter.get("/campaigns/:slug", async (req, res) => {
       verifiedVisits: Number(campaign.verified_visits),
       startDate: toDateOnlyString(campaign.campaign_start_date),
       endDate: toDateOnlyString(campaign.campaign_end_date),
+      eventDate: toDateOnlyString(campaign.event_date),
       invitationDeadline: toDateOnlyString(campaign.invitation_deadline),
+      businessTimingStatus: campaign.business_timing_status ?? "ok",
+      forkupReviewStatus: campaign.forkup_review_status ?? "none",
       methods: methods.map((m) => ({
         id: m.id,
         methodType: m.method_type,
         methodName: m.method_name,
         methodStatus: m.method_status,
       })),
-      invitations: uniqueInvitations.map((inv) =>
-        mapPartnerInvitation(inv, campaign.slug),
-      ),
+      invitations: mappedInvitations,
       virtualDonations: {
         count: Number(donationStats[0]?.count ?? 0),
         total: Number(donationStats[0]?.total ?? 0),
       },
+      visibility,
     });
   } catch (err) {
     console.error(err);
@@ -409,7 +488,8 @@ manageRouter.get("/campaigns", async (req, res) => {
     const { rows: rows } = await pool.query<CampaignRow>(
       `SELECT c.id, c.slug, c.campaign_name, c.campaign_status, c.campaign_goal,
               c.raised, c.supporters_going, c.verified_visits, c.campaign_start_date,
-              c.campaign_end_date, n.organization_name,
+              c.campaign_end_date, c.business_timing_status, c.forkup_review_status,
+              n.organization_name,
               (SELECT COUNT(DISTINCT LOWER(b2.contact_email))
                FROM campaign_business_locations cbl2
                JOIN businesses b2 ON b2.id = cbl2.business_id
@@ -419,14 +499,22 @@ manageRouter.get("/campaigns", async (req, res) => {
                FROM campaign_business_locations cbl2
                JOIN businesses b2 ON b2.id = cbl2.business_id
                WHERE cbl2.campaign_id = c.id
-                 AND cbl2.acceptance_status IN ('invited', 'pending')
+                 AND cbl2.acceptance_status IN ('invited', 'pending', 'opened')
                  AND LOWER(b2.contact_email) LIKE '%@%') AS partners_pending,
               (SELECT COUNT(DISTINCT LOWER(b2.contact_email))
                FROM campaign_business_locations cbl2
                JOIN businesses b2 ON b2.id = cbl2.business_id
                WHERE cbl2.campaign_id = c.id
                  AND cbl2.acceptance_status = 'changes_requested'
-                 AND LOWER(b2.contact_email) LIKE '%@%') AS partners_changes_requested
+                 AND LOWER(b2.contact_email) LIKE '%@%') AS partners_changes_requested,
+              (SELECT COUNT(*)::int
+               FROM campaign_business_locations cbl3
+               WHERE cbl3.campaign_id = c.id
+                 AND (
+                   cbl3.setup_status = 'needs_info'
+                   OR cbl3.settlement_ready_status = 'needs_info'
+                   OR cbl3.invite_status = 'needs_info'
+                 )) AS partners_needs_info
        FROM campaigns c
        JOIN nonprofits n ON n.id = c.nonprofit_id
        ${where}
@@ -445,9 +533,12 @@ manageRouter.get("/campaigns", async (req, res) => {
         verifiedVisits: r.verified_visits,
         startDate: toDateOnlyString(r.campaign_start_date),
         endDate: toDateOnlyString(r.campaign_end_date),
+        businessTimingStatus: r.business_timing_status ?? "ok",
+        forkupReviewStatus: r.forkup_review_status ?? "none",
         partnersInvited: Number(r.partners_invited ?? 0),
         partnersPending: Number(r.partners_pending ?? 0),
         partnersChangesRequested: Number(r.partners_changes_requested ?? 0),
+        partnersNeedsInfo: Number((r as QueryResultRow).partners_needs_info ?? 0),
       })),
     );
   } catch (err) {
@@ -516,7 +607,13 @@ manageRouter.get("/nonprofits/:nonprofitId/partner-updates", async (req, res) =>
       `SELECT
          cbl.id,
          cbl.acceptance_status,
+         cbl.invite_status,
          cbl.giveback_percentage,
+         cbl.respond_by_date,
+         cbl.opened_at,
+         cbl.setup_status,
+         cbl.marketing_ready_status,
+         cbl.settlement_ready_status,
          cbl.created_at,
          cbl.updated_at,
          c.slug AS campaign_slug,
@@ -535,9 +632,15 @@ manageRouter.get("/nonprofits/:nonprofitId/partner-updates", async (req, res) =>
        LEFT JOIN business_acceptances ba ON ba.campaign_business_location_id = cbl.id
        LEFT JOIN invitation_tokens it ON it.campaign_business_location_id = cbl.id
        WHERE c.nonprofit_id = $1
-         AND cbl.acceptance_status IN ('invited', 'pending', 'changes_requested')
+         AND cbl.acceptance_status IN ('invited', 'pending', 'opened', 'changes_requested', 'needs_info')
        ORDER BY
-         CASE cbl.acceptance_status WHEN 'changes_requested' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+         CASE cbl.acceptance_status
+           WHEN 'changes_requested' THEN 0
+           WHEN 'needs_info' THEN 1
+           WHEN 'opened' THEN 2
+           WHEN 'pending' THEN 3
+           ELSE 4
+         END,
          cbl.updated_at DESC`,
       [nonprofitId],
     );
@@ -548,6 +651,12 @@ manageRouter.get("/nonprofits/:nonprofitId/partner-updates", async (req, res) =>
       unique.map((r) => ({
         id: r.id,
         acceptanceStatus: r.acceptance_status,
+        inviteStatus: r.invite_status ?? r.acceptance_status,
+        respondByDate: toDateOnlyString(r.respond_by_date) ?? null,
+        openedAt: r.opened_at ?? null,
+        setupStatus: r.setup_status ?? "pending",
+        marketingReadyStatus: r.marketing_ready_status ?? "pending",
+        settlementReadyStatus: r.settlement_ready_status ?? "pending",
         businessName: r.business_name,
         businessEmail: r.contact_email,
         locationName: r.location_name,
@@ -820,6 +929,93 @@ manageRouter.post("/success-engine/:id/send", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to send success engine action" });
+  }
+});
+
+/**
+ * Nick V2 Layer 5 — send business lifecycle emails 2/5/6/7 for a campaign.
+ * Method: POST /api/manage/campaigns/:slug/business-emails
+ * Body: { templateKey: 'invite_reminder' | 'missing_info' | 'launch_kit' | 'starting_soon', invitationId?: number }
+ * Response: { success, sent, skipped, targeted, templateKey }
+ */
+manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").replace(/\/+$/, "");
+    const { rows: campRows } = await pool.query<QueryResultRow>(
+      `SELECT id FROM campaigns WHERE slug = $1 LIMIT 1`,
+      [slug],
+    );
+    const campaignId = Number(campRows[0]?.id);
+    if (!campaignId) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+
+    const body = req.body as { templateKey?: string; invitationId?: number };
+    const allowed = ["invite_reminder", "missing_info", "launch_kit", "starting_soon"] as const;
+    const templateKey = body.templateKey as (typeof allowed)[number] | undefined;
+    if (!templateKey || !allowed.includes(templateKey)) {
+      res.status(400).json({
+        error: `templateKey must be one of: ${allowed.join(", ")}`,
+      });
+      return;
+    }
+
+    const invitationId =
+      typeof body.invitationId === "number" && Number.isFinite(body.invitationId)
+        ? body.invitationId
+        : undefined;
+
+    const result = await sendBusinessLifecycleBatch({
+      campaignId,
+      templateKey,
+      invitationId,
+    });
+
+    res.json({
+      success: true,
+      templateKey,
+      ...result,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to send business lifecycle emails" });
+  }
+});
+
+/**
+ * Marks business invitations past their respond_by_date as expired.
+ * Method: POST /api/manage/invites/expire-due
+ * Body: none
+ * Response: { success, expiredCount }
+ */
+manageRouter.post("/invites/expire-due", async (_req, res) => {
+  try {
+    const { rowCount: cblCount } = await pool.query(
+      `UPDATE campaign_business_locations
+       SET
+         acceptance_status = 'expired',
+         invite_status = 'expired',
+         updated_at = NOW()
+       WHERE respond_by_date IS NOT NULL
+         AND respond_by_date < CURRENT_DATE
+         AND acceptance_status IN ('draft', 'invited', 'opened', 'pending')`,
+    );
+    const { rowCount: biCount } = await pool.query(
+      `UPDATE business_invitations
+       SET invitation_status = 'expired'
+       WHERE respond_by_date IS NOT NULL
+         AND respond_by_date < CURRENT_DATE
+         AND invitation_status IN ('draft', 'sent', 'opened')`,
+    );
+    res.json({
+      success: true,
+      expiredCount: Number(cblCount ?? 0),
+      emailLedgerExpired: Number(biCount ?? 0),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to expire due invitations" });
   }
 });
 
@@ -1295,7 +1491,8 @@ function money(value: unknown): string {
  */
 async function sendSettlementEmails(campaignId: number): Promise<void> {
   const { rows: campaignRows } = await pool.query<QueryResultRow>(
-    `SELECT c.campaign_name, c.slug, n.organization_name,
+    `SELECT c.campaign_name, c.slug, c.campaign_start_date, c.campaign_end_date, c.event_date,
+            n.organization_name,
             n.contact_email AS nonprofit_email, n.contact_name AS nonprofit_contact
      FROM campaigns c
      JOIN nonprofits n ON n.id = c.nonprofit_id
@@ -1304,6 +1501,12 @@ async function sendSettlementEmails(campaignId: number): Promise<void> {
   );
   const campaign = campaignRows[0];
   if (!campaign) return;
+
+  const dateRangeLabel = formatCampaignDateLabel({
+    startDate: toDateOnlyString(campaign.campaign_start_date),
+    endDate: toDateOnlyString(campaign.campaign_end_date),
+    eventDate: toDateOnlyString(campaign.event_date),
+  });
 
   const { rows: bizRows } = await pool.query<QueryResultRow>(
     `SELECT s.business_id,
@@ -1360,22 +1563,23 @@ async function sendSettlementEmails(campaignId: number): Promise<void> {
       continue;
     }
 
+    // Nick V2 Layer 5 Email 8 — settlement ready (keeps emailType settlement_business).
+    const rendered = buildSettlementBusinessEmail({
+      businessName: String(row.business_name),
+      nonprofitName: String(campaign.organization_name),
+      campaignTitle: String(campaign.campaign_name),
+      dateRangeLabel,
+      eligibleSales: Number(row.eligible_sales ?? 0),
+      donationAmount: Number(row.donation_pool ?? 0),
+      forkupFee,
+      reportUrl,
+    });
     await sendEmail({
       to: recipient,
       name: typeof row.business_name === "string" ? row.business_name : null,
-      subject: `Settlement for "${campaign.campaign_name}" — ${row.business_name}`,
-      body:
-        `Hi ${row.business_name},\n\n` +
-        `The ForkUp campaign "${campaign.campaign_name}" with ${campaign.organization_name} has closed.\n\n` +
-        `Eligible sales: ${money(row.eligible_sales)}\n` +
-        `Giveback: ${Number(row.donation_percentage ?? 0)}%\n` +
-        `Donation pool: ${money(row.donation_pool)}\n` +
-        `ForkUp fee (deducted via ACH): ${money(forkupFee)}\n` +
-        `Net amount owed to ${campaign.organization_name}: ${money(net)}\n\n` +
-        `The ForkUp fee of ${money(forkupFee)} will be deducted from your account via ACH.\n` +
-        `Full report: ${reportUrl}\n\n` +
-        `— ForkUp`,
-      emailType: "settlement_business",
+      subject: rendered.subject,
+      body: rendered.body,
+      emailType: rendered.emailType,
       campaignId,
       stakeholderRole: "business",
       relatedToken: `settlement:${campaignId}:${row.business_id}`,

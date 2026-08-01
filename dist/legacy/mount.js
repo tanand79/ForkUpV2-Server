@@ -15,6 +15,7 @@ const campaign_images_1 = require("./routes/campaign-images");
 const manage_1 = require("./routes/manage");
 const improve_story_1 = require("./routes/improve-story");
 const generate_campaign_draft_1 = require("./routes/generate-campaign-draft");
+const suggest_campaign_goal_1 = require("./routes/suggest-campaign-goal");
 const generate_organization_draft_1 = require("./routes/generate-organization-draft");
 const receipts_1 = require("./routes/receipts");
 const uploads_1 = require("./routes/uploads");
@@ -23,6 +24,7 @@ const profiles_1 = require("./routes/profiles");
 const us_nonprofit_suggest_1 = require("./routes/us-nonprofit-suggest");
 const library_1 = require("./routes/library");
 const superadmin_1 = require("./routes/superadmin");
+const campaign_ai_1 = require("./routes/campaign-ai");
 const receipts_2 = require("./lib/receipts");
 const pool_1 = require("./db/pool");
 function mountLegacyApi(app) {
@@ -81,7 +83,9 @@ function mountLegacyApi(app) {
     app.use("/api/uploads", uploads_1.uploadsRouter);
     app.use("/api", improve_story_1.improveStoryRouter);
     app.use("/api", generate_campaign_draft_1.generateCampaignDraftRouter);
+    app.use("/api", suggest_campaign_goal_1.suggestCampaignGoalRouter);
     app.use("/api", generate_organization_draft_1.generateOrganizationDraftRouter);
+    app.use("/api/campaign-ai", campaign_ai_1.campaignAiRouter);
     app.use("/api/manage", manage_1.manageRouter);
 }
 //# sourceMappingURL=mount.js.map

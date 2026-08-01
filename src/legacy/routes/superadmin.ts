@@ -32,6 +32,10 @@
  * GET     /api/superadmin/access-requests
  * POST    /api/superadmin/access-requests/:id/approve
  * POST    /api/superadmin/access-requests/:id/deny
+ *
+ * GET     /api/superadmin/forkup-review-queue
+ * POST    /api/superadmin/forkup-review/:slug/approve
+ * POST    /api/superadmin/forkup-review/:slug/deny
  */
 import { Router } from "express";
 import crypto from "crypto";
@@ -547,6 +551,141 @@ superadminRouter.post("/settings/smtp/test", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "SMTP test failed" });
+  }
+});
+
+/**
+ * Nick V2 Layer 6 — campaigns needing ForkUp timing review.
+ * Method: GET /api/superadmin/forkup-review-queue
+ * Response: [{ slug, name, nonprofit, businessTimingStatus, forkupReviewStatus, startDate, eventDate }]
+ */
+superadminRouter.get("/forkup-review-queue", async (_req, res) => {
+  try {
+    const { rows } = await pool.query<QueryResultRow>(
+      `SELECT c.slug, c.campaign_name, c.business_timing_status, c.forkup_review_status,
+              c.campaign_start_date, c.event_date, c.campaign_status,
+              n.organization_name
+       FROM campaigns c
+       JOIN nonprofits n ON n.id = c.nonprofit_id
+       WHERE (c.business_timing_status = 'needs_forkup_review'
+          OR c.forkup_review_status = 'pending')
+         AND c.forkup_review_status NOT IN ('approved', 'denied')
+       ORDER BY c.updated_at DESC
+       LIMIT 100`,
+    );
+    res.json(
+      rows.map((r) => ({
+        slug: String(r.slug),
+        name: String(r.campaign_name),
+        nonprofit: String(r.organization_name),
+        status: String(r.campaign_status),
+        businessTimingStatus: String(r.business_timing_status ?? "ok"),
+        forkupReviewStatus: String(r.forkup_review_status ?? "none"),
+        startDate: r.campaign_start_date
+          ? String(r.campaign_start_date).slice(0, 10)
+          : null,
+        eventDate: r.event_date ? String(r.event_date).slice(0, 10) : null,
+      })),
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load ForkUp review queue" });
+  }
+});
+
+/**
+ * Approve short-timeline ForkUp review for a campaign.
+ * Method: POST /api/superadmin/forkup-review/:slug/approve
+ * Body: {}
+ * Response: { success, slug, forkupReviewStatus: "approved", businessTimingStatus: "ok" }
+ */
+superadminRouter.post("/forkup-review/:slug/approve", async (req, res) => {
+  try {
+    const slug = typeof req.params.slug === "string" ? req.params.slug.trim() : "";
+    if (!slug) {
+      res.status(400).json({ error: "Campaign slug is required" });
+      return;
+    }
+
+    const { rows } = await pool.query<QueryResultRow>(
+      `UPDATE campaigns
+       SET forkup_review_status = 'approved',
+           business_timing_status = 'ok',
+           updated_at = NOW()
+       WHERE slug = $1
+         AND (business_timing_status = 'needs_forkup_review'
+           OR forkup_review_status = 'pending')
+         AND forkup_review_status NOT IN ('approved', 'denied')
+       RETURNING slug, forkup_review_status, business_timing_status`,
+      [slug],
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ error: "Campaign not found in ForkUp review queue" });
+      return;
+    }
+
+    // Clear per-method timing gate so business invites can proceed after approval.
+    await pool.query(
+      `UPDATE campaign_methods
+       SET timing_status = 'ok'
+       WHERE campaign_id = (SELECT id FROM campaigns WHERE slug = $1)
+         AND timing_status = 'needs_forkup_review'`,
+      [slug],
+    );
+
+    res.json({
+      success: true,
+      slug: String(rows[0].slug),
+      forkupReviewStatus: String(rows[0].forkup_review_status),
+      businessTimingStatus: String(rows[0].business_timing_status),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to approve ForkUp review" });
+  }
+});
+
+/**
+ * Deny short-timeline ForkUp review for a campaign.
+ * Method: POST /api/superadmin/forkup-review/:slug/deny
+ * Body: {}
+ * Response: { success, slug, forkupReviewStatus: "denied" }
+ */
+superadminRouter.post("/forkup-review/:slug/deny", async (req, res) => {
+  try {
+    const slug = typeof req.params.slug === "string" ? req.params.slug.trim() : "";
+    if (!slug) {
+      res.status(400).json({ error: "Campaign slug is required" });
+      return;
+    }
+
+    const { rows } = await pool.query<QueryResultRow>(
+      `UPDATE campaigns
+       SET forkup_review_status = 'denied',
+           updated_at = NOW()
+       WHERE slug = $1
+         AND (business_timing_status = 'needs_forkup_review'
+           OR forkup_review_status = 'pending')
+         AND forkup_review_status NOT IN ('approved', 'denied')
+       RETURNING slug, forkup_review_status, business_timing_status`,
+      [slug],
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ error: "Campaign not found in ForkUp review queue" });
+      return;
+    }
+
+    res.json({
+      success: true,
+      slug: String(rows[0].slug),
+      forkupReviewStatus: String(rows[0].forkup_review_status),
+      businessTimingStatus: String(rows[0].business_timing_status),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to deny ForkUp review" });
   }
 });
 

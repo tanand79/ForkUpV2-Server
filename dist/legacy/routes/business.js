@@ -5,9 +5,12 @@ const express_1 = require("express");
 const invitations_1 = require("../lib/invitations");
 const auth_1 = require("../lib/auth");
 const mailer_1 = require("../lib/mailer");
+const business_lifecycle_emails_1 = require("../lib/business-lifecycle-emails");
 const methods_1 = require("../lib/methods");
 const slug_1 = require("../lib/slug");
 const date_only_1 = require("../lib/date-only");
+const campaign_timing_1 = require("../lib/campaign-timing");
+const business_invite_timing_1 = require("../lib/business-invite-timing");
 const pool_1 = require("../db/pool");
 exports.businessRouter = (0, express_1.Router)();
 function formatDate(value) {
@@ -43,15 +46,22 @@ function mapInvitation(row) {
         id: row.id,
         token: row.token,
         acceptanceStatus: row.acceptance_status,
+        inviteStatus: row.invite_status ?? row.acceptance_status,
         givebackPercentage: Number(row.giveback_percentage),
         participationHours: row.participation_hours,
         eligibleSalesRules: row.eligible_sales_rules,
+        respondByDate: formatDate(row.respond_by_date ?? null),
+        openedAt: row.opened_at ? String(row.opened_at) : null,
+        setupStatus: row.setup_status ?? "pending",
+        marketingReadyStatus: row.marketing_ready_status ?? "pending",
+        settlementReadyStatus: row.settlement_ready_status ?? "pending",
         campaign: {
             slug: row.campaign_slug,
             name: row.campaign_name,
             story: row.campaign_story,
             startDate: formatDate(row.campaign_start_date),
             endDate: formatDate(row.campaign_end_date),
+            eventDate: formatDate(row.event_date ?? null),
             status: row.campaign_status,
             invitationDeadline: formatDate(row.invitation_deadline),
             nonprofit: row.organization_name,
@@ -153,14 +163,21 @@ async function fetchInvitationByToken(token) {
          cbl.id,
          cbl.campaign_id,
          cbl.acceptance_status,
+         cbl.invite_status,
          cbl.giveback_percentage,
          cbl.participation_hours,
          cbl.eligible_sales_rules,
+         cbl.respond_by_date,
+         cbl.opened_at,
+         cbl.setup_status,
+         cbl.marketing_ready_status,
+         cbl.settlement_ready_status,
          c.slug AS campaign_slug,
          c.campaign_name,
          c.campaign_story,
          c.campaign_start_date,
          c.campaign_end_date,
+         c.event_date,
          c.campaign_status,
          c.invitation_deadline,
          n.organization_name,
@@ -218,6 +235,10 @@ exports.businessRouter.get("/collaborations", async (req, res) => {
            cbl.id,
            cbl.campaign_id,
            cbl.acceptance_status,
+           cbl.invite_status,
+           cbl.respond_by_date,
+           cbl.setup_status,
+           cbl.settlement_ready_status,
            cbl.giveback_percentage,
            cbl.participation_hours,
            cbl.eligible_sales_rules,
@@ -257,7 +278,7 @@ exports.businessRouter.get("/collaborations", async (req, res) => {
             const collaborations = [];
             for (const row of rows) {
                 if (!row.token &&
-                    ["invited", "pending", "changes_requested"].includes(row.acceptance_status)) {
+                    ["invited", "pending", "opened", "changes_requested", "needs_info"].includes(row.acceptance_status)) {
                     row.token = await (0, invitations_1.ensureInvitationToken)(connection, row.id);
                 }
                 const mapped = mapInvitation(row);
@@ -320,7 +341,7 @@ exports.businessRouter.get("/invitations", async (req, res) => {
          JOIN campaign_methods cm ON cm.id = cbl.method_id
          LEFT JOIN invitation_tokens it ON it.campaign_business_location_id = cbl.id
          WHERE LOWER(b.contact_email) = $1
-           AND cbl.acceptance_status IN ('invited', 'pending', 'changes_requested')
+           AND cbl.acceptance_status IN ('invited', 'pending', 'opened', 'changes_requested', 'needs_info')
          ORDER BY c.campaign_start_date ASC`, [email]);
             const invitations = [];
             for (const row of rows) {
@@ -342,6 +363,33 @@ exports.businessRouter.get("/invitations", async (req, res) => {
 });
 exports.businessRouter.get("/invitations/:token", async (req, res) => {
     try {
+        await pool_1.pool.query(`UPDATE campaign_business_locations cbl
+       SET
+         acceptance_status = CASE
+           WHEN acceptance_status IN ('invited', 'pending') THEN 'opened'
+           ELSE acceptance_status
+         END,
+         invite_status = CASE
+           WHEN invite_status IN ('invited', 'pending', 'draft') THEN 'opened'
+           ELSE invite_status
+         END,
+         opened_at = COALESCE(opened_at, NOW()),
+         updated_at = NOW()
+       FROM invitation_tokens it
+       WHERE it.token = $1
+         AND it.campaign_business_location_id = cbl.id
+         AND cbl.acceptance_status IN ('invited', 'pending', 'opened')`, [req.params.token]);
+        await pool_1.pool.query(`UPDATE business_invitations bi
+       SET
+         invitation_status = CASE
+           WHEN invitation_status IN ('sent', 'draft') THEN 'opened'
+           ELSE invitation_status
+         END,
+         opened_at = COALESCE(opened_at, NOW())
+       FROM invitation_tokens it
+       WHERE it.token = $1
+         AND it.campaign_business_location_id = bi.campaign_business_location_id
+         AND bi.invitation_status IN ('sent', 'draft', 'opened')`, [req.params.token]);
         const invitation = await fetchInvitationByToken(req.params.token);
         if (!invitation) {
             res.status(404).json({ error: "Invitation not found" });
@@ -375,7 +423,7 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
             return;
         }
         const invite = access.row;
-        if (!["invited", "pending", "changes_requested"].includes(String(invite.acceptance_status))) {
+        if (!["invited", "pending", "opened", "changes_requested", "needs_info"].includes(String(invite.acceptance_status))) {
             await connection.query("ROLLBACK");
             res.status(400).json({ error: "This invitation has already been responded to" });
             return;
@@ -383,18 +431,33 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
         const cblId = Number(invite.id);
         const campaignId = Number(invite.campaign_id);
         await linkUserToBusiness(connection, access.user.id, access.businessId);
+        const setup = (0, business_invite_timing_1.deriveSetupReadiness)({
+            achAuthorized: Boolean(achAuthorized),
+            billingContactEmail: typeof billingContactEmail === "string" ? billingContactEmail : null,
+            settlementContactEmail: typeof settlementContactEmail === "string" ? settlementContactEmail : null,
+            authorizedRepresentative: typeof authorizedRepresentative === "string"
+                ? authorizedRepresentative
+                : null,
+        });
         await connection.query(`UPDATE campaign_business_locations SET
         acceptance_status = 'accepted',
-        invite_status = 'accepted',
+        invite_status = $4,
         participation_hours = COALESCE($1, participation_hours),
         eligible_sales_rules = COALESCE($2, eligible_sales_rules),
         terms_confirmed = TRUE,
         ach_authorized = TRUE,
+        setup_status = $5,
+        marketing_ready_status = $6,
+        settlement_ready_status = $7,
         updated_at = NOW()
        WHERE id = $3`, [
             typeof participationHours === "string" ? participationHours : null,
             typeof eligibleSalesRules === "string" ? eligibleSalesRules : null,
             cblId,
+            setup.inviteStatusAfterAccept,
+            setup.setupStatus,
+            setup.marketingReadyStatus,
+            setup.settlementReadyStatus,
         ]);
         await connection.query(`INSERT INTO business_acceptances (
         campaign_business_location_id, authorized_representative, eligible_sales_rules,
@@ -425,9 +488,45 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
         await connection.query(`UPDATE businesses SET business_status = 'active', claim_status = 'claimed', updated_at = NOW()
        WHERE id = (SELECT business_id FROM campaign_business_locations WHERE id = $1)`, [cblId]);
         await (0, invitations_1.evaluateCampaignInvitationPhase)(connection, campaignId);
+        const { rows: timingRows } = await connection.query(`SELECT c.campaign_start_date, c.event_date, cbl.method_id
+       FROM campaigns c
+       JOIN campaign_business_locations cbl ON cbl.campaign_id = c.id
+       WHERE cbl.id = $1`, [cblId]);
+        const timingRow = timingRows[0];
+        const anchorDate = timingRow?.event_date ?? timingRow?.campaign_start_date ?? null;
+        const promoStatus = (0, campaign_timing_1.evaluateAcceptancePromotionWindow)({
+            startOrEventDate: anchorDate ? String(anchorDate) : null,
+        });
+        if (promoStatus === "limited_promotion_window") {
+            await connection.query(`UPDATE campaigns SET
+           business_timing_status = CASE
+             WHEN business_timing_status = 'needs_forkup_review' THEN business_timing_status
+             ELSE 'limited_promotion_window'
+           END,
+           updated_at = NOW()
+         WHERE id = $1`, [campaignId]);
+            if (timingRow?.method_id) {
+                await connection.query(`UPDATE campaign_methods SET
+             timing_status = CASE
+               WHEN timing_status = 'needs_forkup_review' THEN timing_status
+               ELSE 'limited_promotion_window'
+             END,
+             updated_at = NOW()
+           WHERE id = $1`, [timingRow.method_id]);
+            }
+        }
         await connection.query("COMMIT");
         await notifyNonprofitOfBusinessResponse(campaignId, access.businessId, "accepted");
-        res.json({ success: true, acceptanceStatus: "accepted" });
+        await (0, business_lifecycle_emails_1.sendBusinessAcceptedConfirmation)(campaignId, access.businessId);
+        res.json({
+            success: true,
+            acceptanceStatus: "accepted",
+            inviteStatus: setup.inviteStatusAfterAccept,
+            setupStatus: setup.setupStatus,
+            marketingReadyStatus: setup.marketingReadyStatus,
+            settlementReadyStatus: setup.settlementReadyStatus,
+            timingStatus: promoStatus,
+        });
     }
     catch (err) {
         await connection.query("ROLLBACK");
@@ -466,6 +565,7 @@ exports.businessRouter.post("/invitations/:token/decline", async (req, res) => {
         await (0, invitations_1.evaluateCampaignInvitationPhase)(connection, campaignId);
         await connection.query("COMMIT");
         await notifyNonprofitOfBusinessResponse(campaignId, access.businessId, "declined");
+        await (0, business_lifecycle_emails_1.sendBusinessDeclinedConfirmation)(campaignId, access.businessId);
         res.json({ success: true, acceptanceStatus: "declined" });
     }
     catch (err) {
