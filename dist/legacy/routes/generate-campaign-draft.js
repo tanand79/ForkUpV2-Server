@@ -5,6 +5,21 @@ const express_1 = require("express");
 const organization_library_1 = require("../lib/organization-library");
 const ai_chat_1 = require("../lib/ai-chat");
 exports.generateCampaignDraftRouter = (0, express_1.Router)();
+function parseSuggestedGoal(value) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return Math.round(value);
+    }
+    if (typeof value === "string") {
+        const digits = value.replace(/[^0-9.]/g, "");
+        if (!digits)
+            return null;
+        const n = Number.parseFloat(digits);
+        if (!Number.isFinite(n) || n <= 0)
+            return null;
+        return Math.round(n);
+    }
+    return null;
+}
 exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) => {
     try {
         const body = (req.body ?? {});
@@ -29,6 +44,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
         const methods = Array.isArray(body.methods)
             ? body.methods.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
             : [];
+        const needsSuggestedGoal = !goal;
         let libraryContext = "";
         let suggestedImageUrl = null;
         let libraryPromotion = { facebookUrl: "", instagramHandle: "", websiteUrl: "" };
@@ -43,7 +59,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
         const system = [
             "You are an expert nonprofit fundraising campaign writer for the ForkUp platform.",
             "Given a few short answers from a nonprofit organizer, prepare a campaign draft they will review and edit.",
-            "Write in the organization's authentic voice. Be specific and truthful to what was shared — never invent facts, figures, names, dates, or results.",
+            "Write in the organization's authentic voice. Be specific and truthful to what was shared — never invent facts, names, dates, or past results.",
             "Prioritize emotional connection, clarity, impact, and a clear reason to participate.",
             "Guidelines:",
             "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
@@ -52,7 +68,12 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             "- facebookUrl: public Facebook page URL if you know the real one for this org; otherwise empty string. Never invent.",
             "- instagramHandle: public Instagram handle like @orgname if you know the real one; otherwise empty string. Never invent.",
             "- websiteUrl: official organization website URL if known from context; otherwise empty string.",
-            'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
+            needsSuggestedGoal
+                ? "- suggestedGoal: a realistic whole-dollar USD fundraising target (integer, no $ or commas) based on purpose, methods, and campaign length. Typical community campaigns: 2500–25000. This is a recommendation the organizer can edit — not a claimed past result. Do not put the dollar amount in the story as a fact."
+                : "- Do not invent a fundraising goal amount; the organizer already provided one.",
+            needsSuggestedGoal
+                ? 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string, "suggestedGoal": number}.'
+                : 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
             "Do not include markdown, code fences, preamble, or commentary.",
         ].join("\n");
         const userParts = [
@@ -61,7 +82,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             mission ? `Mission: ${mission}` : "",
             causeCategory ? `Cause category: ${causeCategory}` : "",
             website ? `Organization website: ${website}` : "",
-            goal ? `Fundraising goal: ${goal}` : "",
+            goal ? `Fundraising goal: ${goal}` : "Fundraising goal: not provided — suggest a realistic target.",
             startDate || endDate ? `Dates: ${startDate || "TBD"} to ${endDate || "TBD"}` : "",
             methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
             libraryContext,
@@ -81,6 +102,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             draft = { story: raw };
         }
         const str = (v) => (typeof v === "string" ? v.trim() : "");
+        const suggestedGoal = needsSuggestedGoal ? parseSuggestedGoal(draft.suggestedGoal) : null;
         res.json({
             title: str(draft.title),
             story: str(draft.story),
@@ -89,6 +111,7 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             facebookUrl: libraryPromotion.facebookUrl || str(draft.facebookUrl),
             instagramHandle: libraryPromotion.instagramHandle || str(draft.instagramHandle),
             websiteUrl: libraryPromotion.websiteUrl || str(draft.websiteUrl) || website,
+            ...(suggestedGoal != null ? { suggestedGoal } : {}),
             provider: (0, ai_chat_1.aiProviderName)(),
         });
     }

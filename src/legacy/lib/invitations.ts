@@ -37,8 +37,11 @@ export async function evaluateCampaignInvitationPhase(
 
   const statuses = rows.map((r) => String(r.acceptance_status));
   const hasAccepted = statuses.includes("accepted");
+  // Terminal responses only — opened/invited/pending/expired still wait.
   const allResolved = statuses.every((s) =>
-    ["accepted", "declined", "changes_requested"].includes(s),
+    ["accepted", "declined", "changes_requested", "needs_info", "ready", "live", "completed"].includes(
+      s,
+    ),
   );
 
   if (hasAccepted && allResolved) {

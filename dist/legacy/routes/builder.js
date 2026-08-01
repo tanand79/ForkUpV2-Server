@@ -8,36 +8,49 @@ const methods_1 = require("../lib/methods");
 const date_only_1 = require("../lib/date-only");
 const auth_1 = require("../lib/auth");
 const s3_1 = require("../lib/s3");
-const mailer_1 = require("../lib/mailer");
 const organization_library_1 = require("../lib/organization-library");
+const campaign_timing_1 = require("../lib/campaign-timing");
+const business_invite_timing_1 = require("../lib/business-invite-timing");
+const business_lifecycle_emails_1 = require("../lib/business-lifecycle-emails");
 const pool_1 = require("../db/pool");
-async function sendBusinessInviteEmails(rows, campaignId, campaignName) {
-    const base = (0, mailer_1.resolveFrontendBaseUrl)();
-    for (const row of rows) {
-        if (row.acceptance_status !== "invited")
-            continue;
-        const email = typeof row.contact_email === "string" ? row.contact_email.trim() : "";
-        if (!email)
-            continue;
-        const acceptUrl = `${base}/?step=business-acceptance&token=${row.token}`;
-        await (0, mailer_1.sendEmail)({
-            to: email,
-            name: row.business_name,
-            subject: `${row.business_name}, you're invited to support "${campaignName}" on ForkUp`,
-            body: `Hi ${row.business_name},\n\n` +
-                `You've been invited to participate in the ForkUp campaign "${campaignName}"` +
-                `${row.location_name ? ` (${row.location_name})` : ""}.\n\n` +
-                `Review the campaign terms and accept or decline here:\n${acceptUrl}\n\n` +
-                `— ForkUp`,
-            emailType: "business_campaign_invitation",
-            campaignId,
-            stakeholderRole: "business",
-            relatedToken: row.token,
-            onlyOnce: true,
-        });
-    }
+async function sendBusinessInviteEmails(campaignId) {
+    await (0, business_lifecycle_emails_1.sendInitialInvitationEmails)(campaignId);
 }
 exports.builderRouter = (0, express_1.Router)();
+function resolveMethodsForSave(body) {
+    let methods = withImpliedAmbassador(body.methods ?? []);
+    if (body.continueWithoutBusinessMethods) {
+        methods = methods.filter((m) => !methods_1.METHOD_REQUIRES_BUSINESS[m]);
+    }
+    return methods;
+}
+function resolveStartDate(body, methods) {
+    const explicit = (0, date_only_1.toDateOnlyString)(body.startDate);
+    if (explicit)
+        return explicit;
+    if (body.launch && !(0, campaign_timing_1.hasBusinessMethods)(methods)) {
+        return (0, date_only_1.toDateOnlyString)(new Date());
+    }
+    return null;
+}
+function timingFieldsFromEvaluation(evaluation, body) {
+    const submitting = Boolean(body.submitForForkupReview);
+    const businessTimingStatus = evaluation.status;
+    if (submitting && evaluation.status === "needs_forkup_review") {
+        return {
+            businessTimingStatus,
+            forkupReviewStatus: "pending",
+            forkupReviewReason: evaluation.message,
+            forkupReviewRequestedAt: new Date(),
+        };
+    }
+    return {
+        businessTimingStatus,
+        forkupReviewStatus: "none",
+        forkupReviewReason: null,
+        forkupReviewRequestedAt: null,
+    };
+}
 function formatDate(value) {
     return (0, date_only_1.toDateOnlyString)(value);
 }
@@ -116,11 +129,34 @@ function isStartDateReached(startDate) {
     today.setHours(0, 0, 0, 0);
     return start.getTime() <= today.getTime();
 }
-async function resolveLaunchStatus(connection, campaignId, startDate) {
-    const { rows: pending } = await connection.query(`SELECT id FROM campaign_business_locations
-     WHERE campaign_id = $1 AND acceptance_status NOT IN ('accepted') LIMIT 1`, [campaignId]);
-    if (pending.length > 0)
-        return "invitation_phase";
+function withImpliedAmbassador(methods) {
+    if (methods.includes("guest_bartending_event") &&
+        !methods.includes("ambassador_fundraising")) {
+        return [...methods, "ambassador_fundraising"];
+    }
+    return methods;
+}
+async function resolveLaunchStatus(connection, campaignId, startDate, selectedMethods) {
+    let hasDefaultFundraisingLayer = false;
+    if (selectedMethods && selectedMethods.length > 0) {
+        hasDefaultFundraisingLayer = selectedMethods.some((m) => !methods_1.METHOD_REQUIRES_BUSINESS[m]);
+    }
+    else {
+        const { rows: methods } = await connection.query(`SELECT requires_business_acceptance
+       FROM campaign_methods WHERE campaign_id = $1`, [campaignId]);
+        hasDefaultFundraisingLayer = methods.some((m) => !Boolean(m.requires_business_acceptance));
+    }
+    if (!hasDefaultFundraisingLayer) {
+        const { rows: pending } = await connection.query(`SELECT id FROM campaign_business_locations
+       WHERE campaign_id = $1
+         AND acceptance_status NOT IN ('accepted', 'live', 'completed')
+       LIMIT 1`, [campaignId]);
+        if (pending.length > 0)
+            return "invitation_phase";
+        const { rows: partners } = await connection.query(`SELECT id FROM campaign_business_locations WHERE campaign_id = $1 LIMIT 1`, [campaignId]);
+        if (partners.length === 0)
+            return "invitation_phase";
+    }
     if (startDate && isStartDateReached(startDate))
         return "live";
     return "ready_to_launch";
@@ -130,7 +166,7 @@ function businessSupportsMethod(row, methodType) {
     return Boolean(row[cap]);
 }
 async function upsertNewBusinessInvite(connection, params) {
-    const { campaignId, nonprofitId, methodId, invite, existingPartnerKeys, existingPartnerEmails } = params;
+    const { campaignId, nonprofitId, methodId, invite, existingPartnerKeys, existingPartnerEmails, startOrEventDate, invitedByUserId, } = params;
     const email = invite.businessEmail.trim().toLowerCase();
     const name = invite.businessName.trim();
     if (!email.includes("@") || !name)
@@ -191,15 +227,37 @@ async function upsertNewBusinessInvite(connection, params) {
         existingPartnerEmails.add(email);
         return false;
     }
+    const respondByDate = (0, business_invite_timing_1.computeRespondByDate)({
+        sentDate: new Date(),
+        startOrEventDate,
+    });
     const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
       campaign_id, method_id, business_id, location_id,
-      invite_status, acceptance_status, giveback_percentage
-    ) VALUES ($1, $2, $3, $4, 'invited', 'invited', 10) RETURNING id`, [campaignId, methodId, businessId, locationId]);
+      invite_status, acceptance_status, giveback_percentage,
+      respond_by_date, invited_by_user_id, setup_status
+    ) VALUES ($1, $2, $3, $4, 'invited', 'invited', 10, $5, $6, 'pending')
+     RETURNING id`, [
+        campaignId,
+        methodId,
+        businessId,
+        locationId,
+        respondByDate,
+        invitedByUserId ?? null,
+    ]);
     await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
     await connection.query(`INSERT INTO business_invitations (
       campaign_id, nonprofit_id, method_id, business_name, business_email,
-      invitation_status, campaign_business_location_id
-    ) VALUES ($1, $2, $3, $4, $5, 'sent', $6)`, [campaignId, nonprofitId, methodId, name, email, cblResult[0].id]);
+      invitation_status, campaign_business_location_id, respond_by_date, invited_by_user_id
+    ) VALUES ($1, $2, $3, $4, $5, 'sent', $6, $7, $8)`, [
+        campaignId,
+        nonprofitId,
+        methodId,
+        name,
+        email,
+        cblResult[0].id,
+        respondByDate,
+        invitedByUserId ?? null,
+    ]);
     existingPartnerKeys.add(partnerKey);
     existingPartnerEmails.add(email);
     return true;
@@ -331,12 +389,23 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             res.status(400).json({ error: "Campaign story is required" });
             return;
         }
-        if (!body.startDate || !body.endDate) {
-            res.status(400).json({ error: "Campaign dates are required" });
-            return;
-        }
         if (!Array.isArray(body.methods) || body.methods.length === 0) {
             res.status(400).json({ error: "Select at least one fundraising method" });
+            return;
+        }
+        const methodsForSave = resolveMethodsForSave(body);
+        if (methodsForSave.length === 0) {
+            res.status(400).json({ error: "Select at least one fundraising method" });
+            return;
+        }
+        const dateError = (0, campaign_timing_1.validateMethodDateRequirements)({
+            methods: methodsForSave,
+            startDate: body.startDate,
+            endDate: body.endDate,
+            eventDate: body.eventDate,
+        });
+        if (dateError) {
+            res.status(400).json({ error: dateError });
             return;
         }
         if (!body.coverImage?.trim()) {
@@ -352,6 +421,23 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         }
         if (body.launch && !body.termsAccepted) {
             res.status(400).json({ error: "Terms must be accepted before launch" });
+            return;
+        }
+        const timingEval = (0, campaign_timing_1.evaluateBusinessMethodTiming)({
+            methods: methodsForSave,
+            startDate: body.startDate,
+            eventDate: body.eventDate,
+        });
+        const timingFields = timingFieldsFromEvaluation(timingEval, body);
+        const pendingInviteCount = (body.invitations?.length ?? 0) + (body.newBusinessInvites?.length ?? 0);
+        if (body.launch &&
+            pendingInviteCount > 0 &&
+            timingEval.status === "needs_forkup_review" &&
+            timingFields.forkupReviewStatus !== "pending") {
+            res.status(400).json({
+                error: "Business invitations require ForkUp review for this short timeline. Change the date, continue without business methods, or submit for ForkUp review.",
+                timing: timingEval,
+            });
             return;
         }
         await connection.query("BEGIN");
@@ -371,7 +457,10 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             res.status(400).json({ error: "This campaign can no longer be edited" });
             return;
         }
-        const needsBusiness = (0, methods_1.requiresAnyBusiness)(body.methods);
+        const needsBusiness = (0, methods_1.requiresAnyBusiness)(methodsForSave);
+        const resolvedStartDate = resolveStartDate(body, methodsForSave);
+        const resolvedEndDate = (0, date_only_1.toDateOnlyString)(body.endDate);
+        const resolvedEventDate = (0, date_only_1.toDateOnlyString)(body.eventDate);
         const { rows: existingPartners } = await connection.query(`SELECT cbl.business_id, cbl.location_id, LOWER(b.contact_email) AS contact_email
        FROM campaign_business_locations cbl
        JOIN businesses b ON b.id = cbl.business_id
@@ -381,15 +470,23 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             .map((p) => (p.contact_email ? String(p.contact_email) : ""))
             .filter(Boolean));
         const newInvitationCount = (body.invitations?.filter((inv) => !existingPartnerKeys.has(`${inv.businessId}:${inv.locationId}`)).length ?? 0) + (body.newBusinessInvites?.length ?? 0);
-        if (needsBusiness && body.launch && existingPartners.length === 0 && newInvitationCount === 0) {
+        const canInviteBusinessesEarly = timingFields.businessTimingStatus === "ok";
+        if (needsBusiness &&
+            body.launch &&
+            canInviteBusinessesEarly &&
+            existingPartners.length === 0 &&
+            newInvitationCount === 0) {
             res.status(400).json({
                 error: "At least one business location must be invited for the selected methods",
             });
             return;
         }
-        const invitationDeadline = (0, date_only_1.subtractCalendarDays)(body.startDate, 7);
+        const deadlineAnchor = resolvedStartDate || resolvedEventDate || resolvedEndDate || "";
+        const invitationDeadline = deadlineAnchor
+            ? (0, date_only_1.subtractCalendarDays)(deadlineAnchor, 7)
+            : null;
         let nextStatus = body.launch
-            ? await resolveLaunchStatus(connection, campaignId, body.startDate)
+            ? await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave)
             : currentStatus === "ready_to_launch"
                 ? "ready_to_launch"
                 : "draft";
@@ -399,85 +496,129 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         campaign_goal = $3,
         campaign_start_date = $4,
         campaign_end_date = $5,
-        cover_image_url = $6,
-        invitation_deadline = $7,
-        campaign_status = $8,
-        terms_accepted = $9,
-        terms_accepted_at = CASE WHEN $10 THEN NOW() ELSE terms_accepted_at END,
+        event_date = $6,
+        cover_image_url = $7,
+        invitation_deadline = $8,
+        campaign_status = $9,
+        terms_accepted = $10,
+        terms_accepted_at = CASE WHEN $11 THEN NOW() ELSE terms_accepted_at END,
+        business_timing_status = $12,
+        forkup_review_status = CASE
+          WHEN $13 = 'pending' THEN 'pending'
+          WHEN forkup_review_status = 'approved' THEN 'approved'
+          ELSE $13
+        END,
+        forkup_review_reason = COALESCE($14, forkup_review_reason),
+        forkup_review_requested_at = CASE
+          WHEN $13 = 'pending' THEN COALESCE(forkup_review_requested_at, NOW())
+          ELSE forkup_review_requested_at
+        END,
         updated_at = NOW()
-       WHERE id = $11`, [
+       WHERE id = $15`, [
             body.campaignName.trim(),
             body.campaignStory.trim(),
             body.campaignGoal ?? 0,
-            body.startDate,
-            body.endDate,
+            resolvedStartDate,
+            resolvedEndDate,
+            resolvedEventDate,
             body.coverImage,
             invitationDeadline,
             nextStatus,
             body.termsAccepted,
             body.termsAccepted,
+            timingFields.businessTimingStatus,
+            timingFields.forkupReviewStatus,
+            timingFields.forkupReviewReason,
             campaignId,
         ]);
         const { rows: existingMethods } = await connection.query("SELECT id, method_type FROM campaign_methods WHERE campaign_id = $1", [campaignId]);
         const methodIdByType = new Map(existingMethods.map((m) => [m.method_type, Number(m.id)]));
-        for (const methodType of body.methods) {
-            if (methodIdByType.has(methodType))
+        for (const methodType of methodsForSave) {
+            if (methodIdByType.has(methodType)) {
+                await connection.query(`UPDATE campaign_methods SET timing_status = $1, updated_at = NOW() WHERE id = $2`, [
+                    methods_1.METHOD_REQUIRES_BUSINESS[methodType]
+                        ? timingFields.businessTimingStatus
+                        : "ok",
+                    methodIdByType.get(methodType),
+                ]);
                 continue;
+            }
             const { rows: methodResult } = await connection.query(`INSERT INTO campaign_methods (
-          campaign_id, method_type, method_name, method_status, requires_business_acceptance
-        ) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+          campaign_id, method_type, method_name, method_status,
+          requires_business_acceptance, timing_status
+        ) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, [
                 campaignId,
                 methodType,
                 methods_1.METHOD_LABELS[methodType],
                 body.launch ? "invited" : "draft",
                 methods_1.METHOD_REQUIRES_BUSINESS[methodType],
+                methods_1.METHOD_REQUIRES_BUSINESS[methodType]
+                    ? timingFields.businessTimingStatus
+                    : "ok",
             ]);
             methodIdByType.set(methodType, methodResult[0].id);
         }
-        for (const invite of body.invitations ?? []) {
-            const key = `${invite.businessId}:${invite.locationId}`;
-            if (existingPartnerKeys.has(key))
-                continue;
-            const methodId = methodIdByType.get(invite.methodType);
-            if (!methodId)
-                continue;
-            const { rows: bizRows } = await connection.query(`SELECT b.*, bl.id AS location_id
-         FROM businesses b
-         JOIN business_locations bl ON bl.business_id = b.id
-         WHERE b.id = $1 AND bl.id = $2`, [invite.businessId, invite.locationId]);
-            if (bizRows.length === 0)
-                continue;
-            const biz = bizRows[0];
-            if (!businessSupportsMethod(biz, invite.methodType))
-                continue;
-            const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
-          campaign_id, method_id, business_id, location_id,
-          invite_status, acceptance_status, giveback_percentage
-        ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5) RETURNING id`, [
-                campaignId,
-                methodId,
-                invite.businessId,
-                invite.locationId,
-                invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
-            ]);
-            await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
-            existingPartnerKeys.add(key);
-        }
-        for (const invite of body.newBusinessInvites ?? []) {
-            const methodId = methodIdByType.get(invite.methodType);
-            if (!methodId)
-                continue;
-            await upsertNewBusinessInvite(connection, {
-                campaignId,
-                nonprofitId,
-                methodId,
-                invite,
-                existingPartnerKeys,
-                existingPartnerEmails,
-            });
+        const canInviteBusinesses = timingFields.businessTimingStatus === "ok";
+        const inviteAnchorDate = resolvedEventDate || resolvedStartDate || resolvedEndDate;
+        const invitedByUserId = authUser?.id ?? null;
+        if (canInviteBusinesses) {
+            for (const invite of body.invitations ?? []) {
+                const key = `${invite.businessId}:${invite.locationId}`;
+                if (existingPartnerKeys.has(key))
+                    continue;
+                const methodId = methodIdByType.get(invite.methodType);
+                if (!methodId)
+                    continue;
+                const { rows: bizRows } = await connection.query(`SELECT b.*, bl.id AS location_id
+           FROM businesses b
+           JOIN business_locations bl ON bl.business_id = b.id
+           WHERE b.id = $1 AND bl.id = $2`, [invite.businessId, invite.locationId]);
+                if (bizRows.length === 0)
+                    continue;
+                const biz = bizRows[0];
+                if (!businessSupportsMethod(biz, invite.methodType))
+                    continue;
+                const respondByDate = (0, business_invite_timing_1.computeRespondByDate)({
+                    sentDate: new Date(),
+                    startOrEventDate: inviteAnchorDate,
+                });
+                const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
+            campaign_id, method_id, business_id, location_id,
+            invite_status, acceptance_status, giveback_percentage,
+            respond_by_date, invited_by_user_id, setup_status
+          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending')
+           RETURNING id`, [
+                    campaignId,
+                    methodId,
+                    invite.businessId,
+                    invite.locationId,
+                    invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
+                    respondByDate,
+                    invitedByUserId,
+                ]);
+                await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
+                existingPartnerKeys.add(key);
+            }
+            for (const invite of body.newBusinessInvites ?? []) {
+                const methodId = methodIdByType.get(invite.methodType);
+                if (!methodId)
+                    continue;
+                await upsertNewBusinessInvite(connection, {
+                    campaignId,
+                    nonprofitId,
+                    methodId,
+                    invite,
+                    existingPartnerKeys,
+                    existingPartnerEmails,
+                    startOrEventDate: inviteAnchorDate,
+                    invitedByUserId,
+                });
+            }
         }
         if (body.launch) {
-            await insertSuccessEngineDraft(connection, campaignId, body.campaignName.trim(), body.startDate, body.endDate, nonprofitId);
+            nextStatus = await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave);
+            await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [nextStatus, campaignId]);
+            await insertSuccessEngineDraft(connection, campaignId, body.campaignName.trim(), resolvedStartDate || resolvedEndDate || "", resolvedEndDate || resolvedStartDate || "", nonprofitId);
             await (0, invitations_1.maybePromoteCampaignToLive)(connection, campaignId);
             const { rows: statusRows } = await connection.query("SELECT campaign_status FROM campaigns WHERE id = $1", [campaignId]);
             nextStatus = String(statusRows[0]?.campaign_status ?? nextStatus);
@@ -489,13 +630,16 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
        JOIN businesses b ON b.id = cbl.business_id
        JOIN business_locations bl ON bl.id = cbl.location_id
        WHERE cbl.campaign_id = $1`, [campaignId]);
-        if (body.launch) {
-            await sendBusinessInviteEmails(inviteRows, campaignId, body.campaignName ?? slug);
+        if (body.launch && canInviteBusinesses) {
+            await sendBusinessInviteEmails(campaignId);
         }
         res.json({
             slug,
             campaignStatus: nextStatus,
             campaignName: body.campaignName,
+            businessTimingStatus: timingFields.businessTimingStatus,
+            forkupReviewStatus: timingFields.forkupReviewStatus,
+            timing: timingEval,
             message: body.launch
                 ? nextStatus === "invitation_phase"
                     ? "Campaign updated and moved to invitation phase"
@@ -541,12 +685,23 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             res.status(400).json({ error: "Campaign story is required" });
             return;
         }
-        if (!body.startDate || !body.endDate) {
-            res.status(400).json({ error: "Campaign dates are required" });
-            return;
-        }
         if (!Array.isArray(body.methods) || body.methods.length === 0) {
             res.status(400).json({ error: "Select at least one fundraising method" });
+            return;
+        }
+        const methodsForSave = resolveMethodsForSave(body);
+        if (methodsForSave.length === 0) {
+            res.status(400).json({ error: "Select at least one fundraising method" });
+            return;
+        }
+        const dateError = (0, campaign_timing_1.validateMethodDateRequirements)({
+            methods: methodsForSave,
+            startDate: body.startDate,
+            endDate: body.endDate,
+            eventDate: body.eventDate,
+        });
+        if (dateError) {
+            res.status(400).json({ error: dateError });
             return;
         }
         if (!body.coverImage?.trim()) {
@@ -564,9 +719,29 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             res.status(400).json({ error: "Terms must be accepted before launch" });
             return;
         }
-        const needsBusiness = (0, methods_1.requiresAnyBusiness)(body.methods);
+        const timingEval = (0, campaign_timing_1.evaluateBusinessMethodTiming)({
+            methods: methodsForSave,
+            startDate: body.startDate,
+            eventDate: body.eventDate,
+        });
+        const timingFields = timingFieldsFromEvaluation(timingEval, body);
         const hasInvitations = (body.invitations?.length ?? 0) + (body.newBusinessInvites?.length ?? 0) > 0;
-        if (needsBusiness && body.launch && !hasInvitations) {
+        if (body.launch &&
+            hasInvitations &&
+            timingEval.status === "needs_forkup_review" &&
+            timingFields.forkupReviewStatus !== "pending") {
+            res.status(400).json({
+                error: "Business invitations require ForkUp review for this short timeline. Change the date, continue without business methods, or submit for ForkUp review.",
+                timing: timingEval,
+            });
+            return;
+        }
+        const needsBusiness = (0, methods_1.requiresAnyBusiness)(methodsForSave);
+        const resolvedStartDate = resolveStartDate(body, methodsForSave);
+        const resolvedEndDate = (0, date_only_1.toDateOnlyString)(body.endDate);
+        const resolvedEventDate = (0, date_only_1.toDateOnlyString)(body.eventDate);
+        const canInviteBusinesses = timingFields.businessTimingStatus === "ok";
+        if (needsBusiness && body.launch && !hasInvitations && canInviteBusinesses) {
             res.status(400).json({
                 error: "At least one business location must be invited for the selected methods",
             });
@@ -621,89 +796,120 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             return rows.length > 0;
         });
         let campaignStatus = body.launch ? "draft" : "draft";
-        const invitationDeadline = (0, date_only_1.subtractCalendarDays)(body.startDate, 7);
+        const deadlineAnchor = resolvedStartDate || resolvedEventDate || resolvedEndDate || "";
+        const invitationDeadline = deadlineAnchor
+            ? (0, date_only_1.subtractCalendarDays)(deadlineAnchor, 7)
+            : null;
         const { rows: campResult } = await connection.query(`INSERT INTO campaigns (
         slug, nonprofit_id, campaign_name, campaign_story, campaign_goal,
-        campaign_start_date, campaign_end_date, campaign_status, cover_image_url,
-        invitation_deadline, terms_accepted, terms_accepted_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`, [
+        campaign_start_date, campaign_end_date, event_date, campaign_status, cover_image_url,
+        invitation_deadline, terms_accepted, terms_accepted_at,
+        business_timing_status, forkup_review_status, forkup_review_reason,
+        forkup_review_requested_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       RETURNING id`, [
             slug,
             nonprofitId,
             body.campaignName.trim(),
             body.campaignStory.trim(),
             body.campaignGoal ?? 0,
-            body.startDate,
-            body.endDate,
+            resolvedStartDate,
+            resolvedEndDate,
+            resolvedEventDate,
             "draft",
             body.coverImage,
             invitationDeadline,
             body.termsAccepted,
             body.termsAccepted ? new Date() : null,
+            timingFields.businessTimingStatus,
+            timingFields.forkupReviewStatus,
+            timingFields.forkupReviewReason,
+            timingFields.forkupReviewRequestedAt,
         ]);
         const campaignId = campResult[0].id;
         const methodIdByType = new Map();
-        for (const methodType of body.methods) {
+        for (const methodType of methodsForSave) {
             const { rows: methodResult } = await connection.query(`INSERT INTO campaign_methods (
-          campaign_id, method_type, method_name, method_status, requires_business_acceptance
-        ) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+          campaign_id, method_type, method_name, method_status,
+          requires_business_acceptance, timing_status
+        ) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, [
                 campaignId,
                 methodType,
                 methods_1.METHOD_LABELS[methodType],
                 body.launch ? "invited" : "draft",
                 methods_1.METHOD_REQUIRES_BUSINESS[methodType],
+                methods_1.METHOD_REQUIRES_BUSINESS[methodType]
+                    ? timingFields.businessTimingStatus
+                    : "ok",
             ]);
             methodIdByType.set(methodType, methodResult[0].id);
         }
         const existingPartnerKeys = new Set();
         const existingPartnerEmails = new Set();
-        for (const invite of body.invitations ?? []) {
-            const methodId = methodIdByType.get(invite.methodType);
-            if (!methodId)
-                continue;
-            const { rows: bizRows } = await connection.query(`SELECT b.*, bl.id AS location_id
-         FROM businesses b
-         JOIN business_locations bl ON bl.business_id = b.id
-         WHERE b.id = $1 AND bl.id = $2`, [invite.businessId, invite.locationId]);
-            if (bizRows.length === 0)
-                continue;
-            const biz = bizRows[0];
-            if (!businessSupportsMethod(biz, invite.methodType))
-                continue;
-            const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
-          campaign_id, method_id, business_id, location_id,
-          invite_status, acceptance_status, giveback_percentage
-        ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5) RETURNING id`, [
-                campaignId,
-                methodId,
-                invite.businessId,
-                invite.locationId,
-                invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
-            ]);
-            await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
-            existingPartnerKeys.add(`${invite.businessId}:${invite.locationId}`);
-            if (biz.contact_email) {
-                existingPartnerEmails.add(String(biz.contact_email).trim().toLowerCase());
+        const inviteAnchorDate = resolvedEventDate || resolvedStartDate || resolvedEndDate;
+        const invitedByUserId = authUser?.id ?? null;
+        if (canInviteBusinesses) {
+            for (const invite of body.invitations ?? []) {
+                const methodId = methodIdByType.get(invite.methodType);
+                if (!methodId)
+                    continue;
+                const { rows: bizRows } = await connection.query(`SELECT b.*, bl.id AS location_id
+           FROM businesses b
+           JOIN business_locations bl ON bl.business_id = b.id
+           WHERE b.id = $1 AND bl.id = $2`, [invite.businessId, invite.locationId]);
+                if (bizRows.length === 0)
+                    continue;
+                const biz = bizRows[0];
+                if (!businessSupportsMethod(biz, invite.methodType))
+                    continue;
+                const respondByDate = (0, business_invite_timing_1.computeRespondByDate)({
+                    sentDate: new Date(),
+                    startOrEventDate: inviteAnchorDate,
+                });
+                const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
+            campaign_id, method_id, business_id, location_id,
+            invite_status, acceptance_status, giveback_percentage,
+            respond_by_date, invited_by_user_id, setup_status
+          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending')
+           RETURNING id`, [
+                    campaignId,
+                    methodId,
+                    invite.businessId,
+                    invite.locationId,
+                    invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
+                    respondByDate,
+                    invitedByUserId,
+                ]);
+                await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
+                existingPartnerKeys.add(`${invite.businessId}:${invite.locationId}`);
+                if (biz.contact_email) {
+                    existingPartnerEmails.add(String(biz.contact_email).trim().toLowerCase());
+                }
+            }
+            for (const invite of body.newBusinessInvites ?? []) {
+                const methodId = methodIdByType.get(invite.methodType);
+                if (!methodId)
+                    continue;
+                await upsertNewBusinessInvite(connection, {
+                    campaignId,
+                    nonprofitId,
+                    methodId,
+                    invite,
+                    existingPartnerKeys,
+                    existingPartnerEmails,
+                    startOrEventDate: inviteAnchorDate,
+                    invitedByUserId,
+                });
             }
         }
-        for (const invite of body.newBusinessInvites ?? []) {
-            const methodId = methodIdByType.get(invite.methodType);
-            if (!methodId)
-                continue;
-            await upsertNewBusinessInvite(connection, {
-                campaignId,
-                nonprofitId,
-                methodId,
-                invite,
-                existingPartnerKeys,
-                existingPartnerEmails,
-            });
-        }
         if (body.launch) {
-            campaignStatus = await resolveLaunchStatus(connection, campaignId, body.startDate);
+            campaignStatus = await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave);
             await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [campaignStatus, campaignId]);
             await (0, invitations_1.maybePromoteCampaignToLive)(connection, campaignId);
             const { rows: statusRows } = await connection.query("SELECT campaign_status FROM campaigns WHERE id = $1", [campaignId]);
             campaignStatus = String(statusRows[0]?.campaign_status ?? campaignStatus);
+            const seStart = resolvedStartDate || resolvedEventDate || resolvedEndDate || "";
+            const seEnd = resolvedEndDate || resolvedEventDate || resolvedStartDate || "";
             const approvedItems = await (0, organization_library_1.fetchApprovedLibraryItems)("nonprofit", nonprofitId);
             const launchSnippet = (0, organization_library_1.pickLaunchSnippet)(approvedItems);
             const impactSnippet = (0, organization_library_1.pickImpactSnippet)(approvedItems);
@@ -713,19 +919,19 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
                     action_type: "launch_email",
                     title: "Campaign Launch Email",
                     content: launchContent,
-                    scheduled_date: body.startDate,
+                    scheduled_date: seStart,
                 },
                 {
                     action_type: "one_week_reminder",
                     title: "One Week Reminder",
                     content: `One week left — remind supporters to visit participating businesses and upload receipts.${impactSnippet ? `\n\n${impactSnippet}` : ""}`,
-                    scheduled_date: body.endDate,
+                    scheduled_date: seEnd,
                 },
                 {
                     action_type: "final_push_reminder",
                     title: "Final Push Reminder",
                     content: `Final days of the campaign — share progress and encourage last-minute participation.${impactSnippet ? `\n\n${impactSnippet}` : ""}`,
-                    scheduled_date: body.endDate,
+                    scheduled_date: seEnd,
                 },
             ];
             for (const action of actions) {
@@ -738,7 +944,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
                     action.content,
                 ]);
             }
-            for (const action of buildAutomatedReminders(body.startDate, body.endDate, impactSnippet)) {
+            for (const action of buildAutomatedReminders(seStart, seEnd, impactSnippet)) {
                 await connection.query(`INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status, auto_send)
            VALUES ($1, $2, 'email', $3, $4, $5, 'ready', TRUE)`, [
                     campaignId,
@@ -756,13 +962,16 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
        JOIN businesses b ON b.id = cbl.business_id
        JOIN business_locations bl ON bl.id = cbl.location_id
        WHERE cbl.campaign_id = $1`, [campaignId]);
-        if (body.launch) {
-            await sendBusinessInviteEmails(inviteRows, campaignId, body.campaignName ?? slug);
+        if (body.launch && canInviteBusinesses) {
+            await sendBusinessInviteEmails(campaignId);
         }
         res.status(201).json({
             slug,
             campaignStatus,
             campaignName: body.campaignName,
+            businessTimingStatus: timingFields.businessTimingStatus,
+            forkupReviewStatus: timingFields.forkupReviewStatus,
+            timing: timingEval,
             message: body.launch
                 ? campaignStatus === "invitation_phase"
                     ? "Campaign created — waiting on business partners"

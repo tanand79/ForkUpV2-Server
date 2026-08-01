@@ -11,6 +11,24 @@ import { aiChat, aiProviderName, parseAiJson } from "../lib/ai-chat";
 export const generateCampaignDraftRouter = Router();
 
 /**
+ * Parse a whole-dollar fundraising goal from AI output (number or "$5,000" string).
+ * Returns null when missing or not a positive finite amount.
+ */
+function parseSuggestedGoal(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.round(value);
+  }
+  if (typeof value === "string") {
+    const digits = value.replace(/[^0-9.]/g, "");
+    if (!digits) return null;
+    const n = Number.parseFloat(digits);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.round(n);
+  }
+  return null;
+}
+
+/**
  * GoFundMe-style quick-start draft generator.
  *
  * Uses AWS Bedrock when AWS_* credentials are set; otherwise Lovable fallback.
@@ -20,7 +38,8 @@ export const generateCampaignDraftRouter = Router();
  * request: { purpose, organizationName?, mission?, causeCategory?, goal?, startDate?,
  *            endDate?, methods?, organizationType?, organizationId?, website? }
  * response: { title, story, purpose, suggestedImageUrl, facebookUrl, instagramHandle,
- *             websiteUrl, provider }
+ *             websiteUrl, suggestedGoal?, provider }
+ *   suggestedGoal — whole USD amount, only when the organizer did not send a goal.
  */
 generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) => {
   try {
@@ -65,6 +84,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
     const methods = Array.isArray(body.methods)
       ? body.methods.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
       : [];
+    const needsSuggestedGoal = !goal;
 
     let libraryContext = "";
     let suggestedImageUrl: string | null = null;
@@ -81,7 +101,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
     const system = [
       "You are an expert nonprofit fundraising campaign writer for the ForkUp platform.",
       "Given a few short answers from a nonprofit organizer, prepare a campaign draft they will review and edit.",
-      "Write in the organization's authentic voice. Be specific and truthful to what was shared — never invent facts, figures, names, dates, or results.",
+      "Write in the organization's authentic voice. Be specific and truthful to what was shared — never invent facts, names, dates, or past results.",
       "Prioritize emotional connection, clarity, impact, and a clear reason to participate.",
       "Guidelines:",
       "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
@@ -90,7 +110,12 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       "- facebookUrl: public Facebook page URL if you know the real one for this org; otherwise empty string. Never invent.",
       "- instagramHandle: public Instagram handle like @orgname if you know the real one; otherwise empty string. Never invent.",
       "- websiteUrl: official organization website URL if known from context; otherwise empty string.",
-      'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
+      needsSuggestedGoal
+        ? "- suggestedGoal: a realistic whole-dollar USD fundraising target (integer, no $ or commas) based on purpose, methods, and campaign length. Typical community campaigns: 2500–25000. This is a recommendation the organizer can edit — not a claimed past result. Do not put the dollar amount in the story as a fact."
+        : "- Do not invent a fundraising goal amount; the organizer already provided one.",
+      needsSuggestedGoal
+        ? 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string, "suggestedGoal": number}.'
+        : 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "facebookUrl": string, "instagramHandle": string, "websiteUrl": string}.',
       "Do not include markdown, code fences, preamble, or commentary.",
     ].join("\n");
 
@@ -100,7 +125,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       mission ? `Mission: ${mission}` : "",
       causeCategory ? `Cause category: ${causeCategory}` : "",
       website ? `Organization website: ${website}` : "",
-      goal ? `Fundraising goal: ${goal}` : "",
+      goal ? `Fundraising goal: ${goal}` : "Fundraising goal: not provided — suggest a realistic target.",
       startDate || endDate ? `Dates: ${startDate || "TBD"} to ${endDate || "TBD"}` : "",
       methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
       libraryContext,
@@ -121,6 +146,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       facebookUrl?: string;
       instagramHandle?: string;
       websiteUrl?: string;
+      suggestedGoal?: number | string;
     } = {};
     try {
       draft = parseAiJson(raw);
@@ -129,6 +155,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
     }
 
     const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+    const suggestedGoal = needsSuggestedGoal ? parseSuggestedGoal(draft.suggestedGoal) : null;
 
     res.json({
       title: str(draft.title),
@@ -138,6 +165,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       facebookUrl: libraryPromotion.facebookUrl || str(draft.facebookUrl),
       instagramHandle: libraryPromotion.instagramHandle || str(draft.instagramHandle),
       websiteUrl: libraryPromotion.websiteUrl || str(draft.websiteUrl) || website,
+      ...(suggestedGoal != null ? { suggestedGoal } : {}),
       provider: aiProviderName(),
     });
   } catch (error) {
