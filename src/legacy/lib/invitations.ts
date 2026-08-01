@@ -37,14 +37,9 @@ export async function evaluateCampaignInvitationPhase(
 
   const statuses = rows.map((r) => String(r.acceptance_status));
   const hasAccepted = statuses.includes("accepted");
-  // Terminal responses only — opened/invited/pending/expired still wait.
-  const allResolved = statuses.every((s) =>
-    ["accepted", "declined", "changes_requested", "needs_info", "ready", "live", "completed"].includes(
-      s,
-    ),
-  );
 
-  if (hasAccepted && allResolved) {
+  // Any accepted partner unblocks invitation_phase (other invites may still be pending).
+  if (hasAccepted) {
     await connection.query(
       `UPDATE campaigns SET campaign_status = 'ready_to_launch', updated_at = NOW()
        WHERE id = $1 AND campaign_status = 'invitation_phase'`,
