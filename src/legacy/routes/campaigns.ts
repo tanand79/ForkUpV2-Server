@@ -568,6 +568,15 @@ campaignsRouter.post("/:slug/participate", async (req, res) => {
 
 campaignsRouter.get("/:slug", async (req, res) => {
   try {
+    // Same date-based promote as GET / — direct slug views must not 404 when start date has arrived.
+    await pool.query(
+      `UPDATE campaigns SET campaign_status = 'live', updated_at = NOW()
+       WHERE slug = $1
+         AND campaign_status = 'ready_to_launch'
+         AND campaign_start_date IS NOT NULL
+         AND campaign_start_date <= CURRENT_DATE`,
+      [req.params.slug],
+    );
     const campaign = await fetchCampaignBySlug(req.params.slug, { publicOnly: true });
     if (!campaign) {
       res.status(404).json({ error: "Campaign not found" });

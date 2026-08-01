@@ -23,8 +23,7 @@ async function evaluateCampaignInvitationPhase(connection, campaignId) {
         return;
     const statuses = rows.map((r) => String(r.acceptance_status));
     const hasAccepted = statuses.includes("accepted");
-    const allResolved = statuses.every((s) => ["accepted", "declined", "changes_requested", "needs_info", "ready", "live", "completed"].includes(s));
-    if (hasAccepted && allResolved) {
+    if (hasAccepted) {
         await connection.query(`UPDATE campaigns SET campaign_status = 'ready_to_launch', updated_at = NOW()
        WHERE id = $1 AND campaign_status = 'invitation_phase'`, [campaignId]);
     }

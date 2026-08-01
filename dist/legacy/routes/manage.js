@@ -371,6 +371,7 @@ exports.manageRouter.get("/campaigns", async (req, res) => {
         const { rows: rows } = await pool_1.pool.query(`SELECT c.id, c.slug, c.campaign_name, c.campaign_status, c.campaign_goal,
               c.raised, c.supporters_going, c.verified_visits, c.campaign_start_date,
               c.campaign_end_date, c.business_timing_status, c.forkup_review_status,
+              c.forkup_review_reason,
               n.organization_name,
               (SELECT COUNT(DISTINCT LOWER(b2.contact_email))
                FROM campaign_business_locations cbl2
@@ -414,6 +415,9 @@ exports.manageRouter.get("/campaigns", async (req, res) => {
             endDate: (0, date_only_1.toDateOnlyString)(r.campaign_end_date),
             businessTimingStatus: r.business_timing_status ?? "ok",
             forkupReviewStatus: r.forkup_review_status ?? "none",
+            forkupReviewReason: r.forkup_review_reason != null
+                ? String(r.forkup_review_reason)
+                : null,
             partnersInvited: Number(r.partners_invited ?? 0),
             partnersPending: Number(r.partners_pending ?? 0),
             partnersChangesRequested: Number(r.partners_changes_requested ?? 0),

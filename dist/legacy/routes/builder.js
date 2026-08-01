@@ -34,13 +34,15 @@ function resolveStartDate(body, methods) {
     return null;
 }
 function timingFieldsFromEvaluation(evaluation, body) {
-    const submitting = Boolean(body.submitForForkupReview);
     const businessTimingStatus = evaluation.status;
-    if (submitting && evaluation.status === "needs_forkup_review") {
+    const needsReview = evaluation.status === "needs_forkup_review" &&
+        (Boolean(body.launch) || Boolean(body.submitForForkupReview));
+    if (needsReview) {
         return {
             businessTimingStatus,
             forkupReviewStatus: "pending",
-            forkupReviewReason: evaluation.message,
+            forkupReviewReason: evaluation.message ||
+                "Campaign submitted for ForkUp review (short business-method timeline).",
             forkupReviewRequestedAt: new Date(),
         };
     }
@@ -50,6 +52,9 @@ function timingFieldsFromEvaluation(evaluation, body) {
         forkupReviewReason: null,
         forkupReviewRequestedAt: null,
     };
+}
+function launchRequiresForkupReview(timingFields) {
+    return timingFields.forkupReviewStatus === "pending";
 }
 function formatDate(value) {
     return (0, date_only_1.toDateOnlyString)(value);
@@ -429,17 +434,6 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             eventDate: body.eventDate,
         });
         const timingFields = timingFieldsFromEvaluation(timingEval, body);
-        const pendingInviteCount = (body.invitations?.length ?? 0) + (body.newBusinessInvites?.length ?? 0);
-        if (body.launch &&
-            pendingInviteCount > 0 &&
-            timingEval.status === "needs_forkup_review" &&
-            timingFields.forkupReviewStatus !== "pending") {
-            res.status(400).json({
-                error: "Business invitations require ForkUp review for this short timeline. Change the date, continue without business methods, or submit for ForkUp review.",
-                timing: timingEval,
-            });
-            return;
-        }
         await connection.query("BEGIN");
         const { rows: campaigns } = await connection.query("SELECT id, campaign_status, nonprofit_id FROM campaigns WHERE slug = $1", [slug]);
         if (campaigns.length === 0) {
@@ -453,7 +447,8 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         const authUser = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
         if (authUser)
             await linkUserToNonprofit(connection, authUser.id, nonprofitId);
-        if (!["draft", "ready_to_launch"].includes(currentStatus) && !body.launch) {
+        if (!["draft", "ready_to_launch", "in_review"].includes(currentStatus) &&
+            !body.launch) {
             res.status(400).json({ error: "This campaign can no longer be edited" });
             return;
         }
@@ -485,11 +480,16 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         const invitationDeadline = deadlineAnchor
             ? (0, date_only_1.subtractCalendarDays)(deadlineAnchor, 7)
             : null;
+        const submitLaunchForReview = Boolean(body.launch) && launchRequiresForkupReview(timingFields);
         let nextStatus = body.launch
-            ? await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave)
+            ? submitLaunchForReview
+                ? "in_review"
+                : await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave)
             : currentStatus === "ready_to_launch"
                 ? "ready_to_launch"
-                : "draft";
+                : currentStatus === "in_review"
+                    ? "in_review"
+                    : "draft";
         await connection.query(`UPDATE campaigns SET
         campaign_name = $1,
         campaign_story = $2,
@@ -615,7 +615,11 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
                 });
             }
         }
-        if (body.launch) {
+        if (body.launch && submitLaunchForReview) {
+            nextStatus = "in_review";
+            await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [nextStatus, campaignId]);
+        }
+        else if (body.launch) {
             nextStatus = await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave);
             await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [nextStatus, campaignId]);
             await insertSuccessEngineDraft(connection, campaignId, body.campaignName.trim(), resolvedStartDate || resolvedEndDate || "", resolvedEndDate || resolvedStartDate || "", nonprofitId);
@@ -630,7 +634,7 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
        JOIN businesses b ON b.id = cbl.business_id
        JOIN business_locations bl ON bl.id = cbl.location_id
        WHERE cbl.campaign_id = $1`, [campaignId]);
-        if (body.launch && canInviteBusinesses) {
+        if (body.launch && !submitLaunchForReview && canInviteBusinesses) {
             await sendBusinessInviteEmails(campaignId);
         }
         res.json({
@@ -641,11 +645,13 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             forkupReviewStatus: timingFields.forkupReviewStatus,
             timing: timingEval,
             message: body.launch
-                ? nextStatus === "invitation_phase"
-                    ? "Campaign updated and moved to invitation phase"
-                    : nextStatus === "live"
-                        ? "Campaign is now live"
-                        : "Campaign is scheduled and will appear publicly on the start date"
+                ? submitLaunchForReview
+                    ? "Campaign submitted for ForkUp review"
+                    : nextStatus === "invitation_phase"
+                        ? "Campaign updated and moved to invitation phase"
+                        : nextStatus === "live"
+                            ? "Campaign is now live"
+                            : "Campaign is scheduled and will appear publicly on the start date"
                 : "Campaign saved",
             invitationLinks: inviteRows.map((row) => ({
                 businessName: row.business_name,
@@ -726,16 +732,6 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
         });
         const timingFields = timingFieldsFromEvaluation(timingEval, body);
         const hasInvitations = (body.invitations?.length ?? 0) + (body.newBusinessInvites?.length ?? 0) > 0;
-        if (body.launch &&
-            hasInvitations &&
-            timingEval.status === "needs_forkup_review" &&
-            timingFields.forkupReviewStatus !== "pending") {
-            res.status(400).json({
-                error: "Business invitations require ForkUp review for this short timeline. Change the date, continue without business methods, or submit for ForkUp review.",
-                timing: timingEval,
-            });
-            return;
-        }
         const needsBusiness = (0, methods_1.requiresAnyBusiness)(methodsForSave);
         const resolvedStartDate = resolveStartDate(body, methodsForSave);
         const resolvedEndDate = (0, date_only_1.toDateOnlyString)(body.endDate);
@@ -795,7 +791,12 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             const { rows: rows } = await connection.query("SELECT id FROM campaigns WHERE slug = $1", [s]);
             return rows.length > 0;
         });
-        let campaignStatus = body.launch ? "draft" : "draft";
+        const submitLaunchForReview = Boolean(body.launch) && launchRequiresForkupReview(timingFields);
+        let campaignStatus = body.launch
+            ? submitLaunchForReview
+                ? "in_review"
+                : "draft"
+            : "draft";
         const deadlineAnchor = resolvedStartDate || resolvedEventDate || resolvedEndDate || "";
         const invitationDeadline = deadlineAnchor
             ? (0, date_only_1.subtractCalendarDays)(deadlineAnchor, 7)
@@ -816,7 +817,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             resolvedStartDate,
             resolvedEndDate,
             resolvedEventDate,
-            "draft",
+            campaignStatus,
             body.coverImage,
             invitationDeadline,
             body.termsAccepted,
@@ -902,7 +903,11 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
                 });
             }
         }
-        if (body.launch) {
+        if (body.launch && submitLaunchForReview) {
+            campaignStatus = "in_review";
+            await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [campaignStatus, campaignId]);
+        }
+        else if (body.launch) {
             campaignStatus = await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave);
             await connection.query(`UPDATE campaigns SET campaign_status = $1, updated_at = NOW() WHERE id = $2`, [campaignStatus, campaignId]);
             await (0, invitations_1.maybePromoteCampaignToLive)(connection, campaignId);
@@ -910,50 +915,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             campaignStatus = String(statusRows[0]?.campaign_status ?? campaignStatus);
             const seStart = resolvedStartDate || resolvedEventDate || resolvedEndDate || "";
             const seEnd = resolvedEndDate || resolvedEventDate || resolvedStartDate || "";
-            const approvedItems = await (0, organization_library_1.fetchApprovedLibraryItems)("nonprofit", nonprofitId);
-            const launchSnippet = (0, organization_library_1.pickLaunchSnippet)(approvedItems);
-            const impactSnippet = (0, organization_library_1.pickImpactSnippet)(approvedItems);
-            const launchContent = `Your campaign "${body.campaignName}" is live. Share it with supporters and encourage them to participate at your confirmed businesses.${launchSnippet ? `\n\n${launchSnippet}` : ""}`;
-            const actions = [
-                {
-                    action_type: "launch_email",
-                    title: "Campaign Launch Email",
-                    content: launchContent,
-                    scheduled_date: seStart,
-                },
-                {
-                    action_type: "one_week_reminder",
-                    title: "One Week Reminder",
-                    content: `One week left — remind supporters to visit participating businesses and upload receipts.${impactSnippet ? `\n\n${impactSnippet}` : ""}`,
-                    scheduled_date: seEnd,
-                },
-                {
-                    action_type: "final_push_reminder",
-                    title: "Final Push Reminder",
-                    content: `Final days of the campaign — share progress and encourage last-minute participation.${impactSnippet ? `\n\n${impactSnippet}` : ""}`,
-                    scheduled_date: seEnd,
-                },
-            ];
-            for (const action of actions) {
-                await connection.query(`INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status)
-           VALUES ($1, $2, 'email', $3, $4, $5, 'ready')`, [
-                    campaignId,
-                    action.action_type,
-                    action.scheduled_date,
-                    action.title,
-                    action.content,
-                ]);
-            }
-            for (const action of buildAutomatedReminders(seStart, seEnd, impactSnippet)) {
-                await connection.query(`INSERT INTO success_engine_actions (campaign_id, action_type, channel, scheduled_date, title, content, status, auto_send)
-           VALUES ($1, $2, 'email', $3, $4, $5, 'ready', TRUE)`, [
-                    campaignId,
-                    action.action_type,
-                    action.scheduled_date,
-                    action.title,
-                    action.content,
-                ]);
-            }
+            await insertSuccessEngineDraft(connection, campaignId, body.campaignName.trim(), seStart, seEnd, nonprofitId);
         }
         await connection.query("COMMIT");
         const { rows: inviteRows } = await connection.query(`SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status, b.contact_email
@@ -962,7 +924,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
        JOIN businesses b ON b.id = cbl.business_id
        JOIN business_locations bl ON bl.id = cbl.location_id
        WHERE cbl.campaign_id = $1`, [campaignId]);
-        if (body.launch && canInviteBusinesses) {
+        if (body.launch && !submitLaunchForReview && canInviteBusinesses) {
             await sendBusinessInviteEmails(campaignId);
         }
         res.status(201).json({
@@ -973,11 +935,13 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             forkupReviewStatus: timingFields.forkupReviewStatus,
             timing: timingEval,
             message: body.launch
-                ? campaignStatus === "invitation_phase"
-                    ? "Campaign created — waiting on business partners"
-                    : campaignStatus === "live"
-                        ? "Campaign created and is now live"
-                        : "Campaign created — it will appear publicly on the start date"
+                ? submitLaunchForReview
+                    ? "Campaign submitted for ForkUp review"
+                    : campaignStatus === "invitation_phase"
+                        ? "Campaign created — waiting on business partners"
+                        : campaignStatus === "live"
+                            ? "Campaign created and is now live"
+                            : "Campaign created — it will appear publicly on the start date"
                 : "Campaign saved as draft",
             invitationLinks: inviteRows.map((row) => ({
                 businessName: row.business_name,

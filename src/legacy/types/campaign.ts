@@ -1,5 +1,6 @@
 export type CampaignStatus =
   | "draft"
+  | "in_review"
   | "invitation_phase"
   | "ready_to_launch"
   | "live"

@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   campaign_start_date DATE,
   campaign_end_date DATE,
   campaign_status VARCHAR(30) NOT NULL DEFAULT 'draft'
-    CHECK (campaign_status IN ('draft', 'invitation_phase', 'ready_to_launch', 'live', 'closed', 'settlement')),
+    CHECK (campaign_status IN ('draft', 'in_review', 'invitation_phase', 'ready_to_launch', 'live', 'closed', 'settlement')),
   cover_image_url VARCHAR(512) NOT NULL,
   logo_url VARCHAR(512),
   raised INTEGER NOT NULL DEFAULT 0,
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
       'limited_promotion_window'
     )),
   forkup_review_status VARCHAR(30) NOT NULL DEFAULT 'none'
-    CHECK (forkup_review_status IN ('none', 'pending', 'approved', 'denied')),
+    CHECK (forkup_review_status IN ('none', 'pending', 'approved', 'denied', 'changes_requested')),
   forkup_review_reason TEXT,
   forkup_review_requested_at TIMESTAMP,
   created_by_user_id INTEGER,

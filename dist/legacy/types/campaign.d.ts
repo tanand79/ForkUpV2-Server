@@ -1,4 +1,4 @@
-export type CampaignStatus = "draft" | "invitation_phase" | "ready_to_launch" | "live" | "closed" | "settlement";
+export type CampaignStatus = "draft" | "in_review" | "invitation_phase" | "ready_to_launch" | "live" | "closed" | "settlement";
 export type MethodType = "dine_and_donate" | "shop_and_donate" | "service_giveback" | "virtual_donations" | "ambassador_fundraising" | "guest_bartending_event";
 export type ParticipationCta = "reserve" | "visit" | "shop" | "book" | "attend";
 export interface CampaignMethod {
