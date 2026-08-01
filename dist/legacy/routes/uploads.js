@@ -37,9 +37,14 @@ exports.uploadsRouter.post("/image", async (req, res) => {
         const data = imageBase64.replace(/^data:[^;]+;base64,/, "");
         const buffer = Buffer.from(data, "base64");
         if ((0, s3_1.isS3Enabled)()) {
-            const url = await (0, s3_1.uploadImageToS3)(buffer, mime, prefix);
-            res.status(201).json({ url });
-            return;
+            try {
+                const url = await (0, s3_1.uploadImageToS3)(buffer, mime, prefix);
+                res.status(201).json({ url });
+                return;
+            }
+            catch (err) {
+                console.warn("S3 upload failed; saving image to local disk instead:", err);
+            }
         }
         const url = saveImageToDisk(buffer, mime, prefix);
         res.status(201).json({ url });

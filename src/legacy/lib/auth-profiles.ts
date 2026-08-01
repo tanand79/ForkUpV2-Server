@@ -16,6 +16,11 @@ export type NonprofitProfileDto = {
   claimStatus: string;
   profileStatus: string;
   verified: boolean;
+  /**
+   * Latest organization_access_requests.status for this nonprofit (if any).
+   * Used so requesters see denied/approved even when verification_status is still needs_review.
+   */
+  accessRequestStatus?: "pending" | "approved" | "denied" | null;
 };
 
 export type BusinessProfileDto = {
@@ -44,7 +49,44 @@ export type BusinessProfileDto = {
     state: string | null;
     address: string | null;
   }[];
+  /**
+   * Latest organization_access_requests.status for this business (if any).
+   * Used so requesters see denied/approved even when claim_status is still needs_review.
+   */
+  accessRequestStatus?: "pending" | "approved" | "denied" | null;
 };
+
+/**
+ * Loads the most recent access-request status for an organization.
+ * Inputs: organizationType + organizationId.
+ * Outputs: pending | approved | denied | null when no request exists or lookup fails.
+ */
+async function loadLatestAccessRequestStatus(
+  organizationType: "nonprofit" | "business",
+  organizationId: number,
+): Promise<"pending" | "approved" | "denied" | null> {
+  const client = await pool.connect();
+  try {
+    // Fail soft on locks/timeouts so /auth/context (login) never hangs.
+    await client.query("SET LOCAL statement_timeout = 3000");
+    const { rows } = await client.query<QueryResultRow>(
+      `SELECT status
+       FROM organization_access_requests
+       WHERE organization_type = $1 AND organization_id = $2
+       ORDER BY id DESC
+       LIMIT 1`,
+      [organizationType, organizationId],
+    );
+    const status = rows[0]?.status;
+    if (status === "pending" || status === "approved" || status === "denied") return status;
+    return null;
+  } catch (err) {
+    console.warn("loadLatestAccessRequestStatus failed:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    client.release();
+  }
+}
 
 function mapNonprofitRow(np: QueryResultRow): NonprofitProfileDto {
   return {
@@ -75,6 +117,7 @@ async function loadBusinessById(businessId: number): Promise<BusinessProfileDto 
     "SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name",
     [biz.id],
   );
+  const accessRequestStatus = await loadLatestAccessRequestStatus("business", businessId);
   return {
     id: biz.id,
     businessName: biz.business_name,
@@ -102,16 +145,28 @@ async function loadBusinessById(businessId: number): Promise<BusinessProfileDto 
       state: l.state,
       address: l.address,
     })),
+    accessRequestStatus,
   };
 }
 
 async function loadNonprofitById(nonprofitId: number): Promise<NonprofitProfileDto | null> {
-  const { rows: rows } = await pool.query<QueryResultRow>(
-    "SELECT * FROM nonprofits WHERE id = $1 LIMIT 1",
-    [nonprofitId],
-  );
-  if (rows.length === 0) return null;
-  return mapNonprofitRow(rows[0]);
+  const client = await pool.connect();
+  try {
+    await client.query("SET LOCAL statement_timeout = 8000");
+    const { rows: rows } = await client.query<QueryResultRow>(
+      "SELECT * FROM nonprofits WHERE id = $1 LIMIT 1",
+      [nonprofitId],
+    );
+    if (rows.length === 0) return null;
+    const profile = mapNonprofitRow(rows[0]);
+    profile.accessRequestStatus = await loadLatestAccessRequestStatus("nonprofit", nonprofitId);
+    return profile;
+  } catch (err) {
+    console.warn("loadNonprofitById failed:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    client.release();
+  }
 }
 
 export async function loadUserNonprofitProfiles(user: AuthUser): Promise<NonprofitProfileDto[]> {
@@ -133,7 +188,9 @@ export async function loadUserNonprofitProfiles(user: AuthUser): Promise<Nonprof
       [user.email.toLowerCase()],
     );
     if (rows.length > 0) {
-      profiles.push(mapNonprofitRow(rows[0]));
+      const profile = mapNonprofitRow(rows[0]);
+      profile.accessRequestStatus = await loadLatestAccessRequestStatus("nonprofit", Number(rows[0].id));
+      profiles.push(profile);
     }
   }
 

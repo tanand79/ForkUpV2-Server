@@ -13,6 +13,7 @@ export type NonprofitProfileDto = {
     claimStatus: string;
     profileStatus: string;
     verified: boolean;
+    accessRequestStatus?: "pending" | "approved" | "denied" | null;
 };
 export type BusinessProfileDto = {
     id: number;
@@ -40,6 +41,7 @@ export type BusinessProfileDto = {
         state: string | null;
         address: string | null;
     }[];
+    accessRequestStatus?: "pending" | "approved" | "denied" | null;
 };
 export declare function loadUserNonprofitProfiles(user: AuthUser): Promise<NonprofitProfileDto[]>;
 export declare function loadUserBusinessProfiles(user: AuthUser): Promise<BusinessProfileDto[]>;

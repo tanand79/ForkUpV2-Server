@@ -32,6 +32,9 @@
  * GET     /api/superadmin/access-requests
  * POST    /api/superadmin/access-requests/:id/approve
  * POST    /api/superadmin/access-requests/:id/deny
+ * GET     /api/superadmin/organizations/:type/:id
+ *   query: requestId? (optional access-request id to include)
+ *   response: { organizationType, organization, locations?, accessRequest }
  */
 import { Router } from "express";
 import crypto from "crypto";
@@ -692,10 +695,197 @@ superadminRouter.post("/access-requests/:id/deny", async (req, res) => {
       res.status(404).json({ error: "Pending request not found" });
       return;
     }
+    // User-facing "denied" comes from this request status via auth context accessRequestStatus.
     res.json({ success: true, id, status: "denied" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to deny request" });
+  }
+});
+
+/**
+ * GET /api/superadmin/organizations/:type/:id
+ * query: requestId? — optional access-request id to include in the payload
+ * response: {
+ *   organizationType: "nonprofit" | "business",
+ *   organization: { ...full profile fields... },
+ *   locations?: [...],  // business only
+ *   accessRequest: AccessRequest | null
+ * }
+ */
+superadminRouter.get("/organizations/:type/:id", async (req, res) => {
+  try {
+    const orgType = String(req.params.type || "").trim().toLowerCase();
+    const orgId = Number(req.params.id);
+    if (orgType !== "nonprofit" && orgType !== "business") {
+      res.status(400).json({ error: "type must be nonprofit or business" });
+      return;
+    }
+    if (!Number.isFinite(orgId) || orgId <= 0) {
+      res.status(400).json({ error: "Invalid organization id" });
+      return;
+    }
+
+    const requestIdRaw = typeof req.query.requestId === "string" ? Number(req.query.requestId) : NaN;
+
+    let accessRequest: Record<string, unknown> | null = null;
+    if (Number.isFinite(requestIdRaw) && requestIdRaw > 0) {
+      const { rows: arRows } = await pool.query<QueryResultRow>(
+        `SELECT ar.id, ar.organization_type, ar.organization_id, ar.organization_name,
+                ar.request_type, ar.risk_level, ar.status, ar.requested_by_user_id,
+                ar.requester_name, ar.requester_email, ar.relationship, ar.risk_reason,
+                ar.reviewed_by_user_id, ar.reviewed_at, ar.review_notes,
+                ar.created_at, ar.updated_at,
+                COALESCE(n.slug, b.slug) AS organization_slug
+         FROM organization_access_requests ar
+         LEFT JOIN nonprofits n
+           ON ar.organization_type = 'nonprofit' AND n.id = ar.organization_id
+         LEFT JOIN businesses b
+           ON ar.organization_type = 'business' AND b.id = ar.organization_id
+         WHERE ar.id = $1
+         LIMIT 1`,
+        [requestIdRaw],
+      );
+      if (arRows[0]) {
+        const r = arRows[0];
+        accessRequest = {
+          id: Number(r.id),
+          organizationType: r.organization_type,
+          organizationId: r.organization_id != null ? Number(r.organization_id) : null,
+          organizationName: r.organization_name,
+          organizationSlug: r.organization_slug,
+          requestType: r.request_type,
+          riskLevel: r.risk_level,
+          status: r.status,
+          requestedByUserId: r.requested_by_user_id ? Number(r.requested_by_user_id) : null,
+          requesterName: r.requester_name,
+          requesterEmail: r.requester_email,
+          relationship: r.relationship,
+          riskReason: r.risk_reason,
+          reviewedByUserId: r.reviewed_by_user_id ? Number(r.reviewed_by_user_id) : null,
+          reviewedAt: r.reviewed_at,
+          reviewNotes: r.review_notes,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        };
+      }
+    }
+
+    if (orgType === "nonprofit") {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT * FROM nonprofits WHERE id = $1 LIMIT 1`,
+        [orgId],
+      );
+      if (rows.length === 0) {
+        res.status(404).json({ error: "Nonprofit not found" });
+        return;
+      }
+      const n = rows[0];
+      res.json({
+        organizationType: "nonprofit",
+        organization: {
+          id: Number(n.id),
+          organizationName: n.organization_name,
+          slug: n.slug,
+          logoUrl: n.logo_url ?? null,
+          mission: n.mission,
+          description: n.description ?? null,
+          website: n.website,
+          contactName: n.contact_name,
+          contactEmail: n.contact_email,
+          contactPhone: n.contact_phone,
+          causeCategory: n.cause_category,
+          ein: n.ein ?? null,
+          city: n.city ?? null,
+          state: n.state ?? null,
+          zip: n.zip ?? null,
+          verificationStatus: n.verification_status,
+          claimStatus: n.claim_status,
+          profileStatus: n.profile_status ?? "preloaded",
+          facebookUrl: n.facebook_url ?? null,
+          instagramUrl: n.instagram_url ?? null,
+          linkedinUrl: n.linkedin_url ?? null,
+          tiktokUrl: n.tiktok_url ?? null,
+          youtubeUrl: n.youtube_url ?? null,
+          claimedByUserId: n.claimed_by_user_id != null ? Number(n.claimed_by_user_id) : null,
+          claimDate: n.claim_date ?? null,
+          verificationDate: n.verification_date ?? null,
+          createdAt: n.created_at,
+          updatedAt: n.updated_at,
+        },
+        accessRequest,
+      });
+      return;
+    }
+
+    const { rows: bizRows } = await pool.query<QueryResultRow>(
+      `SELECT * FROM businesses WHERE id = $1 LIMIT 1`,
+      [orgId],
+    );
+    if (bizRows.length === 0) {
+      res.status(404).json({ error: "Business not found" });
+      return;
+    }
+    const b = bizRows[0];
+    const { rows: locations } = await pool.query<QueryResultRow>(
+      `SELECT id, location_name, address, city, state, zip, phone, website_url,
+              reservation_url, booking_url, active_status, created_at, updated_at
+       FROM business_locations WHERE business_id = $1 ORDER BY location_name`,
+      [orgId],
+    );
+
+    res.json({
+      organizationType: "business",
+      organization: {
+        id: Number(b.id),
+        businessName: b.business_name,
+        slug: b.slug,
+        businessType: b.business_type,
+        logoUrl: b.logo_url ?? null,
+        description: b.description ?? null,
+        website: b.website,
+        contactName: b.contact_name,
+        contactEmail: b.contact_email,
+        contactPhone: b.contact_phone,
+        businessStatus: b.business_status,
+        claimStatus: b.claim_status,
+        profileStatus: b.profile_status ?? b.business_status,
+        defaultGivebackPercentage:
+          b.default_giveback_percentage != null ? Number(b.default_giveback_percentage) : 10,
+        supportsDineAndDonate: Boolean(b.supports_dine_and_donate),
+        supportsShopAndDonate: Boolean(b.supports_shop_and_donate),
+        supportsServiceGiveback: Boolean(b.supports_service_giveback),
+        supportsGuestBartending: Boolean(b.supports_guest_bartending),
+        facebookUrl: b.facebook_url ?? null,
+        instagramUrl: b.instagram_url ?? null,
+        linkedinUrl: b.linkedin_url ?? null,
+        tiktokUrl: b.tiktok_url ?? null,
+        claimedByUserId: b.claimed_by_user_id != null ? Number(b.claimed_by_user_id) : null,
+        claimDate: b.claim_date ?? null,
+        verificationDate: b.verification_date ?? null,
+        createdAt: b.created_at,
+        updatedAt: b.updated_at,
+      },
+      locations: locations.map((l) => ({
+        id: Number(l.id),
+        locationName: l.location_name,
+        address: l.address,
+        city: l.city,
+        state: l.state,
+        zip: l.zip,
+        phone: l.phone,
+        websiteUrl: l.website_url,
+        reservationUrl: l.reservation_url,
+        bookingUrl: l.booking_url,
+        activeStatus: l.active_status,
+        createdAt: l.created_at,
+        updatedAt: l.updated_at,
+      })),
+      accessRequest,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load organization details" });
   }
 });
 

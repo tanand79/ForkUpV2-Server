@@ -3,6 +3,28 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.loadUserNonprofitProfiles = loadUserNonprofitProfiles;
 exports.loadUserBusinessProfiles = loadUserBusinessProfiles;
 const pool_1 = require("../db/pool");
+async function loadLatestAccessRequestStatus(organizationType, organizationId) {
+    const client = await pool_1.pool.connect();
+    try {
+        await client.query("SET LOCAL statement_timeout = 3000");
+        const { rows } = await client.query(`SELECT status
+       FROM organization_access_requests
+       WHERE organization_type = $1 AND organization_id = $2
+       ORDER BY id DESC
+       LIMIT 1`, [organizationType, organizationId]);
+        const status = rows[0]?.status;
+        if (status === "pending" || status === "approved" || status === "denied")
+            return status;
+        return null;
+    }
+    catch (err) {
+        console.warn("loadLatestAccessRequestStatus failed:", err instanceof Error ? err.message : err);
+        return null;
+    }
+    finally {
+        client.release();
+    }
+}
 function mapNonprofitRow(np) {
     return {
         id: np.id,
@@ -26,6 +48,7 @@ async function loadBusinessById(businessId) {
         return null;
     const biz = bizRows[0];
     const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [biz.id]);
+    const accessRequestStatus = await loadLatestAccessRequestStatus("business", businessId);
     return {
         id: biz.id,
         businessName: biz.business_name,
@@ -52,13 +75,27 @@ async function loadBusinessById(businessId) {
             state: l.state,
             address: l.address,
         })),
+        accessRequestStatus,
     };
 }
 async function loadNonprofitById(nonprofitId) {
-    const { rows: rows } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE id = $1 LIMIT 1", [nonprofitId]);
-    if (rows.length === 0)
+    const client = await pool_1.pool.connect();
+    try {
+        await client.query("SET LOCAL statement_timeout = 8000");
+        const { rows: rows } = await client.query("SELECT * FROM nonprofits WHERE id = $1 LIMIT 1", [nonprofitId]);
+        if (rows.length === 0)
+            return null;
+        const profile = mapNonprofitRow(rows[0]);
+        profile.accessRequestStatus = await loadLatestAccessRequestStatus("nonprofit", nonprofitId);
+        return profile;
+    }
+    catch (err) {
+        console.warn("loadNonprofitById failed:", err instanceof Error ? err.message : err);
         return null;
-    return mapNonprofitRow(rows[0]);
+    }
+    finally {
+        client.release();
+    }
 }
 async function loadUserNonprofitProfiles(user) {
     const seen = new Set();
@@ -75,7 +112,9 @@ async function loadUserNonprofitProfiles(user) {
     if (profiles.length === 0) {
         const { rows: rows } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE LOWER(contact_email) = $1 LIMIT 1", [user.email.toLowerCase()]);
         if (rows.length > 0) {
-            profiles.push(mapNonprofitRow(rows[0]));
+            const profile = mapNonprofitRow(rows[0]);
+            profile.accessRequestStatus = await loadLatestAccessRequestStatus("nonprofit", Number(rows[0].id));
+            profiles.push(profile);
         }
     }
     return profiles;

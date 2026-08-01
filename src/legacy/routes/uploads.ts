@@ -49,9 +49,14 @@ uploadsRouter.post("/image", async (req, res) => {
     const buffer = Buffer.from(data, "base64");
 
     if (isS3Enabled()) {
-      const url = await uploadImageToS3(buffer, mime, prefix);
-      res.status(201).json({ url });
-      return;
+      try {
+        const url = await uploadImageToS3(buffer, mime, prefix);
+        res.status(201).json({ url });
+        return;
+      } catch (err) {
+        // Local/dev often has S3_BUCKET set with invalid credentials — fall back to disk.
+        console.warn("S3 upload failed; saving image to local disk instead:", err);
+      }
     }
 
     const url = saveImageToDisk(buffer, mime, prefix);
