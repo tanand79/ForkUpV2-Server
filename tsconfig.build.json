@@ -21,6 +21,7 @@
     "src/legacy/db/migrate-campaign-timing.ts",
     "src/legacy/db/migrate-business-invite-lifecycle.ts",
     "src/legacy/db/migrate-campaign-ai.ts",
+    "src/legacy/db/migrate-verification-denied.ts",
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",
     "src/legacy/db/run-production.ts",
