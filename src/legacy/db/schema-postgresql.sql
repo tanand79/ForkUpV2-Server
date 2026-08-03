@@ -568,6 +568,11 @@ CREATE TABLE IF NOT EXISTS business_invitations (
     REFERENCES campaign_business_locations(id) ON DELETE SET NULL
 );
 
+-- Existing DBs may have created business_invitations before business_id existed.
+-- CREATE TABLE IF NOT EXISTS does not add columns; ensure the column exists before indexes/FKs.
+ALTER TABLE business_invitations
+  ADD COLUMN IF NOT EXISTS business_id INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_business_invitations_campaign
   ON business_invitations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_business_invitations_business_id

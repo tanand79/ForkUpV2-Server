@@ -46,6 +46,18 @@ async function run() {
     await migratePatch();
   }
 
+  /**
+   * Additive invite-status columns/indexes for legacy production DBs that created
+   * business_invitations before business_id and readiness fields existed.
+   * Safe to re-run (IF NOT EXISTS / constraint guards).
+   */
+  if (resolved === "setup") {
+    const { migrateBusinessInviteStatusFields } = await import(
+      "./migrate-business-invite-status-fields"
+    );
+    await migrateBusinessInviteStatusFields({ closePool: false });
+  }
+
   if (resolved === "foundation" || resolved === "setup") {
     const { migrateFoundation } = await import("./migrate-foundation");
     await migrateFoundation({ closePool: !keepPoolOpen });
