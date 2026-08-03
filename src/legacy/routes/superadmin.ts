@@ -38,6 +38,13 @@
  * POST    /api/superadmin/forkup-review/:slug/approve
  * POST    /api/superadmin/forkup-review/:slug/deny
  * POST    /api/superadmin/forkup-review/:slug/request-changes
+ *
+ * GET     /api/superadmin/organizations/:type/:id
+ *   query: requestId?
+ *   response: {
+ *     organizationType, organization, locations?, accessRequest,
+ *     activitySummary, campaigns[]  // creator-parity KPIs (raised, supporters, etc.)
+ *   }
  */
 import { Router } from "express";
 import crypto from "crypto";
@@ -58,6 +65,7 @@ import {
 } from "../lib/platform-settings";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { getBedrockLivePricing } from "../lib/bedrock-pricing";
+import { toDateOnlyString } from "../lib/date-only";
 import { promoteCampaignAfterForkupApproval } from "../lib/campaign-go-live-from-review";
 
 export const superadminRouter = Router();
@@ -967,13 +975,169 @@ superadminRouter.post("/access-requests/:id/deny", async (req, res) => {
 });
 
 /**
+ * Load campaign activity KPIs for a nonprofit or participating business.
+ * Purpose: Superadmin View Details parity with creator dashboard/analytics.
+ * Inputs: org type + id. Outputs: activitySummary + per-campaign KPI rows.
+ */
+async function loadOrganizationCampaignActivity(
+  orgType: "nonprofit" | "business",
+  orgId: number,
+): Promise<{
+  activitySummary: Record<string, number>;
+  campaigns: Record<string, unknown>[];
+}> {
+  const campaignFilter =
+    orgType === "nonprofit"
+      ? `c.nonprofit_id = $1`
+      : `EXISTS (
+           SELECT 1 FROM campaign_business_locations cblx
+           WHERE cblx.campaign_id = c.id AND cblx.business_id = $1
+         )`;
+
+  const { rows: campaignRows } = await pool.query<QueryResultRow>(
+    `SELECT c.id, c.slug, c.campaign_name, c.campaign_status, c.campaign_goal,
+            c.raised, c.supporters_going, c.expected_guests, c.verified_visits,
+            c.campaign_start_date, c.campaign_end_date, c.event_date,
+            c.business_timing_status, c.forkup_review_status,
+            n.organization_name,
+            (SELECT COALESCE(json_agg(json_build_object(
+               'methodType', cm.method_type,
+               'methodStatus', cm.method_status
+             ) ORDER BY cm.id), '[]'::json)
+             FROM campaign_methods cm WHERE cm.campaign_id = c.id) AS methods,
+            (SELECT COUNT(*)::int FROM campaign_business_locations cbl
+             WHERE cbl.campaign_id = c.id) AS partners_invited,
+            (SELECT COUNT(*)::int FROM campaign_business_locations cbl
+             WHERE cbl.campaign_id = c.id
+               AND cbl.acceptance_status IN ('invited', 'pending', 'opened')) AS partners_pending,
+            (SELECT COUNT(*)::int FROM campaign_business_locations cbl
+             WHERE cbl.campaign_id = c.id
+               AND cbl.acceptance_status = 'accepted') AS partners_accepted,
+            (SELECT COUNT(*)::int FROM campaign_business_locations cbl
+             WHERE cbl.campaign_id = c.id
+               AND (
+                 cbl.setup_status = 'needs_info'
+                 OR cbl.settlement_ready_status = 'needs_info'
+                 OR cbl.invite_status = 'needs_info'
+               )) AS partners_needs_info,
+            (SELECT COUNT(*)::int FROM campaign_participants cp
+             WHERE cp.campaign_id = c.id) AS participant_count,
+            (SELECT COUNT(*)::int FROM campaign_participants cp
+             WHERE cp.campaign_id = c.id AND cp.participant_type = 'ambassador') AS ambassador_count,
+            (SELECT COUNT(*)::int FROM receipts r WHERE r.campaign_id = c.id) AS receipts_uploaded,
+            (SELECT COUNT(*)::int FROM receipts r
+             WHERE r.campaign_id = c.id AND r.review_status = 'approved') AS receipts_approved,
+            (SELECT COUNT(*)::int FROM receipts r
+             WHERE r.campaign_id = c.id AND r.review_status = 'pending') AS receipts_pending,
+            (SELECT COUNT(*)::int FROM receipts r
+             WHERE r.campaign_id = c.id AND r.review_status = 'rejected') AS receipts_rejected,
+            (SELECT COUNT(DISTINCT r.supporter_id)::int FROM receipts r
+             WHERE r.campaign_id = c.id AND r.supporter_id IS NOT NULL) AS receipt_supporters,
+            (SELECT COALESCE(SUM(r.eligible_subtotal), 0) FROM receipts r
+             WHERE r.campaign_id = c.id AND r.review_status = 'approved') AS eligible_sales,
+            (SELECT COALESCE(SUM(r.calculated_donation), 0) FROM receipts r
+             WHERE r.campaign_id = c.id AND r.review_status = 'approved') AS giveback_pool,
+            (SELECT COUNT(*)::int FROM donations d
+             WHERE d.campaign_id = c.id AND d.donation_type = 'virtual') AS online_donation_count,
+            (SELECT COALESCE(SUM(d.amount), 0) FROM donations d
+             WHERE d.campaign_id = c.id AND d.donation_type = 'virtual') AS online_donation_total,
+            (SELECT COALESCE(SUM(s.forkup_fee), 0) FROM settlements s
+             WHERE s.campaign_id = c.id) AS settlement_forkup_fee,
+            (SELECT COALESCE(SUM(s.net_nonprofit_amount), 0) FROM settlements s
+             WHERE s.campaign_id = c.id) AS settlement_net_nonprofit,
+            (SELECT COALESCE(SUM(s.donation_pool), 0) FROM settlements s
+             WHERE s.campaign_id = c.id) AS settlement_donation_pool
+     FROM campaigns c
+     JOIN nonprofits n ON n.id = c.nonprofit_id
+     WHERE ${campaignFilter}
+     ORDER BY c.updated_at DESC`,
+    [orgId],
+  );
+
+  const campaigns = campaignRows.map((r) => {
+    let methods: { methodType: string; methodStatus: string }[] = [];
+    const rawMethods = r.methods;
+    if (Array.isArray(rawMethods)) {
+      methods = rawMethods.map((m: { methodType?: string; method_type?: string; methodStatus?: string; method_status?: string }) => ({
+        methodType: String(m.methodType ?? m.method_type ?? ""),
+        methodStatus: String(m.methodStatus ?? m.method_status ?? ""),
+      }));
+    }
+
+    return {
+      id: Number(r.id),
+      slug: String(r.slug),
+      name: String(r.campaign_name),
+      nonprofit: String(r.organization_name),
+      status: String(r.campaign_status),
+      goal: Number(r.campaign_goal ?? 0),
+      raised: Number(r.raised ?? 0),
+      supportersGoing: Number(r.supporters_going ?? 0),
+      expectedGuests: Number(r.expected_guests ?? 0),
+      verifiedVisits: Number(r.verified_visits ?? 0),
+      startDate: toDateOnlyString(r.campaign_start_date),
+      endDate: toDateOnlyString(r.campaign_end_date),
+      eventDate: toDateOnlyString(r.event_date),
+      businessTimingStatus: String(r.business_timing_status ?? "ok"),
+      forkupReviewStatus: String(r.forkup_review_status ?? "none"),
+      methods,
+      partnersInvited: Number(r.partners_invited ?? 0),
+      partnersPending: Number(r.partners_pending ?? 0),
+      partnersAccepted: Number(r.partners_accepted ?? 0),
+      partnersNeedsInfo: Number(r.partners_needs_info ?? 0),
+      participantCount: Number(r.participant_count ?? 0),
+      ambassadorCount: Number(r.ambassador_count ?? 0),
+      receiptSupporters: Number(r.receipt_supporters ?? 0),
+      receiptsUploaded: Number(r.receipts_uploaded ?? 0),
+      receiptsApproved: Number(r.receipts_approved ?? 0),
+      receiptsPending: Number(r.receipts_pending ?? 0),
+      receiptsRejected: Number(r.receipts_rejected ?? 0),
+      eligibleSales: Number(r.eligible_sales ?? 0),
+      givebackPool: Number(r.giveback_pool ?? 0),
+      onlineDonationCount: Number(r.online_donation_count ?? 0),
+      onlineDonationTotal: Number(r.online_donation_total ?? 0),
+      settlementForkupFee: Number(r.settlement_forkup_fee ?? 0),
+      settlementNetNonprofit: Number(r.settlement_net_nonprofit ?? 0),
+      settlementDonationPool: Number(r.settlement_donation_pool ?? 0),
+    };
+  });
+
+  const activitySummary = {
+    campaignCount: campaigns.length,
+    liveCount: campaigns.filter((c) => c.status === "live").length,
+    draftCount: campaigns.filter((c) =>
+      ["draft", "ready_to_launch", "in_review"].includes(c.status),
+    ).length,
+    totalRaised: campaigns.reduce((s, c) => s + c.raised, 0),
+    totalGoal: campaigns.reduce((s, c) => s + c.goal, 0),
+    onlineDonationTotal: campaigns.reduce((s, c) => s + c.onlineDonationTotal, 0),
+    onlineDonationCount: campaigns.reduce((s, c) => s + c.onlineDonationCount, 0),
+    givebackPool: campaigns.reduce((s, c) => s + c.givebackPool, 0),
+    eligibleSales: campaigns.reduce((s, c) => s + c.eligibleSales, 0),
+    supporters: campaigns.reduce((s, c) => s + c.receiptSupporters, 0),
+    supportersGoing: campaigns.reduce((s, c) => s + c.supportersGoing, 0),
+    receiptsUploaded: campaigns.reduce((s, c) => s + c.receiptsUploaded, 0),
+    receiptsApproved: campaigns.reduce((s, c) => s + c.receiptsApproved, 0),
+    partnersInvited: campaigns.reduce((s, c) => s + c.partnersInvited, 0),
+    partnersAccepted: campaigns.reduce((s, c) => s + c.partnersAccepted, 0),
+    ambassadorCount: campaigns.reduce((s, c) => s + c.ambassadorCount, 0),
+    settlementForkupFee: campaigns.reduce((s, c) => s + c.settlementForkupFee, 0),
+    settlementNetNonprofit: campaigns.reduce((s, c) => s + c.settlementNetNonprofit, 0),
+  };
+
+  return { activitySummary, campaigns };
+}
+
+/**
  * GET /api/superadmin/organizations/:type/:id
  * query: requestId? — optional access-request id to include in the payload
  * response: {
  *   organizationType: "nonprofit" | "business",
  *   organization: { ...full profile fields... },
  *   locations?: [...],  // business only
- *   accessRequest: AccessRequest | null
+ *   accessRequest: AccessRequest | null,
+ *   activitySummary: { ...totals... },
+ *   campaigns: [ ...per-campaign KPIs... ]
  * }
  */
 superadminRouter.get("/organizations/:type/:id", async (req, res) => {
@@ -1044,6 +1208,7 @@ superadminRouter.get("/organizations/:type/:id", async (req, res) => {
         return;
       }
       const n = rows[0];
+      const activity = await loadOrganizationCampaignActivity("nonprofit", orgId);
       res.json({
         organizationType: "nonprofit",
         organization: {
@@ -1077,6 +1242,8 @@ superadminRouter.get("/organizations/:type/:id", async (req, res) => {
           updatedAt: n.updated_at,
         },
         accessRequest,
+        activitySummary: activity.activitySummary,
+        campaigns: activity.campaigns,
       });
       return;
     }
@@ -1096,6 +1263,8 @@ superadminRouter.get("/organizations/:type/:id", async (req, res) => {
        FROM business_locations WHERE business_id = $1 ORDER BY location_name`,
       [orgId],
     );
+
+    const activity = await loadOrganizationCampaignActivity("business", orgId);
 
     res.json({
       organizationType: "business",
@@ -1145,6 +1314,8 @@ superadminRouter.get("/organizations/:type/:id", async (req, res) => {
         updatedAt: l.updated_at,
       })),
       accessRequest,
+      activitySummary: activity.activitySummary,
+      campaigns: activity.campaigns,
     });
   } catch (err) {
     console.error(err);

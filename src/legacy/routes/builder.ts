@@ -1495,3 +1495,79 @@ builderRouter.post("/campaigns", async (req, res) => {
     connection.release();
   }
 });
+
+/**
+ * POST /api/builder/campaigns/:slug/resubmit-forkup-review
+ * Body: none
+ * Response: { success: true, slug, forkupReviewStatus: "pending" }
+ *
+ * Purpose: After Super Admin denies a campaign ForkUp review, the nonprofit
+ * owner/member can request review again (denied → pending only).
+ */
+builderRouter.post("/campaigns/:slug/resubmit-forkup-review", async (req, res) => {
+  try {
+    const authUser = await resolveAuthUser(bearerToken(req));
+    if (!authUser) {
+      res.status(401).json({ error: "Sign in required" });
+      return;
+    }
+
+    const slug = req.params.slug.replace(/\/+$/, "");
+    const { rows: campaigns } = await pool.query<QueryResultRow>(
+      `SELECT id, slug, nonprofit_id, created_by_user_id, forkup_review_status
+       FROM campaigns WHERE slug = $1 LIMIT 1`,
+      [slug],
+    );
+    if (campaigns.length === 0) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    const campaign = campaigns[0];
+    if (String(campaign.forkup_review_status) !== "denied") {
+      res.status(400).json({
+        error: "Only a denied ForkUp review can be requested again",
+      });
+      return;
+    }
+
+    const nonprofitId = Number(campaign.nonprofit_id);
+    const createdBy =
+      campaign.created_by_user_id != null ? Number(campaign.created_by_user_id) : null;
+    const isCreator = createdBy != null && createdBy === authUser.id;
+    const { rows: membership } = await pool.query<QueryResultRow>(
+      `SELECT 1 FROM organization_users
+       WHERE organization_type = 'nonprofit'
+         AND organization_id = $1
+         AND user_id = $2
+       LIMIT 1`,
+      [nonprofitId, authUser.id],
+    );
+    if (!authUser.isPlatformAdmin && !isCreator && membership.length === 0) {
+      res.status(403).json({ error: "Not allowed to resubmit this campaign" });
+      return;
+    }
+
+    const { rows: updated } = await pool.query<QueryResultRow>(
+      `UPDATE campaigns
+       SET forkup_review_status = 'pending',
+           forkup_review_requested_at = COALESCE(forkup_review_requested_at, NOW()),
+           updated_at = NOW()
+       WHERE id = $1 AND forkup_review_status = 'denied'
+       RETURNING slug, forkup_review_status`,
+      [campaign.id],
+    );
+    if (updated.length === 0) {
+      res.status(409).json({ error: "Campaign review could not be resubmitted" });
+      return;
+    }
+
+    res.json({
+      success: true,
+      slug: String(updated[0].slug),
+      forkupReviewStatus: String(updated[0].forkup_review_status),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to resubmit ForkUp review" });
+  }
+});

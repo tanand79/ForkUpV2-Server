@@ -1424,3 +1424,173 @@ profilesRouter.get("/businesses/:slug", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch business" });
   }
 });
+
+/**
+ * POST /api/profiles/access-requests/resubmit
+ * Body: { organizationType: "nonprofit" | "business", organizationId: number }
+ * Response: { success: true, id: number, status: "pending", organizationType, organizationId }
+ *
+ * Purpose: After a Super Admin denial, the requester (or linked org member) can
+ * open a new pending access/claim request without changing the denied row.
+ * Only allowed when the latest request for that org is status = denied.
+ */
+profilesRouter.post("/access-requests/resubmit", async (req, res) => {
+  try {
+    const authUser = await resolveAuthUser(bearerToken(req));
+    if (!authUser) {
+      res.status(401).json({ error: "Sign in required" });
+      return;
+    }
+
+    const body = req.body as {
+      organizationType?: string;
+      organizationId?: number;
+    };
+    const organizationType =
+      body.organizationType === "nonprofit" || body.organizationType === "business"
+        ? body.organizationType
+        : null;
+    const organizationId = Number(body.organizationId);
+    if (!organizationType || !Number.isFinite(organizationId) || organizationId <= 0) {
+      res.status(400).json({
+        error: "organizationType and organizationId are required",
+      });
+      return;
+    }
+
+    const { rows: latestRows } = await pool.query<QueryResultRow>(
+      `SELECT id, organization_name, request_type, risk_level, status,
+              requested_by_user_id, requester_name, requester_email,
+              relationship, risk_reason
+       FROM organization_access_requests
+       WHERE organization_type = $1 AND organization_id = $2
+       ORDER BY id DESC
+       LIMIT 1`,
+      [organizationType, organizationId],
+    );
+    const latest = latestRows[0];
+    if (!latest) {
+      res.status(404).json({ error: "No access request found for this organization" });
+      return;
+    }
+    if (latest.status === "pending") {
+      res.status(409).json({ error: "A pending request already exists" });
+      return;
+    }
+    if (latest.status !== "denied") {
+      res.status(400).json({
+        error: "Only a denied request can be submitted again",
+      });
+      return;
+    }
+
+    const wasRequester =
+      latest.requested_by_user_id != null &&
+      Number(latest.requested_by_user_id) === authUser.id;
+    const { rows: membership } = await pool.query<QueryResultRow>(
+      `SELECT 1 FROM organization_users
+       WHERE organization_type = $1 AND organization_id = $2 AND user_id = $3
+       LIMIT 1`,
+      [organizationType, organizationId, authUser.id],
+    );
+    let isClaimOwner = false;
+    if (organizationType === "nonprofit") {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT 1 FROM nonprofits WHERE id = $1 AND claimed_by_user_id = $2 LIMIT 1`,
+        [organizationId, authUser.id],
+      );
+      isClaimOwner = rows.length > 0;
+    } else {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT 1 FROM businesses WHERE id = $1 AND claimed_by_user_id = $2 LIMIT 1`,
+        [organizationId, authUser.id],
+      );
+      isClaimOwner = rows.length > 0;
+    }
+    if (!wasRequester && membership.length === 0 && !isClaimOwner) {
+      res.status(403).json({ error: "Not allowed to resubmit for this organization" });
+      return;
+    }
+
+    const requestType =
+      latest.request_type === "access" || latest.request_type === "claim"
+        ? latest.request_type
+        : "claim";
+    const riskLevel =
+      latest.risk_level === "low" ||
+      latest.risk_level === "medium" ||
+      latest.risk_level === "high"
+        ? latest.risk_level
+        : "medium";
+    const organizationName = String(latest.organization_name ?? "Organization");
+    const requesterName =
+      (typeof latest.requester_name === "string" && latest.requester_name.trim()) ||
+      authUser.fullName ||
+      null;
+    const requesterEmail =
+      (typeof latest.requester_email === "string" && latest.requester_email.trim()) ||
+      authUser.email ||
+      null;
+    const relationship =
+      typeof latest.relationship === "string" ? latest.relationship : null;
+    const priorReason =
+      typeof latest.risk_reason === "string" && latest.risk_reason.trim()
+        ? latest.risk_reason.trim()
+        : null;
+    const riskReason = priorReason
+      ? `Resubmitted after denial. Prior reason: ${priorReason}`
+      : "Resubmitted after denial";
+
+    if (organizationType === "nonprofit") {
+      await logNonprofitAccessRequest({
+        organizationId,
+        organizationName,
+        requestType,
+        riskLevel,
+        status: "pending",
+        requestedByUserId: authUser.id,
+        requesterName,
+        requesterEmail,
+        relationship,
+        riskReason,
+      });
+    } else {
+      await logBusinessAccessRequest({
+        organizationId,
+        organizationName,
+        requestType,
+        riskLevel,
+        status: "pending",
+        requestedByUserId: authUser.id,
+        requesterName,
+        requesterEmail,
+        relationship,
+        riskReason,
+      });
+    }
+
+    const { rows: created } = await pool.query<QueryResultRow>(
+      `SELECT id FROM organization_access_requests
+       WHERE organization_type = $1 AND organization_id = $2 AND status = 'pending'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [organizationType, organizationId],
+    );
+    const newId = created[0]?.id != null ? Number(created[0].id) : null;
+    if (!newId) {
+      res.status(500).json({ error: "Failed to create resubmit request" });
+      return;
+    }
+
+    res.status(201).json({
+      success: true,
+      id: newId,
+      status: "pending",
+      organizationType,
+      organizationId,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to resubmit access request" });
+  }
+});
