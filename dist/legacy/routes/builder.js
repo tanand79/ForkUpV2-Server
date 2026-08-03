@@ -11,6 +11,7 @@ const s3_1 = require("../lib/s3");
 const organization_library_1 = require("../lib/organization-library");
 const campaign_timing_1 = require("../lib/campaign-timing");
 const business_invite_timing_1 = require("../lib/business-invite-timing");
+const business_invitation_record_1 = require("../lib/business-invitation-record");
 const business_lifecycle_emails_1 = require("../lib/business-lifecycle-emails");
 const pool_1 = require("../db/pool");
 async function sendBusinessInviteEmails(campaignId) {
@@ -236,33 +237,41 @@ async function upsertNewBusinessInvite(connection, params) {
         sentDate: new Date(),
         startOrEventDate,
     });
+    const givebackPercentage = 10;
+    const messageToBusiness = invite.messageToBusiness?.trim() || null;
+    const proposedTerms = invite.proposedTerms?.trim() || null;
     const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
       campaign_id, method_id, business_id, location_id,
       invite_status, acceptance_status, giveback_percentage,
-      respond_by_date, invited_by_user_id, setup_status
-    ) VALUES ($1, $2, $3, $4, 'invited', 'invited', 10, $5, $6, 'pending')
+      respond_by_date, invited_by_user_id, setup_status,
+      message_to_business, proposed_terms
+    ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending', $8, $9)
      RETURNING id`, [
         campaignId,
         methodId,
         businessId,
         locationId,
+        givebackPercentage,
         respondByDate,
         invitedByUserId ?? null,
+        messageToBusiness,
+        proposedTerms,
     ]);
     await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
-    await connection.query(`INSERT INTO business_invitations (
-      campaign_id, nonprofit_id, method_id, business_name, business_email,
-      invitation_status, campaign_business_location_id, respond_by_date, invited_by_user_id
-    ) VALUES ($1, $2, $3, $4, $5, 'sent', $6, $7, $8)`, [
+    await (0, business_invitation_record_1.insertBusinessInvitationRecord)(connection, {
         campaignId,
         nonprofitId,
         methodId,
-        name,
-        email,
-        cblResult[0].id,
+        businessId,
+        businessName: name,
+        businessEmail: email,
+        campaignBusinessLocationId: cblResult[0].id,
         respondByDate,
-        invitedByUserId ?? null,
-    ]);
+        invitedByUserId,
+        proposedGivebackPercentage: givebackPercentage,
+        messageToBusiness,
+        proposedTerms,
+    });
     existingPartnerKeys.add(partnerKey);
     existingPartnerEmails.add(email);
     return true;
@@ -329,7 +338,7 @@ exports.builderRouter.get("/businesses", async (req, res) => {
 exports.builderRouter.get("/campaigns/:slug", async (req, res) => {
     try {
         const slug = req.params.slug.replace(/\/+$/, "");
-        const { rows: campaigns } = await pool_1.pool.query(`SELECT c.id, c.slug, c.campaign_name, c.campaign_story, c.campaign_goal,
+        const { rows: campaigns } = await pool_1.pool.query(`SELECT c.id, c.slug, c.nonprofit_id, c.campaign_name, c.campaign_story, c.campaign_goal,
               c.campaign_start_date, c.campaign_end_date, c.cover_image_url, c.campaign_status
        FROM campaigns c WHERE c.slug = $1`, [slug]);
         if (campaigns.length === 0) {
@@ -353,6 +362,7 @@ exports.builderRouter.get("/campaigns/:slug", async (req, res) => {
        WHERE campaign_id = $1 AND invitation_status = 'accepted' LIMIT 1`, [campaign.id]);
         res.json({
             slug: campaign.slug,
+            nonprofitId: Number(campaign.nonprofit_id),
             campaignName: campaign.campaign_name,
             campaignStory: campaign.campaign_story,
             campaignGoal: Number(campaign.campaign_goal ?? 0),
@@ -582,21 +592,44 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
                     sentDate: new Date(),
                     startOrEventDate: inviteAnchorDate,
                 });
+                const givebackPercentage = invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10;
+                const messageToBusiness = invite.messageToBusiness?.trim() || null;
+                const proposedTerms = invite.proposedTerms?.trim() || null;
+                const businessEmail = (invite.businessEmail?.trim() ||
+                    (biz.contact_email ? String(biz.contact_email).trim() : "") ||
+                    "").toLowerCase() || "unknown@invite.local";
                 const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
             campaign_id, method_id, business_id, location_id,
             invite_status, acceptance_status, giveback_percentage,
-            respond_by_date, invited_by_user_id, setup_status
-          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending')
+            respond_by_date, invited_by_user_id, setup_status,
+            message_to_business, proposed_terms
+          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending', $8, $9)
            RETURNING id`, [
                     campaignId,
                     methodId,
                     invite.businessId,
                     invite.locationId,
-                    invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
+                    givebackPercentage,
                     respondByDate,
                     invitedByUserId,
+                    messageToBusiness,
+                    proposedTerms,
                 ]);
                 await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
+                await (0, business_invitation_record_1.insertBusinessInvitationRecord)(connection, {
+                    campaignId,
+                    nonprofitId,
+                    methodId,
+                    businessId: invite.businessId,
+                    businessName: String(biz.business_name),
+                    businessEmail,
+                    campaignBusinessLocationId: cblResult[0].id,
+                    respondByDate,
+                    invitedByUserId,
+                    proposedGivebackPercentage: Number(givebackPercentage),
+                    messageToBusiness,
+                    proposedTerms,
+                });
                 existingPartnerKeys.add(key);
             }
             for (const invite of body.newBusinessInvites ?? []) {
@@ -639,6 +672,7 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         }
         res.json({
             slug,
+            nonprofitId,
             campaignStatus: nextStatus,
             campaignName: body.campaignName,
             businessTimingStatus: timingFields.businessTimingStatus,
@@ -867,21 +901,44 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
                     sentDate: new Date(),
                     startOrEventDate: inviteAnchorDate,
                 });
+                const givebackPercentage = invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10;
+                const messageToBusiness = invite.messageToBusiness?.trim() || null;
+                const proposedTerms = invite.proposedTerms?.trim() || null;
+                const businessEmail = (invite.businessEmail?.trim() ||
+                    (biz.contact_email ? String(biz.contact_email).trim() : "") ||
+                    "").toLowerCase() || "unknown@invite.local";
                 const { rows: cblResult } = await connection.query(`INSERT INTO campaign_business_locations (
             campaign_id, method_id, business_id, location_id,
             invite_status, acceptance_status, giveback_percentage,
-            respond_by_date, invited_by_user_id, setup_status
-          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending')
+            respond_by_date, invited_by_user_id, setup_status,
+            message_to_business, proposed_terms
+          ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending', $8, $9)
            RETURNING id`, [
                     campaignId,
                     methodId,
                     invite.businessId,
                     invite.locationId,
-                    invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10,
+                    givebackPercentage,
                     respondByDate,
                     invitedByUserId,
+                    messageToBusiness,
+                    proposedTerms,
                 ]);
                 await (0, invitations_1.ensureInvitationToken)(connection, cblResult[0].id);
+                await (0, business_invitation_record_1.insertBusinessInvitationRecord)(connection, {
+                    campaignId,
+                    nonprofitId,
+                    methodId,
+                    businessId: invite.businessId,
+                    businessName: String(biz.business_name),
+                    businessEmail,
+                    campaignBusinessLocationId: cblResult[0].id,
+                    respondByDate,
+                    invitedByUserId,
+                    proposedGivebackPercentage: Number(givebackPercentage),
+                    messageToBusiness,
+                    proposedTerms,
+                });
                 existingPartnerKeys.add(`${invite.businessId}:${invite.locationId}`);
                 if (biz.contact_email) {
                     existingPartnerEmails.add(String(biz.contact_email).trim().toLowerCase());
@@ -929,6 +986,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
         }
         res.status(201).json({
             slug,
+            nonprofitId,
             campaignStatus,
             campaignName: body.campaignName,
             businessTimingStatus: timingFields.businessTimingStatus,

@@ -81,6 +81,8 @@ function mapPartnerInvitation(inv, campaignSlug) {
         setupStatus: inv.setup_status ?? "pending",
         marketingReadyStatus: inv.marketing_ready_status ?? "pending",
         settlementReadyStatus: inv.settlement_ready_status ?? "pending",
+        messageToBusiness: inv.message_to_business ?? null,
+        proposedTerms: inv.proposed_terms ?? null,
         changeRequestMessage: inv.change_request_message ?? null,
         invitedAt: inv.created_at,
         token: inv.token,
@@ -117,6 +119,8 @@ exports.manageRouter.get("/campaigns/:slug", async (req, res) => {
          cbl.setup_status,
          cbl.marketing_ready_status,
          cbl.settlement_ready_status,
+         cbl.message_to_business,
+         cbl.proposed_terms,
          cbl.created_at,
          cbl.updated_at,
          b.business_name,
@@ -223,8 +227,16 @@ exports.manageRouter.get("/campaigns/:slug/invitations/:invitationId", async (re
         const { rows: rows } = await pool_1.pool.query(`SELECT
          cbl.id,
          cbl.acceptance_status,
+         cbl.invite_status,
          cbl.giveback_percentage,
          cbl.participation_hours,
+         cbl.respond_by_date,
+         cbl.opened_at,
+         cbl.setup_status,
+         cbl.marketing_ready_status,
+         cbl.settlement_ready_status,
+         cbl.message_to_business,
+         cbl.proposed_terms,
          cbl.created_at,
          cbl.updated_at,
          c.slug AS campaign_slug,
@@ -774,7 +786,7 @@ exports.manageRouter.post("/invites/expire-due", async (_req, res) => {
        SET invitation_status = 'expired'
        WHERE respond_by_date IS NOT NULL
          AND respond_by_date < CURRENT_DATE
-         AND invitation_status IN ('draft', 'sent', 'opened')`);
+         AND invitation_status IN ('draft', 'sent', 'invited', 'opened')`);
         res.json({
             success: true,
             expiredCount: Number(cblCount ?? 0),

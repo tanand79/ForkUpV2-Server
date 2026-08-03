@@ -11,6 +11,7 @@ const slug_1 = require("../lib/slug");
 const date_only_1 = require("../lib/date-only");
 const campaign_timing_1 = require("../lib/campaign-timing");
 const business_invite_timing_1 = require("../lib/business-invite-timing");
+const business_invitation_record_1 = require("../lib/business-invitation-record");
 const pool_1 = require("../db/pool");
 exports.businessRouter = (0, express_1.Router)();
 function formatDate(value) {
@@ -50,6 +51,8 @@ function mapInvitation(row) {
         givebackPercentage: Number(row.giveback_percentage),
         participationHours: row.participation_hours,
         eligibleSalesRules: row.eligible_sales_rules,
+        messageToBusiness: row.message_to_business ?? null,
+        proposedTerms: row.proposed_terms ?? null,
         respondByDate: formatDate(row.respond_by_date ?? null),
         openedAt: row.opened_at ? String(row.opened_at) : null,
         setupStatus: row.setup_status ?? "pending",
@@ -172,6 +175,8 @@ async function fetchInvitationByToken(token) {
          cbl.setup_status,
          cbl.marketing_ready_status,
          cbl.settlement_ready_status,
+         cbl.message_to_business,
+         cbl.proposed_terms,
          c.slug AS campaign_slug,
          c.campaign_name,
          c.campaign_story,
@@ -238,10 +243,13 @@ exports.businessRouter.get("/collaborations", async (req, res) => {
            cbl.invite_status,
            cbl.respond_by_date,
            cbl.setup_status,
+           cbl.marketing_ready_status,
            cbl.settlement_ready_status,
            cbl.giveback_percentage,
            cbl.participation_hours,
            cbl.eligible_sales_rules,
+           cbl.message_to_business,
+           cbl.proposed_terms,
            c.slug AS campaign_slug,
            c.campaign_name,
            c.campaign_story,
@@ -316,6 +324,8 @@ exports.businessRouter.get("/invitations", async (req, res) => {
            cbl.giveback_percentage,
            cbl.participation_hours,
            cbl.eligible_sales_rules,
+           cbl.message_to_business,
+           cbl.proposed_terms,
            c.slug AS campaign_slug,
            c.campaign_name,
            c.campaign_story,
@@ -382,14 +392,14 @@ exports.businessRouter.get("/invitations/:token", async (req, res) => {
         await pool_1.pool.query(`UPDATE business_invitations bi
        SET
          invitation_status = CASE
-           WHEN invitation_status IN ('sent', 'draft') THEN 'opened'
+           WHEN invitation_status IN ('sent', 'draft', 'invited') THEN 'opened'
            ELSE invitation_status
          END,
          opened_at = COALESCE(opened_at, NOW())
        FROM invitation_tokens it
        WHERE it.token = $1
          AND it.campaign_business_location_id = bi.campaign_business_location_id
-         AND bi.invitation_status IN ('sent', 'draft', 'opened')`, [req.params.token]);
+         AND bi.invitation_status IN ('sent', 'draft', 'invited', 'opened')`, [req.params.token]);
         const invitation = await fetchInvitationByToken(req.params.token);
         if (!invitation) {
             res.status(404).json({ error: "Invitation not found" });
@@ -485,6 +495,13 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
             typeof settlementContactName === "string" ? settlementContactName : null,
             typeof settlementContactEmail === "string" ? settlementContactEmail : null,
         ]);
+        await (0, business_invitation_record_1.syncBusinessInvitationAccepted)(connection, {
+            campaignBusinessLocationId: cblId,
+            invitationStatus: setup.inviteStatusAfterAccept,
+            setupStatus: setup.setupStatus,
+            marketingReadyStatus: setup.marketingReadyStatus,
+            settlementReadyStatus: setup.settlementReadyStatus,
+        });
         await connection.query(`UPDATE businesses SET business_status = 'active', claim_status = 'claimed', updated_at = NOW()
        WHERE id = (SELECT business_id FROM campaign_business_locations WHERE id = $1)`, [cblId]);
         await (0, invitations_1.evaluateCampaignInvitationPhase)(connection, campaignId);
@@ -562,6 +579,10 @@ exports.businessRouter.post("/invitations/:token/decline", async (req, res) => {
          decline_reason = EXCLUDED.decline_reason,
          updated_at = NOW()
        RETURNING id`, [cblId, reason ?? null]);
+        await (0, business_invitation_record_1.syncBusinessInvitationDeclined)(connection, {
+            campaignBusinessLocationId: cblId,
+            declineReason: reason ?? null,
+        });
         await (0, invitations_1.evaluateCampaignInvitationPhase)(connection, campaignId);
         await connection.query("COMMIT");
         await notifyNonprofitOfBusinessResponse(campaignId, access.businessId, "declined");
@@ -629,6 +650,7 @@ exports.businessRouter.post("/invitations/:token/request-changes", async (req, r
            change_request_message = EXCLUDED.change_request_message,
            updated_at = NOW()`, [row.id, messageText]);
         }
+        await (0, business_invitation_record_1.syncBusinessInvitationNeedsInfo)(connection, siblingRows.map((row) => Number(row.id)));
         await connection.query("COMMIT");
         res.json({ success: true, acceptanceStatus: "changes_requested" });
     }

@@ -19,6 +19,7 @@ import { usNonprofitSuggestRouter } from "./routes/us-nonprofit-suggest";
 import { libraryRouter } from "./routes/library";
 import { superadminRouter } from "./routes/superadmin";
 import { campaignAiRouter } from "./routes/campaign-ai";
+import { aiCampaignFlowRouter } from "./routes/ai-campaign-flow";
 import { ensureUploadsDir } from "./lib/receipts";
 import { pool } from "./db/pool";
 
@@ -92,5 +93,6 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", suggestCampaignGoalRouter);
   app.use("/api", generateOrganizationDraftRouter);
   app.use("/api/campaign-ai", campaignAiRouter);
+  app.use("/api/ai-campaign-flow", aiCampaignFlowRouter);
   app.use("/api/manage", manageRouter);
 }

@@ -4,6 +4,8 @@ export interface SuggestedImage {
     source: SuggestedImageSource;
     sourceUrl: string | null;
 }
+export declare function looksLikeLogoUrl(url: string): boolean;
+export declare function photoCoverRank(url: string): number;
 export declare function normalizeInstagramUrl(handleOrUrl: string): string | null;
 export declare function normalizeFacebookUrl(url: string): string | null;
 export declare function normalizeWebsiteUrl(url: string): string | null;

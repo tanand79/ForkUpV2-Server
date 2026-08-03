@@ -83,29 +83,37 @@ function evaluateBusinessMethodTiming(input) {
             anchorKind: null,
         };
     }
+    const GIVEBACK_SHORT_MSG = "This campaign starts in less than 30 days. Business giveback campaigns need time for businesses to accept, prepare their team, and promote the campaign. ForkUp review is required before inviting businesses for this timeline.";
+    const GUEST_SHORT_MSG = "Guest Bartending events need enough time to confirm the venue, prepare the guest bartenders, promote the event, and alert the business team. ForkUp review is required for events less than 30 days away.";
+    const OTHER_BUSINESS_SHORT_MSG = "This business-based method starts in less than 30 days. ForkUp review is required before proceeding normally.";
+    const shortMessages = [];
+    let worstDays = null;
     let anchorDate = null;
     let anchorKind = null;
-    let message = null;
+    const considerAnchor = (dateStr, kind, shortMessage) => {
+        const normalized = (0, date_only_1.toDateOnlyString)(dateStr);
+        const days = daysUntil(normalized);
+        if (days == null)
+            return;
+        if (worstDays == null || days < worstDays) {
+            worstDays = days;
+            anchorDate = normalized;
+            anchorKind = kind;
+        }
+        if (days < exports.BUSINESS_METHOD_MIN_LEAD_DAYS && !reviewApproved) {
+            shortMessages.push(shortMessage);
+        }
+    };
+    if (hasGivebackMethods(methods)) {
+        considerAnchor(input.startDate, "start", GIVEBACK_SHORT_MSG);
+    }
     if (hasGuestBartending(methods)) {
-        anchorDate = (0, date_only_1.toDateOnlyString)(input.eventDate);
-        anchorKind = "event";
-        message =
-            "Guest Bartending events need enough time to confirm the venue, prepare the guest bartenders, promote the event, and alert the business team. ForkUp review is required for events less than 30 days away.";
+        considerAnchor(input.eventDate, "event", GUEST_SHORT_MSG);
     }
-    else if (hasGivebackMethods(methods)) {
-        anchorDate = (0, date_only_1.toDateOnlyString)(input.startDate);
-        anchorKind = "start";
-        message =
-            "This campaign starts in less than 30 days. Business giveback campaigns need time for businesses to accept, prepare their team, and promote the campaign. ForkUp review is required before inviting businesses for this timeline.";
+    if (!hasGivebackMethods(methods) && !hasGuestBartending(methods)) {
+        considerAnchor(input.startDate, "start", OTHER_BUSINESS_SHORT_MSG);
     }
-    else {
-        anchorDate = (0, date_only_1.toDateOnlyString)(input.startDate);
-        anchorKind = "start";
-        message =
-            "This business-based method starts in less than 30 days. ForkUp review is required before proceeding normally.";
-    }
-    const days = daysUntil(anchorDate);
-    if (days == null) {
+    if (worstDays == null) {
         return {
             status: "ok",
             message: null,
@@ -115,25 +123,25 @@ function evaluateBusinessMethodTiming(input) {
             anchorKind,
         };
     }
-    if (days >= exports.BUSINESS_METHOD_MIN_LEAD_DAYS || reviewApproved) {
+    if (shortMessages.length === 0) {
         return {
             status: "ok",
             message: null,
             ctas: [],
-            daysUntilAnchor: days,
+            daysUntilAnchor: worstDays,
             anchorDate,
             anchorKind,
         };
     }
     return {
         status: "needs_forkup_review",
-        message,
+        message: shortMessages.join(" "),
         ctas: [
             "change_date",
             "continue_without_business_method",
             "submit_for_forkup_review",
         ],
-        daysUntilAnchor: days,
+        daysUntilAnchor: worstDays,
         anchorDate,
         anchorKind,
     };

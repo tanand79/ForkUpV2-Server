@@ -7,6 +7,9 @@
  *
  * Inputs: optional facebookUrl, instagramHandle, websiteUrl, limit (default 6)
  * Outputs: deduped list of { url, source, sourceUrl }
+ *
+ * Changelog: Prefer real photos over logo/icon/SVG URLs when ranking suggestions.
+ * Collect extra same-host <img> candidates so OG brand marks do not fill the slot.
  */
 
 export type SuggestedImageSource =
@@ -22,6 +25,8 @@ export interface SuggestedImage {
 }
 
 const DEFAULT_LIMIT = 6;
+/** Collect extra candidates so logo demotion still leaves photo options. */
+const CANDIDATE_POOL = 18;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
 
@@ -30,6 +35,42 @@ const BROWSER_UA =
 
 function trimStr(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * True when the URL path/query looks like a logo, icon, avatar, or SVG mark —
+ * poor campaign covers. Used to demote (not delete) candidates.
+ *
+ * Inputs: absolute image URL
+ * Outputs: boolean
+ */
+export function looksLikeLogoUrl(url: string): boolean {
+  const raw = (url || "").trim();
+  if (!raw) return false;
+  if (/\.svg(\?|$)/i.test(raw)) return true;
+  return /logo|icon|favicon|avatar|profile[_-]?pic|wordmark|seal|badge|sprite|emoji|brand[_-]?mark|webclip|apple[_-]?touch/i.test(
+    raw,
+  );
+}
+
+/**
+ * Lower is better for featured campaign covers.
+ * Prefer hero/photo/CDN content assets; demote brand marks and bare PNG og:images.
+ *
+ * Inputs: absolute image URL
+ * Outputs: rank number (0 = best)
+ */
+export function photoCoverRank(url: string): number {
+  const raw = (url || "").trim();
+  if (!raw) return 999;
+  if (looksLikeLogoUrl(raw)) return 100;
+  if (/hero|photo|portrait|team|gallery|donate|people|event|bg[-_]|[_-]bg|shoelace/i.test(raw)) {
+    return 0;
+  }
+  if (/\.avif(\?|$)/i.test(raw)) return 5;
+  if (/\.(jpe?g|webp)(\?|$)/i.test(raw)) return 10;
+  if (/\.png(\?|$)/i.test(raw)) return 25;
+  return 15;
 }
 
 /** Normalize Instagram handle or URL → profile page URL. */
@@ -101,7 +142,9 @@ function decodeHtmlEntities(s: string): string {
 }
 
 /**
- * Extract candidate image URLs from HTML (og/twitter meta + a few same-host imgs).
+ * Extract candidate image URLs from HTML (og/twitter meta + page img/srcset).
+ * Includes common CDN hosts (Webflow etc.) — not only same-host paths.
+ * Photos are ranked ahead of logo-like URLs.
  */
 export function extractImageUrlsFromHtml(html: string, pageUrl: string): string[] {
   const found: string[] = [];
@@ -134,29 +177,74 @@ export function extractImageUrlsFromHtml(html: string, pageUrl: string): string[
     }
   }
 
-  // A few same-host <img> tags as fallback (skip tiny tracking pixels by URL heuristics).
+  const pageHost = (() => {
+    try {
+      return new URL(pageUrl).hostname.replace(/^www\./, "");
+    } catch {
+      return "";
+    }
+  })();
+
+  const acceptHostedImage = (abs: string): boolean => {
+    try {
+      const host = new URL(abs).hostname.replace(/^www\./, "");
+      if (host === pageHost) return true;
+      // Allow CDN / media hosts used by nonprofit site builders (Webflow, etc.).
+      if (/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(abs)) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  // Page <img> tags (same-host or CDN photo assets). Skip SVG / trackers.
   try {
-    const pageHost = new URL(pageUrl).hostname.replace(/^www\./, "");
     const imgRe = /<img[^>]+src=["']([^"']+)["']/gi;
     let m: RegExpExecArray | null;
-    while ((m = imgRe.exec(html)) !== null && found.length < 12) {
+    let imgAdded = 0;
+    while ((m = imgRe.exec(html)) !== null && imgAdded < 24) {
       const abs = absUrl(pageUrl, m[1]!);
       if (!abs) continue;
-      try {
-        const host = new URL(abs).hostname.replace(/^www\./, "");
-        if (host !== pageHost) continue;
-        if (/\.(svg)(\?|$)/i.test(abs)) continue;
-        if (/pixel|spacer|tracking|1x1|favicon/i.test(abs)) continue;
+      if (/\.(svg)(\?|$)/i.test(abs)) continue;
+      if (/pixel|spacer|tracking|1x1|favicon|chevron|close[_-]?button/i.test(abs)) continue;
+      if (!acceptHostedImage(abs)) continue;
+      const before = found.length;
+      push(abs);
+      if (found.length > before) imgAdded += 1;
+    }
+  } catch {
+    /* skip */
+  }
+
+  // Prefer largest usable candidate from srcset (often real photos on Webflow).
+  try {
+    const srcsetRe = /srcset=["']([^"']+)["']/gi;
+    let sm: RegExpExecArray | null;
+    let srcsetAdded = 0;
+    while ((sm = srcsetRe.exec(html)) !== null && srcsetAdded < 16) {
+      const entries = sm[1]!
+        .split(",")
+        .map((part) => part.trim().split(/\s+/)[0])
+        .filter(Boolean) as string[];
+      for (const cand of entries.reverse()) {
+        const abs = absUrl(pageUrl, cand);
+        if (!abs) continue;
+        if (!/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(abs)) continue;
+        if (/pixel|spacer|tracking|1x1|favicon|logo|icon/i.test(abs)) continue;
+        if (!acceptHostedImage(abs)) continue;
+        const before = found.length;
         push(abs);
-      } catch {
-        /* skip */
+        if (found.length > before) {
+          srcsetAdded += 1;
+          break;
+        }
       }
     }
   } catch {
     /* skip */
   }
 
-  return found;
+  return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
 
 async function fetchHtml(url: string): Promise<string | null> {
@@ -211,7 +299,7 @@ async function isReachableImage(url: string): Promise<boolean> {
     if (ctype.includes("text/html")) return false;
     if (ctype.startsWith("image/")) return true;
     // Some CDNs omit content-type on range requests — accept common image extensions.
-    return /\.(jpe?g|png|webp|gif)(\?|$)/i.test(url);
+    return /\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(url);
   } catch {
     return false;
   } finally {
@@ -258,6 +346,7 @@ function websiteUrlVariants(url: string): string[] {
 
 /**
  * Collect up to `limit` public preview images from the provided social/website URLs.
+ * Logos/icons are kept only as fallback after real photos.
  */
 export async function suggestSocialImages(input: {
   facebookUrl?: string;
@@ -269,6 +358,7 @@ export async function suggestSocialImages(input: {
     DEFAULT_LIMIT,
     Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT),
   );
+  const poolLimit = Math.min(CANDIDATE_POOL, Math.max(limit * 3, limit));
   const out: SuggestedImage[] = [];
 
   const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
@@ -278,12 +368,13 @@ export async function suggestSocialImages(input: {
   // Prefer website first (usually richest OG tags), then Facebook, then Instagram.
   if (website) {
     for (const variant of websiteUrlVariants(website)) {
-      if (out.length >= limit) break;
-      await collectFromPage(variant, "website", out, limit);
+      if (out.length >= poolLimit) break;
+      await collectFromPage(variant, "website", out, poolLimit);
     }
   }
-  if (facebook) await collectFromPage(facebook, "facebook", out, limit);
-  if (instagram) await collectFromPage(instagram, "instagram", out, limit);
+  if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
+  if (instagram) await collectFromPage(instagram, "instagram", out, poolLimit);
 
+  out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
   return out.slice(0, limit);
 }

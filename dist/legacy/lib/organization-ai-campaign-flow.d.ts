@@ -1,0 +1,105 @@
+import { type SuggestedImage } from "./suggest-social-images";
+declare const METHOD_VALUES: readonly ["donations", "ambassador", "giveback", "guestBartending"];
+export type AiCampaignMethod = (typeof METHOD_VALUES)[number];
+export type AnalyzeOrgInput = {
+    organizationName: string;
+    ein?: string | null;
+    nonprofitId?: number | null;
+    website?: string | null;
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    mission?: string | null;
+    causeCategory?: string | null;
+    city?: string | null;
+    state?: string | null;
+    createdByUserId?: number | null;
+};
+export type OrgPageMeta = {
+    title: string;
+    description: string;
+    sourceUrl: string;
+};
+export type AnalysisPayload = {
+    organizationName: string;
+    ein: string | null;
+    website: string | null;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    mission: string | null;
+    causeCategory: string | null;
+    city: string | null;
+    state: string | null;
+    pageMeta: OrgPageMeta | null;
+    images: SuggestedImage[];
+    themes: string[];
+    summary: string;
+    provider: string;
+};
+export type CampaignIdeaRecord = {
+    id: number;
+    title: string;
+    description: string;
+    confidence: number;
+    thumbnailUrl: string | null;
+    suggestedGoal: number | null;
+    suggestedMethods: AiCampaignMethod[];
+    payload: Record<string, unknown> | null;
+    sortOrder: number;
+};
+export type AnalysisSessionRecord = {
+    id: number;
+    sessionToken: string;
+    nonprofitId: number | null;
+    organizationName: string;
+    ein: string | null;
+    website: string | null;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    status: "pending" | "running" | "completed" | "failed";
+    analysis: AnalysisPayload | null;
+    errorMessage: string | null;
+    expiresAt: string;
+    createdAt: string;
+    updatedAt: string;
+    ideas: CampaignIdeaRecord[];
+};
+export declare function extractOrgPageMeta(websiteUrl: string): Promise<OrgPageMeta | null>;
+export declare function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
+    organizationName: string;
+    ein: string | null;
+    nonprofitId: number | null;
+    website: string | null;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    mission: string | null;
+    causeCategory: string | null;
+    city: string | null;
+    state: string | null;
+}>;
+export declare function generateCampaignIdeasFromAnalysis(params: {
+    organizationName: string;
+    mission: string | null;
+    causeCategory: string | null;
+    city: string | null;
+    state: string | null;
+    pageMeta: OrgPageMeta | null;
+    imageCount: number;
+}): Promise<{
+    summary: string;
+    themes: string[];
+    ideas: Array<{
+        title: string;
+        description: string;
+        confidence: number;
+        suggestedGoal: number | null;
+        suggestedMethods: AiCampaignMethod[];
+    }>;
+    provider: string;
+}>;
+export declare function getAnalysisSessionByToken(sessionToken: string): Promise<AnalysisSessionRecord | null>;
+export declare function runOrganizationAiCampaignFlow(input: AnalyzeOrgInput): Promise<AnalysisSessionRecord>;
+export {};

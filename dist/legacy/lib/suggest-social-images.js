@@ -1,16 +1,44 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.looksLikeLogoUrl = looksLikeLogoUrl;
+exports.photoCoverRank = photoCoverRank;
 exports.normalizeInstagramUrl = normalizeInstagramUrl;
 exports.normalizeFacebookUrl = normalizeFacebookUrl;
 exports.normalizeWebsiteUrl = normalizeWebsiteUrl;
 exports.extractImageUrlsFromHtml = extractImageUrlsFromHtml;
 exports.suggestSocialImages = suggestSocialImages;
 const DEFAULT_LIMIT = 6;
+const CANDIDATE_POOL = 18;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 function trimStr(value) {
     return typeof value === "string" ? value.trim() : "";
+}
+function looksLikeLogoUrl(url) {
+    const raw = (url || "").trim();
+    if (!raw)
+        return false;
+    if (/\.svg(\?|$)/i.test(raw))
+        return true;
+    return /logo|icon|favicon|avatar|profile[_-]?pic|wordmark|seal|badge|sprite|emoji|brand[_-]?mark|webclip|apple[_-]?touch/i.test(raw);
+}
+function photoCoverRank(url) {
+    const raw = (url || "").trim();
+    if (!raw)
+        return 999;
+    if (looksLikeLogoUrl(raw))
+        return 100;
+    if (/hero|photo|portrait|team|gallery|donate|people|event|bg[-_]|[_-]bg|shoelace/i.test(raw)) {
+        return 0;
+    }
+    if (/\.avif(\?|$)/i.test(raw))
+        return 5;
+    if (/\.(jpe?g|webp)(\?|$)/i.test(raw))
+        return 10;
+    if (/\.png(\?|$)/i.test(raw))
+        return 25;
+    return 15;
 }
 function normalizeInstagramUrl(handleOrUrl) {
     const raw = handleOrUrl.trim();
@@ -116,31 +144,80 @@ function extractImageUrlsFromHtml(html, pageUrl) {
             push(m[1]);
         }
     }
+    const pageHost = (() => {
+        try {
+            return new URL(pageUrl).hostname.replace(/^www\./, "");
+        }
+        catch {
+            return "";
+        }
+    })();
+    const acceptHostedImage = (abs) => {
+        try {
+            const host = new URL(abs).hostname.replace(/^www\./, "");
+            if (host === pageHost)
+                return true;
+            if (/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(abs))
+                return true;
+            return false;
+        }
+        catch {
+            return false;
+        }
+    };
     try {
-        const pageHost = new URL(pageUrl).hostname.replace(/^www\./, "");
         const imgRe = /<img[^>]+src=["']([^"']+)["']/gi;
         let m;
-        while ((m = imgRe.exec(html)) !== null && found.length < 12) {
+        let imgAdded = 0;
+        while ((m = imgRe.exec(html)) !== null && imgAdded < 24) {
             const abs = absUrl(pageUrl, m[1]);
             if (!abs)
                 continue;
-            try {
-                const host = new URL(abs).hostname.replace(/^www\./, "");
-                if (host !== pageHost)
+            if (/\.(svg)(\?|$)/i.test(abs))
+                continue;
+            if (/pixel|spacer|tracking|1x1|favicon|chevron|close[_-]?button/i.test(abs))
+                continue;
+            if (!acceptHostedImage(abs))
+                continue;
+            const before = found.length;
+            push(abs);
+            if (found.length > before)
+                imgAdded += 1;
+        }
+    }
+    catch {
+    }
+    try {
+        const srcsetRe = /srcset=["']([^"']+)["']/gi;
+        let sm;
+        let srcsetAdded = 0;
+        while ((sm = srcsetRe.exec(html)) !== null && srcsetAdded < 16) {
+            const entries = sm[1]
+                .split(",")
+                .map((part) => part.trim().split(/\s+/)[0])
+                .filter(Boolean);
+            for (const cand of entries.reverse()) {
+                const abs = absUrl(pageUrl, cand);
+                if (!abs)
                     continue;
-                if (/\.(svg)(\?|$)/i.test(abs))
+                if (!/\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(abs))
                     continue;
-                if (/pixel|spacer|tracking|1x1|favicon/i.test(abs))
+                if (/pixel|spacer|tracking|1x1|favicon|logo|icon/i.test(abs))
                     continue;
+                if (!acceptHostedImage(abs))
+                    continue;
+                const before = found.length;
                 push(abs);
-            }
-            catch {
+                if (found.length > before) {
+                    srcsetAdded += 1;
+                    break;
+                }
             }
         }
     }
     catch {
     }
-    return found;
+    return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
 async function fetchHtml(url) {
     const controller = new AbortController();
@@ -197,7 +274,7 @@ async function isReachableImage(url) {
             return false;
         if (ctype.startsWith("image/"))
             return true;
-        return /\.(jpe?g|png|webp|gif)(\?|$)/i.test(url);
+        return /\.(jpe?g|png|webp|gif|avif)(\?|$)/i.test(url);
     }
     catch {
         return false;
@@ -244,21 +321,23 @@ function websiteUrlVariants(url) {
 }
 async function suggestSocialImages(input) {
     const limit = Math.min(DEFAULT_LIMIT, Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT));
+    const poolLimit = Math.min(CANDIDATE_POOL, Math.max(limit * 3, limit));
     const out = [];
     const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
     const facebook = normalizeFacebookUrl(trimStr(input.facebookUrl));
     const instagram = normalizeInstagramUrl(trimStr(input.instagramHandle));
     if (website) {
         for (const variant of websiteUrlVariants(website)) {
-            if (out.length >= limit)
+            if (out.length >= poolLimit)
                 break;
-            await collectFromPage(variant, "website", out, limit);
+            await collectFromPage(variant, "website", out, poolLimit);
         }
     }
     if (facebook)
-        await collectFromPage(facebook, "facebook", out, limit);
+        await collectFromPage(facebook, "facebook", out, poolLimit);
     if (instagram)
-        await collectFromPage(instagram, "instagram", out, limit);
+        await collectFromPage(instagram, "instagram", out, poolLimit);
+    out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
     return out.slice(0, limit);
 }
 //# sourceMappingURL=suggest-social-images.js.map
