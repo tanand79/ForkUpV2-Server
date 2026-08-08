@@ -4,11 +4,16 @@ exports.looksLikeLogoUrl = looksLikeLogoUrl;
 exports.photoCoverRank = photoCoverRank;
 exports.normalizeInstagramUrl = normalizeInstagramUrl;
 exports.normalizeFacebookUrl = normalizeFacebookUrl;
+exports.normalizeLinkedInUrl = normalizeLinkedInUrl;
+exports.normalizeYouTubeUrl = normalizeYouTubeUrl;
 exports.normalizeWebsiteUrl = normalizeWebsiteUrl;
 exports.extractImageUrlsFromHtml = extractImageUrlsFromHtml;
+exports.extractSocialLinksFromHtml = extractSocialLinksFromHtml;
+exports.discoverSocialLinksFromWebsite = discoverSocialLinksFromWebsite;
 exports.suggestSocialImages = suggestSocialImages;
 const DEFAULT_LIMIT = 6;
-const CANDIDATE_POOL = 18;
+const MAX_SUGGEST_LIMIT = 10;
+const CANDIDATE_POOL = 30;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
@@ -78,6 +83,64 @@ function normalizeFacebookUrl(url) {
     catch {
         return null;
     }
+}
+function normalizeLinkedInUrl(url) {
+    const raw = url.trim();
+    if (!raw)
+        return null;
+    try {
+        let withProto = raw;
+        if (!/^https?:\/\//i.test(withProto))
+            withProto = `https://${withProto}`;
+        const u = new URL(withProto);
+        const host = u.hostname.replace(/^www\./, "").toLowerCase();
+        if (host !== "linkedin.com")
+            return null;
+        const path = u.pathname.replace(/\/+$/, "") || "";
+        if (!path || path === "/")
+            return null;
+        return `https://www.linkedin.com${path}`;
+    }
+    catch {
+        return null;
+    }
+}
+function normalizeYouTubeUrl(url) {
+    const raw = url.trim();
+    if (!raw || raw === "#" || raw.startsWith("#"))
+        return null;
+    try {
+        let withProto = raw;
+        if (!/^https?:\/\//i.test(withProto)) {
+            if (raw.startsWith("@"))
+                withProto = `https://www.youtube.com/${raw}`;
+            else if (/^youtube\.com|^youtu\.be/i.test(raw))
+                withProto = `https://${raw}`;
+            else
+                return null;
+        }
+        const u = new URL(withProto);
+        const host = u.hostname.replace(/^www\./, "").toLowerCase();
+        if (host !== "youtube.com" && host !== "youtu.be" && host !== "m.youtube.com") {
+            return null;
+        }
+        if (host === "youtu.be") {
+            const id = u.pathname.replace(/^\//, "").split("/")[0];
+            if (!id)
+                return null;
+            return `https://www.youtube.com/watch?v=${id}`;
+        }
+        const path = u.pathname.replace(/\/+$/, "") || "";
+        if (!path || path === "/")
+            return null;
+        return `https://www.youtube.com${path}${u.search || ""}`;
+    }
+    catch {
+        return null;
+    }
+}
+function isFacebookUtilityLink(url) {
+    return /facebook\.com\/(sharer\.php|sharer\/|dialog\/|plugins\/)/i.test(url);
 }
 function normalizeWebsiteUrl(url) {
     const raw = url.trim();
@@ -217,6 +280,27 @@ function extractImageUrlsFromHtml(html, pageUrl) {
     }
     catch {
     }
+    try {
+        const cdnRe = /https?:\\?\/\\?\/[^\s"'<>\\]+(?:cdninstagram\.com|fbcdn\.net|scontent[^\s"'<>\\]*\.fbcdn\.net)[^\s"'<>\\]*/gi;
+        let cm;
+        let cdnAdded = 0;
+        while ((cm = cdnRe.exec(html)) !== null && cdnAdded < 40) {
+            const raw = (cm[0] || "").replace(/\\\//g, "/").replace(/\\u002F/gi, "/");
+            const cleaned = raw.split("?")[0] || raw;
+            if (!/\.(jpe?g|png|webp|gif|avif)$/i.test(cleaned) && !/\/[tp]\d+x\d+\//i.test(raw)) {
+                if (!/cdninstagram|fbcdn|scontent/i.test(raw))
+                    continue;
+            }
+            if (/profile|avatar|logo|emoji|static/i.test(raw))
+                continue;
+            const before = found.length;
+            push(raw);
+            if (found.length > before)
+                cdnAdded += 1;
+        }
+    }
+    catch {
+    }
     return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
 async function fetchHtml(url) {
@@ -319,24 +403,94 @@ function websiteUrlVariants(url) {
         return [url];
     }
 }
+function extractSocialLinksFromHtml(html) {
+    let facebookUrl = null;
+    let instagramUrl = null;
+    let linkedinUrl = null;
+    let youtubeUrl = null;
+    const candidates = [];
+    const hrefRe = /href=["']([^"']+)["']/gi;
+    let m;
+    while ((m = hrefRe.exec(html)) !== null) {
+        if (m[1])
+            candidates.push(decodeHtmlEntities(m[1].trim()));
+    }
+    const bareRe = /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be)\/[^\s"'<>]+/gi;
+    while ((m = bareRe.exec(html)) !== null) {
+        if (m[0])
+            candidates.push(m[0].replace(/[),.;]+$/, ""));
+    }
+    for (const raw of candidates) {
+        if (!facebookUrl) {
+            const fb = normalizeFacebookUrl(raw);
+            if (fb && !isFacebookUtilityLink(fb)) {
+                facebookUrl = fb;
+            }
+        }
+        if (!instagramUrl) {
+            const ig = normalizeInstagramUrl(raw);
+            if (ig && !/instagram\.com\/(p|reel|stories|explore)\b/i.test(ig)) {
+                instagramUrl = ig;
+            }
+        }
+        if (!linkedinUrl) {
+            const li = normalizeLinkedInUrl(raw);
+            if (li && !/linkedin\.com\/(shareArticle|sharing)\b/i.test(li)) {
+                linkedinUrl = li;
+            }
+        }
+        if (!youtubeUrl) {
+            const yt = normalizeYouTubeUrl(raw);
+            if (yt)
+                youtubeUrl = yt;
+        }
+        if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl)
+            break;
+    }
+    return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl };
+}
+async function discoverSocialLinksFromWebsite(websiteUrl) {
+    const empty = {
+        facebookUrl: null,
+        instagramUrl: null,
+        linkedinUrl: null,
+        youtubeUrl: null,
+    };
+    const normalized = normalizeWebsiteUrl(websiteUrl);
+    if (!normalized)
+        return empty;
+    for (const variant of websiteUrlVariants(normalized)) {
+        const html = await fetchHtml(variant);
+        if (!html)
+            continue;
+        const found = extractSocialLinksFromHtml(html);
+        if (found.facebookUrl || found.instagramUrl || found.linkedinUrl || found.youtubeUrl) {
+            return found;
+        }
+    }
+    return empty;
+}
 async function suggestSocialImages(input) {
-    const limit = Math.min(DEFAULT_LIMIT, Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT));
+    const limit = Math.min(MAX_SUGGEST_LIMIT, Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT));
     const poolLimit = Math.min(CANDIDATE_POOL, Math.max(limit * 3, limit));
     const out = [];
     const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
     const facebook = normalizeFacebookUrl(trimStr(input.facebookUrl));
     const instagram = normalizeInstagramUrl(trimStr(input.instagramHandle));
-    if (website) {
+    const hasSocial = Boolean(facebook || instagram);
+    if (hasSocial) {
+        if (facebook)
+            await collectFromPage(facebook, "facebook", out, poolLimit);
+        if (instagram)
+            await collectFromPage(instagram, "instagram", out, poolLimit);
+    }
+    if (website && out.length === 0) {
         for (const variant of websiteUrlVariants(website)) {
             if (out.length >= poolLimit)
                 break;
             await collectFromPage(variant, "website", out, poolLimit);
         }
     }
-    if (facebook)
-        await collectFromPage(facebook, "facebook", out, poolLimit);
-    if (instagram)
-        await collectFromPage(instagram, "instagram", out, poolLimit);
     out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
     return out.slice(0, limit);
 }

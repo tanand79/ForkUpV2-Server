@@ -43,11 +43,12 @@ async function userCanEditCampaign(userId, isPlatformAdmin, campaign) {
 exports.campaignImagesRouter.post("/suggest", async (req, res) => {
     try {
         const { facebookUrl, instagramHandle, websiteUrl, limit } = req.body;
+        const requested = typeof limit === "number" && Number.isFinite(limit) ? Math.floor(limit) : MAX_GALLERY;
         const images = await (0, suggest_social_images_1.suggestSocialImages)({
             facebookUrl: typeof facebookUrl === "string" ? facebookUrl : "",
             instagramHandle: typeof instagramHandle === "string" ? instagramHandle : "",
             websiteUrl: typeof websiteUrl === "string" ? websiteUrl : "",
-            limit: typeof limit === "number" ? limit : MAX_GALLERY,
+            limit: Math.min(10, Math.max(1, requested)),
         });
         res.json({ images });
     }

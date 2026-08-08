@@ -17,6 +17,7 @@
     "db:foundation": "tsx src/legacy/db/migrate-foundation.ts",
     "db:email": "tsx src/legacy/db/migrate-email.ts",
     "db:email-smtp-provider": "tsx src/legacy/db/migrate-email-smtp-provider.ts",
+    "db:email-related-token-width": "tsx src/legacy/db/migrate-email-related-token-width.ts",
     "db:library": "tsx src/legacy/db/migrate-library.ts",
     "db:campaign-images": "tsx src/legacy/db/migrate-campaign-images.ts",
     "db:payouts": "tsx src/legacy/db/migrate-payouts.ts",

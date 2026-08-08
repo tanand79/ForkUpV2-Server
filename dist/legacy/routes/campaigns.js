@@ -129,7 +129,7 @@ async function fetchCampaignBySlug(slug, options) {
     const campaign = campaigns[0];
     if (options?.publicOnly) {
         const status = String(campaign.campaign_status);
-        if (status !== "live" && status !== "closed")
+        if (status !== "live" && status !== "closed" && status !== "ready_to_launch")
             return null;
     }
     const [methods, locations] = await Promise.all([

@@ -10,6 +10,7 @@ const path_1 = __importDefault(require("path"));
 const config_1 = require("./config");
 const builder_1 = require("./routes/builder");
 const business_1 = require("./routes/business");
+const location_ach_1 = require("./routes/location-ach");
 const campaigns_1 = require("./routes/campaigns");
 const campaign_images_1 = require("./routes/campaign-images");
 const manage_1 = require("./routes/manage");
@@ -80,6 +81,7 @@ function mountLegacyApi(app) {
     app.use("/api/auth", auth_1.authRouter);
     app.use("/api/superadmin", superadmin_1.superadminRouter);
     app.use("/api/business", business_1.businessRouter);
+    app.use("/api/business", location_ach_1.locationAchRouter);
     app.use("/api", receipts_1.receiptsRouter);
     app.use("/api/uploads", uploads_1.uploadsRouter);
     app.use("/api", improve_story_1.improveStoryRouter);

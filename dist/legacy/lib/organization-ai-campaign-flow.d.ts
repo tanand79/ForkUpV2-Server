@@ -9,6 +9,7 @@ export type AnalyzeOrgInput = {
     facebookUrl?: string | null;
     instagramUrl?: string | null;
     linkedinUrl?: string | null;
+    youtubeUrl?: string | null;
     mission?: string | null;
     causeCategory?: string | null;
     city?: string | null;
@@ -75,6 +76,7 @@ export declare function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<
     facebookUrl: string | null;
     instagramUrl: string | null;
     linkedinUrl: string | null;
+    youtubeUrl: string | null;
     mission: string | null;
     causeCategory: string | null;
     city: string | null;

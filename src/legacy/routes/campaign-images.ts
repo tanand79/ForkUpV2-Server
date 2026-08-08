@@ -80,7 +80,7 @@ async function userCanEditCampaign(
 
 /**
  * POST /api/campaign-images/suggest
- * Suggest up to 6 public preview images from social / website handles.
+ * Suggest up to 10 public preview images from social / website handles.
  */
 campaignImagesRouter.post("/suggest", async (req, res) => {
   try {
@@ -89,11 +89,13 @@ campaignImagesRouter.post("/suggest", async (req, res) => {
       unknown
     >;
 
+    const requested =
+      typeof limit === "number" && Number.isFinite(limit) ? Math.floor(limit) : MAX_GALLERY;
     const images = await suggestSocialImages({
       facebookUrl: typeof facebookUrl === "string" ? facebookUrl : "",
       instagramHandle: typeof instagramHandle === "string" ? instagramHandle : "",
       websiteUrl: typeof websiteUrl === "string" ? websiteUrl : "",
-      limit: typeof limit === "number" ? limit : MAX_GALLERY,
+      limit: Math.min(10, Math.max(1, requested)),
     });
 
     res.json({ images });

@@ -11,4 +11,13 @@ export declare const config: {
         bucket: string;
         presignTtlSeconds: number;
     };
+    mindee: {
+        readonly apiKey: string;
+        readonly modelId: string;
+        readonly apiUrl: string;
+    };
+    achEncryption: {
+        readonly key: string;
+        readonly iv: string;
+    };
 };

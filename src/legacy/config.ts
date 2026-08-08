@@ -88,4 +88,34 @@ export const config = {
     bucket: process.env.S3_BUCKET?.trim() || "",
     presignTtlSeconds: Number(process.env.S3_PRESIGN_TTL_SECONDS || 86400),
   },
+  /**
+   * Mindee OCR (Node-native). Empty MINDEE_API_KEY → placeholder / manual path.
+   * MINDEE_MODEL_ID reserved for future v2 enqueue; unused by v1 predict URL.
+   */
+  mindee: {
+    get apiKey(): string {
+      return (process.env.MINDEE_API_KEY ?? "").trim();
+    },
+    get modelId(): string {
+      return (process.env.MINDEE_MODEL_ID ?? "").trim();
+    },
+    get apiUrl(): string {
+      return (
+        process.env.MINDEE_API_URL?.trim() ||
+        "https://api.mindee.net/v1/products/mindee/expense_receipts/v5/predict"
+      );
+    },
+  },
+  /**
+   * ACH AES-256-CBC (Node-native parity with old .NET EncryptionService).
+   * Both must be set before POST /api/business/locations/:id/ach can save.
+   */
+  achEncryption: {
+    get key(): string {
+      return (process.env.ACH_ENCRYPTION_KEY ?? "").trim();
+    },
+    get iv(): string {
+      return (process.env.ACH_ENCRYPTION_IV ?? "").trim();
+    },
+  },
 };

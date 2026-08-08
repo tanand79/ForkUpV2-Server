@@ -12,6 +12,11 @@
  *   }
  *   response: AnalysisSessionRecord (status completed + ideas[])
  *
+ * POST /api/ai-campaign-flow/resolve-sources
+ *   request: same identity fields as analyze (no full scrape/ideas)
+ *   response: { organizationName, ein, nonprofitId, website, facebookUrl,
+ *     instagramUrl, linkedinUrl, mission, causeCategory, city, state }
+ *
  * GET /api/ai-campaign-flow/sessions/:sessionToken
  *   response: AnalysisSessionRecord | 404
  */
@@ -19,6 +24,7 @@ import { Router } from "express";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import {
   getAnalysisSessionByToken,
+  resolveAnalysisSources,
   runOrganizationAiCampaignFlow,
 } from "../lib/organization-ai-campaign-flow";
 
@@ -71,6 +77,52 @@ aiCampaignFlowRouter.post("/analyze", async (req, res) => {
       error instanceof Error ? error.message : "Could not analyze organization for campaign ideas.";
     const status = /No AI provider configured/i.test(message) ? 503 : 400;
     res.status(status).json({ error: message });
+  }
+});
+
+/**
+ * method: POST /api/ai-campaign-flow/resolve-sources
+ * Purpose: Prefill Connect Social fields without running full analyze/ideas.
+ * request: { organizationName, ein?, nonprofitId?, website?, facebookUrl?,
+ *   instagramUrl?, linkedinUrl?, mission?, causeCategory?, city?, state? }
+ * response: resolved website + social URLs from nonprofit row / known profile / AI guess
+ */
+aiCampaignFlowRouter.post("/resolve-sources", async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const organizationName = trimBodyString(body.organizationName);
+    if (!organizationName || organizationName.length > 255) {
+      res.status(400).json({ error: "organizationName is required." });
+      return;
+    }
+
+    const nonprofitIdRaw = body.nonprofitId;
+    const nonprofitId =
+      typeof nonprofitIdRaw === "number"
+        ? nonprofitIdRaw
+        : typeof nonprofitIdRaw === "string" && nonprofitIdRaw.trim()
+          ? Number(nonprofitIdRaw)
+          : null;
+
+    const sources = await resolveAnalysisSources({
+      organizationName,
+      ein: trimBodyString(body.ein) || null,
+      nonprofitId: Number.isFinite(nonprofitId as number) ? (nonprofitId as number) : null,
+      website: trimBodyString(body.website) || null,
+      facebookUrl: trimBodyString(body.facebookUrl) || null,
+      instagramUrl: trimBodyString(body.instagramUrl) || null,
+      linkedinUrl: trimBodyString(body.linkedinUrl) || null,
+      mission: trimBodyString(body.mission) || null,
+      causeCategory: trimBodyString(body.causeCategory) || null,
+      city: trimBodyString(body.city) || null,
+      state: trimBodyString(body.state) || null,
+    });
+
+    res.json(sources);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Could not resolve organization links.";
+    res.status(400).json({ error: message });
   }
 });
 

@@ -9,6 +9,7 @@ const crypto_1 = require("crypto");
 const pool_1 = require("../db/pool");
 const ai_chat_1 = require("./ai-chat");
 const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
+const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
 const known_organization_profiles_1 = require("./known-organization-profiles");
 const suggest_social_images_1 = require("./suggest-social-images");
 const SESSION_TTL_DAYS = 7;
@@ -168,6 +169,7 @@ async function resolveAnalysisSources(input) {
     let facebookUrl = (0, suggest_social_images_1.normalizeFacebookUrl)(trimStr(input.facebookUrl));
     let instagramRaw = trimStr(input.instagramUrl);
     let linkedinUrl = trimStr(input.linkedinUrl) || null;
+    let youtubeUrl = (0, suggest_social_images_1.normalizeYouTubeUrl)(trimStr(input.youtubeUrl) || "") || null;
     let mission = trimStr(input.mission) || null;
     let causeCategory = trimStr(input.causeCategory) || null;
     let ein = trimStr(input.ein) || null;
@@ -230,6 +232,41 @@ async function resolveAnalysisSources(input) {
         if (guessed.website)
             website = (0, suggest_social_images_1.normalizeWebsiteUrl)(guessed.website);
     }
+    if (website && (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)) {
+        const discovered = await (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website);
+        if (!facebookUrl && discovered.facebookUrl) {
+            facebookUrl = discovered.facebookUrl;
+        }
+        if (!instagramRaw && discovered.instagramUrl) {
+            instagramRaw = discovered.instagramUrl;
+        }
+        if (!linkedinUrl && discovered.linkedinUrl) {
+            linkedinUrl = discovered.linkedinUrl;
+        }
+        if (!youtubeUrl && discovered.youtubeUrl) {
+            youtubeUrl = discovered.youtubeUrl;
+        }
+    }
+    if (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl) {
+        const guessedSocial = await (0, guess_nonprofit_social_1.guessNonprofitSocialLinks)({
+            organizationName,
+            ein,
+            city,
+            state,
+        });
+        if (!facebookUrl && guessedSocial.facebookUrl) {
+            facebookUrl = guessedSocial.facebookUrl;
+        }
+        if (!instagramRaw && guessedSocial.instagramUrl) {
+            instagramRaw = guessedSocial.instagramUrl;
+        }
+        if (!linkedinUrl && guessedSocial.linkedinUrl) {
+            linkedinUrl = guessedSocial.linkedinUrl;
+        }
+        if (!youtubeUrl && guessedSocial.youtubeUrl) {
+            youtubeUrl = guessedSocial.youtubeUrl;
+        }
+    }
     const instagramUrl = instagramRaw
         ? (0, suggest_social_images_1.normalizeInstagramUrl)(instagramRaw) || instagramRaw
         : null;
@@ -241,6 +278,7 @@ async function resolveAnalysisSources(input) {
         facebookUrl,
         instagramUrl,
         linkedinUrl,
+        youtubeUrl,
         mission,
         causeCategory,
         city,

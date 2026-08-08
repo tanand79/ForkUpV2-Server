@@ -45,6 +45,40 @@ exports.aiCampaignFlowRouter.post("/analyze", async (req, res) => {
         res.status(status).json({ error: message });
     }
 });
+exports.aiCampaignFlowRouter.post("/resolve-sources", async (req, res) => {
+    try {
+        const body = (req.body ?? {});
+        const organizationName = trimBodyString(body.organizationName);
+        if (!organizationName || organizationName.length > 255) {
+            res.status(400).json({ error: "organizationName is required." });
+            return;
+        }
+        const nonprofitIdRaw = body.nonprofitId;
+        const nonprofitId = typeof nonprofitIdRaw === "number"
+            ? nonprofitIdRaw
+            : typeof nonprofitIdRaw === "string" && nonprofitIdRaw.trim()
+                ? Number(nonprofitIdRaw)
+                : null;
+        const sources = await (0, organization_ai_campaign_flow_1.resolveAnalysisSources)({
+            organizationName,
+            ein: trimBodyString(body.ein) || null,
+            nonprofitId: Number.isFinite(nonprofitId) ? nonprofitId : null,
+            website: trimBodyString(body.website) || null,
+            facebookUrl: trimBodyString(body.facebookUrl) || null,
+            instagramUrl: trimBodyString(body.instagramUrl) || null,
+            linkedinUrl: trimBodyString(body.linkedinUrl) || null,
+            mission: trimBodyString(body.mission) || null,
+            causeCategory: trimBodyString(body.causeCategory) || null,
+            city: trimBodyString(body.city) || null,
+            state: trimBodyString(body.state) || null,
+        });
+        res.json(sources);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : "Could not resolve organization links.";
+        res.status(400).json({ error: message });
+    }
+});
 exports.aiCampaignFlowRouter.get("/sessions/:sessionToken", async (req, res) => {
     try {
         const sessionToken = trimBodyString(req.params.sessionToken);

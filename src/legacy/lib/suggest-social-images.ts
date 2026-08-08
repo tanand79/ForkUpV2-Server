@@ -10,6 +10,8 @@
  *
  * Changelog: Prefer real photos over logo/icon/SVG URLs when ranking suggestions.
  * Collect extra same-host <img> candidates so OG brand marks do not fill the slot.
+ * Social-first image scrape; fall back to website when social OG returns nothing.
+ * Additive: extract/discover Facebook/Instagram/LinkedIn/YouTube hrefs from org website HTML.
  */
 
 export type SuggestedImageSource =
@@ -25,8 +27,10 @@ export interface SuggestedImage {
 }
 
 const DEFAULT_LIMIT = 6;
+/** Max images returned from a single social/website suggest call (scratch path uses 10). */
+const MAX_SUGGEST_LIMIT = 10;
 /** Collect extra candidates so logo demotion still leaves photo options. */
-const CANDIDATE_POOL = 18;
+const CANDIDATE_POOL = 30;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
 
@@ -107,6 +111,66 @@ export function normalizeFacebookUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Normalize LinkedIn company/profile URL.
+ * Inputs: raw href or typed URL. Outputs: https://www.linkedin.com/... or null.
+ */
+export function normalizeLinkedInUrl(url: string): string | null {
+  const raw = url.trim();
+  if (!raw) return null;
+  try {
+    let withProto = raw;
+    if (!/^https?:\/\//i.test(withProto)) withProto = `https://${withProto}`;
+    const u = new URL(withProto);
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    if (host !== "linkedin.com") return null;
+    const path = u.pathname.replace(/\/+$/, "") || "";
+    if (!path || path === "/") return null;
+    return `https://www.linkedin.com${path}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize YouTube channel / @handle / watch URL to a stable https URL.
+ * Inputs: raw href. Outputs: https://www.youtube.com/... or null (rejects # / empty).
+ */
+export function normalizeYouTubeUrl(url: string): string | null {
+  const raw = url.trim();
+  if (!raw || raw === "#" || raw.startsWith("#")) return null;
+  try {
+    let withProto = raw;
+    if (!/^https?:\/\//i.test(withProto)) {
+      if (raw.startsWith("@")) withProto = `https://www.youtube.com/${raw}`;
+      else if (/^youtube\.com|^youtu\.be/i.test(raw)) withProto = `https://${raw}`;
+      else return null;
+    }
+    const u = new URL(withProto);
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    if (host !== "youtube.com" && host !== "youtu.be" && host !== "m.youtube.com") {
+      return null;
+    }
+    if (host === "youtu.be") {
+      const id = u.pathname.replace(/^\//, "").split("/")[0];
+      if (!id) return null;
+      return `https://www.youtube.com/watch?v=${id}`;
+    }
+    const path = u.pathname.replace(/\/+$/, "") || "";
+    if (!path || path === "/") return null;
+    return `https://www.youtube.com${path}${u.search || ""}`;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a Facebook URL is a share-widget / plugin — not an org presence link. */
+function isFacebookUtilityLink(url: string): boolean {
+  // Keep facebook.com/share/<id> — modern profile share links used on many org footers.
+  // Skip classic sharer.php / dialog / plugin embeds only.
+  return /facebook\.com\/(sharer\.php|sharer\/|dialog\/|plugins\/)/i.test(url);
 }
 
 /** Normalize website URL. */
@@ -244,6 +308,28 @@ export function extractImageUrlsFromHtml(html: string, pageUrl: string): string[
     /* skip */
   }
 
+  // Embedded Instagram / Facebook CDN URLs (post thumbnails inside scripts/JSON).
+  try {
+    const cdnRe =
+      /https?:\\?\/\\?\/[^\s"'<>\\]+(?:cdninstagram\.com|fbcdn\.net|scontent[^\s"'<>\\]*\.fbcdn\.net)[^\s"'<>\\]*/gi;
+    let cm: RegExpExecArray | null;
+    let cdnAdded = 0;
+    while ((cm = cdnRe.exec(html)) !== null && cdnAdded < 40) {
+      const raw = (cm[0] || "").replace(/\\\//g, "/").replace(/\\u002F/gi, "/");
+      const cleaned = raw.split("?")[0] || raw;
+      if (!/\.(jpe?g|png|webp|gif|avif)$/i.test(cleaned) && !/\/[tp]\d+x\d+\//i.test(raw)) {
+        // Many IG CDN URLs omit extension; still accept known CDN hosts.
+        if (!/cdninstagram|fbcdn|scontent/i.test(raw)) continue;
+      }
+      if (/profile|avatar|logo|emoji|static/i.test(raw)) continue;
+      const before = found.length;
+      push(raw);
+      if (found.length > before) cdnAdded += 1;
+    }
+  } catch {
+    /* skip */
+  }
+
   return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
 
@@ -345,8 +431,99 @@ function websiteUrlVariants(url: string): string[] {
 }
 
 /**
+ * Extract public Facebook / Instagram / LinkedIn / YouTube profile URLs from page HTML.
+ * Purpose: Prefill Connect Social when the organizer did not type links.
+ * Inputs: raw HTML string. Outputs: normalized social URLs (null when missing).
+ */
+export function extractSocialLinksFromHtml(html: string): {
+  facebookUrl: string | null;
+  instagramUrl: string | null;
+  linkedinUrl: string | null;
+  youtubeUrl: string | null;
+} {
+  let facebookUrl: string | null = null;
+  let instagramUrl: string | null = null;
+  let linkedinUrl: string | null = null;
+  let youtubeUrl: string | null = null;
+
+  const candidates: string[] = [];
+  const hrefRe = /href=["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = hrefRe.exec(html)) !== null) {
+    if (m[1]) candidates.push(decodeHtmlEntities(m[1].trim()));
+  }
+  // Catch bare social URLs that are not wrapped in href (JSON-LD / scripts).
+  const bareRe =
+    /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be)\/[^\s"'<>]+/gi;
+  while ((m = bareRe.exec(html)) !== null) {
+    if (m[0]) candidates.push(m[0].replace(/[),.;]+$/, ""));
+  }
+
+  for (const raw of candidates) {
+    if (!facebookUrl) {
+      const fb = normalizeFacebookUrl(raw);
+      if (fb && !isFacebookUtilityLink(fb)) {
+        facebookUrl = fb;
+      }
+    }
+    if (!instagramUrl) {
+      const ig = normalizeInstagramUrl(raw);
+      if (ig && !/instagram\.com\/(p|reel|stories|explore)\b/i.test(ig)) {
+        instagramUrl = ig;
+      }
+    }
+    if (!linkedinUrl) {
+      const li = normalizeLinkedInUrl(raw);
+      if (li && !/linkedin\.com\/(shareArticle|sharing)\b/i.test(li)) {
+        linkedinUrl = li;
+      }
+    }
+    if (!youtubeUrl) {
+      const yt = normalizeYouTubeUrl(raw);
+      if (yt) youtubeUrl = yt;
+    }
+    if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl) break;
+  }
+
+  return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl };
+}
+
+/**
+ * Fetch the org website and discover social profile links from public HTML.
+ * Inputs: website URL. Outputs: facebook/instagram/linkedin/youtube URLs or nulls.
+ */
+export async function discoverSocialLinksFromWebsite(websiteUrl: string): Promise<{
+  facebookUrl: string | null;
+  instagramUrl: string | null;
+  linkedinUrl: string | null;
+  youtubeUrl: string | null;
+}> {
+  const empty = {
+    facebookUrl: null as string | null,
+    instagramUrl: null as string | null,
+    linkedinUrl: null as string | null,
+    youtubeUrl: null as string | null,
+  };
+  const normalized = normalizeWebsiteUrl(websiteUrl);
+  if (!normalized) return empty;
+
+  for (const variant of websiteUrlVariants(normalized)) {
+    const html = await fetchHtml(variant);
+    if (!html) continue;
+    const found = extractSocialLinksFromHtml(html);
+    if (found.facebookUrl || found.instagramUrl || found.linkedinUrl || found.youtubeUrl) {
+      return found;
+    }
+  }
+  return empty;
+}
+
+/**
  * Collect up to `limit` public preview images from the provided social/website URLs.
  * Logos/icons are kept only as fallback after real photos.
+ *
+ * Priority: Facebook/Instagram first when present; if social scrape yields no
+ * images, fall back to the organization website.
  */
 export async function suggestSocialImages(input: {
   facebookUrl?: string;
@@ -355,7 +532,7 @@ export async function suggestSocialImages(input: {
   limit?: number;
 }): Promise<SuggestedImage[]> {
   const limit = Math.min(
-    DEFAULT_LIMIT,
+    MAX_SUGGEST_LIMIT,
     Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT),
   );
   const poolLimit = Math.min(CANDIDATE_POOL, Math.max(limit * 3, limit));
@@ -364,16 +541,20 @@ export async function suggestSocialImages(input: {
   const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
   const facebook = normalizeFacebookUrl(trimStr(input.facebookUrl));
   const instagram = normalizeInstagramUrl(trimStr(input.instagramHandle));
+  const hasSocial = Boolean(facebook || instagram);
 
-  // Prefer website first (usually richest OG tags), then Facebook, then Instagram.
-  if (website) {
+  if (hasSocial) {
+    if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
+    if (instagram) await collectFromPage(instagram, "instagram", out, poolLimit);
+  }
+
+  // Website fallback: no social URLs, or social pages blocked/empty OG images.
+  if (website && out.length === 0) {
     for (const variant of websiteUrlVariants(website)) {
       if (out.length >= poolLimit) break;
       await collectFromPage(variant, "website", out, poolLimit);
     }
   }
-  if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
-  if (instagram) await collectFromPage(instagram, "instagram", out, poolLimit);
 
   out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
   return out.slice(0, limit);

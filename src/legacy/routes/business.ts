@@ -45,6 +45,7 @@ type InvitationRow = QueryResultRow & {
   organization_name: string;
   business_name: string;
   business_id: number;
+  location_id?: number;
   location_name: string;
   city: string;
   state: string;
@@ -139,6 +140,7 @@ function mapInvitation(row: InvitationRow) {
       email: row.contact_email,
     },
     location: {
+      id: Number(row.location_id ?? 0) || null,
       name: row.location_name,
       city: row.city,
       state: row.state,
@@ -296,6 +298,7 @@ async function fetchInvitationByToken(token: string) {
          b.business_name,
          b.id AS business_id,
          b.contact_email,
+         bl.id AS location_id,
          bl.location_name,
          bl.city,
          bl.state,
@@ -376,6 +379,7 @@ businessRouter.get("/collaborations", async (req, res) => {
            b.business_name,
            b.id AS business_id,
            b.contact_email,
+           bl.id AS location_id,
            bl.location_name,
            bl.city,
            bl.state,
@@ -461,6 +465,7 @@ businessRouter.get("/invitations", async (req, res) => {
            b.business_name,
            b.id AS business_id,
            b.contact_email,
+           bl.id AS location_id,
            bl.location_name,
            bl.city,
            bl.state,

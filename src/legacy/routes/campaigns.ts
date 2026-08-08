@@ -199,7 +199,8 @@ async function fetchCampaignBySlug(slug: string, options?: { publicOnly?: boolea
   const campaign = campaigns[0];
   if (options?.publicOnly) {
     const status = String(campaign.campaign_status);
-    if (status !== "live" && status !== "closed") return null;
+    // ready_to_launch: public preview before start date (not yet live)
+    if (status !== "live" && status !== "closed" && status !== "ready_to_launch") return null;
   }
   const [methods, locations] = await Promise.all([
     fetchMethods(campaign.id),

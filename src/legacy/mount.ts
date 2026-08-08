@@ -4,6 +4,7 @@ import path from "path";
 import { config } from "./config";
 import { builderRouter } from "./routes/builder";
 import { businessRouter } from "./routes/business";
+import { locationAchRouter } from "./routes/location-ach";
 import { campaignsRouter } from "./routes/campaigns";
 import { campaignImagesRouter } from "./routes/campaign-images";
 import { manageRouter } from "./routes/manage";
@@ -86,6 +87,7 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/auth", authRouter);
   app.use("/api/superadmin", superadminRouter);
   app.use("/api/business", businessRouter);
+  app.use("/api/business", locationAchRouter);
   app.use("/api", receiptsRouter);
   app.use("/api/uploads", uploadsRouter);
   app.use("/api", improveStoryRouter);

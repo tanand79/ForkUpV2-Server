@@ -26,6 +26,8 @@
     "src/legacy/db/migrate-verification-denied.ts",
     "src/legacy/db/migrate-campaign-in-review.ts",
     "src/legacy/db/migrate-forkup-review-changes-requested.ts",
+    "src/legacy/db/migrate-receipt-ocr.ts",
+    "src/legacy/db/migrate-location-ach.ts",
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",
     "src/legacy/db/run-production.ts",

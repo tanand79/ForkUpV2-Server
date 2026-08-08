@@ -75,5 +75,25 @@ exports.config = {
         bucket: process.env.S3_BUCKET?.trim() || "",
         presignTtlSeconds: Number(process.env.S3_PRESIGN_TTL_SECONDS || 86400),
     },
+    mindee: {
+        get apiKey() {
+            return (process.env.MINDEE_API_KEY ?? "").trim();
+        },
+        get modelId() {
+            return (process.env.MINDEE_MODEL_ID ?? "").trim();
+        },
+        get apiUrl() {
+            return (process.env.MINDEE_API_URL?.trim() ||
+                "https://api.mindee.net/v1/products/mindee/expense_receipts/v5/predict");
+        },
+    },
+    achEncryption: {
+        get key() {
+            return (process.env.ACH_ENCRYPTION_KEY ?? "").trim();
+        },
+        get iv() {
+            return (process.env.ACH_ENCRYPTION_IV ?? "").trim();
+        },
+    },
 };
 //# sourceMappingURL=config.js.map

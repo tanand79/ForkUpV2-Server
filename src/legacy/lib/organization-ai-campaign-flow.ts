@@ -15,12 +15,15 @@ import type { QueryResultRow } from "pg";
 import { pool } from "../db/pool";
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
 import { guessNonprofitWebsite } from "./guess-nonprofit-website";
+import { guessNonprofitSocialLinks } from "./guess-nonprofit-social";
 import { findKnownOrganizationByName, findKnownOrganizationProfile } from "./known-organization-profiles";
 import {
   normalizeFacebookUrl,
   normalizeInstagramUrl,
   normalizeWebsiteUrl,
+  normalizeYouTubeUrl,
   suggestSocialImages,
+  discoverSocialLinksFromWebsite,
   type SuggestedImage,
 } from "./suggest-social-images";
 
@@ -47,6 +50,8 @@ export type AnalyzeOrgInput = {
   facebookUrl?: string | null;
   instagramUrl?: string | null;
   linkedinUrl?: string | null;
+  /** Additive: optional YouTube channel URL (resolve/prefill). */
+  youtubeUrl?: string | null;
   mission?: string | null;
   causeCategory?: string | null;
   city?: string | null;
@@ -300,7 +305,8 @@ async function loadNonprofit(id: number): Promise<NonprofitRow | null> {
 }
 
 /**
- * Resolve website + social URLs from request, local nonprofit row, and known profiles.
+ * Resolve website + social URLs from request, local nonprofit row, known profiles,
+ * website HTML discovery, and (when still missing) verified AI social guesses.
  */
 export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   organizationName: string;
@@ -310,6 +316,7 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   facebookUrl: string | null;
   instagramUrl: string | null;
   linkedinUrl: string | null;
+  youtubeUrl: string | null;
   mission: string | null;
   causeCategory: string | null;
   city: string | null;
@@ -325,6 +332,7 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   let facebookUrl = normalizeFacebookUrl(trimStr(input.facebookUrl));
   let instagramRaw = trimStr(input.instagramUrl);
   let linkedinUrl = trimStr(input.linkedinUrl) || null;
+  let youtubeUrl = normalizeYouTubeUrl(trimStr(input.youtubeUrl) || "") || null;
   let mission = trimStr(input.mission) || null;
   let causeCategory = trimStr(input.causeCategory) || null;
   let ein = trimStr(input.ein) || null;
@@ -378,6 +386,45 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     if (guessed.website) website = normalizeWebsiteUrl(guessed.website);
   }
 
+  // Pull social URLs from the public website when missing.
+  if (website && (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)) {
+    const discovered = await discoverSocialLinksFromWebsite(website);
+    if (!facebookUrl && discovered.facebookUrl) {
+      facebookUrl = discovered.facebookUrl;
+    }
+    if (!instagramRaw && discovered.instagramUrl) {
+      instagramRaw = discovered.instagramUrl;
+    }
+    if (!linkedinUrl && discovered.linkedinUrl) {
+      linkedinUrl = discovered.linkedinUrl;
+    }
+    if (!youtubeUrl && discovered.youtubeUrl) {
+      youtubeUrl = discovered.youtubeUrl;
+    }
+  }
+
+  // No website (or site had no social links): AI-guess public profiles, verify HTTP.
+  if (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl) {
+    const guessedSocial = await guessNonprofitSocialLinks({
+      organizationName,
+      ein,
+      city,
+      state,
+    });
+    if (!facebookUrl && guessedSocial.facebookUrl) {
+      facebookUrl = guessedSocial.facebookUrl;
+    }
+    if (!instagramRaw && guessedSocial.instagramUrl) {
+      instagramRaw = guessedSocial.instagramUrl;
+    }
+    if (!linkedinUrl && guessedSocial.linkedinUrl) {
+      linkedinUrl = guessedSocial.linkedinUrl;
+    }
+    if (!youtubeUrl && guessedSocial.youtubeUrl) {
+      youtubeUrl = guessedSocial.youtubeUrl;
+    }
+  }
+
   const instagramUrl = instagramRaw
     ? normalizeInstagramUrl(instagramRaw) || instagramRaw
     : null;
@@ -390,6 +437,7 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     facebookUrl,
     instagramUrl,
     linkedinUrl,
+    youtubeUrl,
     mission,
     causeCategory,
     city,
