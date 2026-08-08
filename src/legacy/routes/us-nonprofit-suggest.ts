@@ -1,5 +1,9 @@
 import { Router } from "express";
 import { enrichUsNonprofitByEin, suggestUsNonprofits } from "../lib/us-nonprofit-directory";
+import {
+  parseLatLng,
+  reverseGeocodeUs,
+} from "../lib/geo-distance";
 
 export const usNonprofitSuggestRouter = Router();
 
@@ -7,24 +11,44 @@ export const usNonprofitSuggestRouter = Router();
  * GoFundMe-style US nonprofit typeahead (IRS via ProPublica + Every.org logos/websites).
  *
  * method: GET /api/profiles/nonprofits/us-suggest
- * query: { q: string, state?: string (2-letter), limit?: number }
+ * query: {
+ *   q: string,
+ *   state?: string (2-letter),
+ *   limit?: number,
+ *   lat?: number,
+ *   lng?: number
+ * }
  * response: {
  *   query, state, matchCount, totalResults, provider,
- *   candidates: UsNonprofitSuggestion[]
+ *   candidates: UsNonprofitSuggestion[],
+ *   nearby?: { latitude, longitude, derivedState } | null
  * }
+ *
+ * When lat+lng are provided and state is omitted, reverse-geocodes to a US state
+ * so ProPublica results bias toward the user's area (IRS has no true mile radius).
  *
  * Additive only — does not modify local /nonprofits/search.
  */
 usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-    const state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+    let state = typeof req.query.state === "string" ? req.query.state.trim() : "";
     const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
     const limit = Number.isFinite(limitRaw) ? limitRaw : 8;
+    const origin = parseLatLng(req.query.lat, req.query.lng);
+    let derivedState: string | null = null;
 
     if (!q) {
       res.status(400).json({ error: "q is required" });
       return;
+    }
+
+    if (!state && origin) {
+      const geo = await reverseGeocodeUs(origin.latitude, origin.longitude);
+      if (geo?.state) {
+        state = geo.state;
+        derivedState = geo.state;
+      }
     }
 
     const result = await suggestUsNonprofits({
@@ -40,6 +64,13 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
       totalResults: result.totalResults,
       provider: result.provider,
       candidates: result.candidates,
+      nearby: origin
+        ? {
+            latitude: origin.latitude,
+            longitude: origin.longitude,
+            derivedState,
+          }
+        : null,
     });
   } catch (err) {
     console.error(err);

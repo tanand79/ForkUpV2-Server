@@ -3,6 +3,11 @@ import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
+import {
+  nearbyKeepDecision,
+  parseLatLng,
+  parseRadiusMiles,
+} from "../lib/geo-distance";
 
 export const profilesRouter = Router();
 
@@ -21,6 +26,8 @@ type NonprofitRow = QueryResultRow & {
   city: string | null;
   state: string | null;
   zip: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   verification_status: string;
   claim_status: string;
   profile_status: string | null;
@@ -48,6 +55,9 @@ function mapNonprofit(row: NonprofitRow) {
     city: row.city ?? null,
     state: row.state ?? null,
     zip: row.zip ?? null,
+    /** Present when geo columns are populated (nearby filter support). */
+    latitude: row.latitude != null ? Number(row.latitude) : null,
+    longitude: row.longitude != null ? Number(row.longitude) : null,
     verificationStatus: row.verification_status,
     claimStatus: row.claim_status,
     profileStatus: row.profile_status ?? "preloaded",
@@ -420,6 +430,11 @@ profilesRouter.get("/nonprofits", async (req, res) => {
  * Unified "Find your organization" search by name and/or website.
  * Returns candidates each annotated with a match strength (strong/partial/weak),
  * sorted strongest-first, plus an optional business-website warning.
+ *
+ * Optional nearby filter (additive):
+ *   query: lat, lng, radiusMiles? (default 8)
+ *   Rows with NULL coords stay visible; rows with coords outside radius are dropped.
+ *   Sorted by match strength, then nearest first when distance is known.
  */
 profilesRouter.get("/nonprofits/search", async (req, res) => {
   try {
@@ -427,6 +442,8 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
     const website = typeof req.query.website === "string" ? req.query.website.trim() : "";
     const einRaw = typeof req.query.ein === "string" ? req.query.ein.trim() : "";
     const location = typeof req.query.location === "string" ? req.query.location.trim() : "";
+    const origin = parseLatLng(req.query.lat, req.query.lng);
+    const radiusMiles = parseRadiusMiles(req.query.radiusMiles);
 
     if (!q && !website && !einRaw && !location) {
       res.status(400).json({ error: "q, website, ein, or location is required" });
@@ -471,11 +488,33 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
 
     const terms: SearchTerms = { q, domain, ein, location };
     const candidates = rows
-      .map((row) => ({
-        ...mapNonprofit(row),
-        matchStrength: computeMatchStrength(row, terms),
-      }))
-      .sort((a, b) => STRENGTH_RANK[a.matchStrength] - STRENGTH_RANK[b.matchStrength]);
+      .map((row) => {
+        const nearby = nearbyKeepDecision(
+          origin,
+          row.latitude,
+          row.longitude,
+          radiusMiles,
+        );
+        return {
+          ...mapNonprofit(row),
+          matchStrength: computeMatchStrength(row, terms),
+          distanceMiles: nearby.distanceMiles,
+          _nearbyKeep: nearby.keep,
+        };
+      })
+      .filter((c) => c._nearbyKeep)
+      .map(({ _nearbyKeep: _drop, ...rest }) => rest)
+      .sort((a, b) => {
+        const strengthDiff =
+          STRENGTH_RANK[a.matchStrength] - STRENGTH_RANK[b.matchStrength];
+        if (strengthDiff !== 0) return strengthDiff;
+        const da = a.distanceMiles;
+        const db = b.distanceMiles;
+        if (da != null && db != null) return da - db;
+        if (da != null) return -1;
+        if (db != null) return 1;
+        return 0;
+      });
 
     const businessWarning = domain ? await findBusinessByDomain(domain) : null;
 
@@ -489,6 +528,13 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
       candidates,
       businessWarning,
       requiresConfirmation: true,
+      nearby: origin
+        ? {
+            latitude: origin.latitude,
+            longitude: origin.longitude,
+            radiusMiles,
+          }
+        : null,
     });
   } catch (err) {
     console.error(err);

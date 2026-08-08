@@ -28,6 +28,11 @@ import { insertBusinessInvitationRecord } from "../lib/business-invitation-recor
 import { sendInitialInvitationEmails } from "../lib/business-lifecycle-emails";
 import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
+import {
+  nearbyKeepDecision,
+  parseLatLng,
+  parseRadiusMiles,
+} from "../lib/geo-distance";
 
 type InviteEmailRow = QueryResultRow & {
   token: string;
@@ -60,6 +65,8 @@ type BusinessRow = QueryResultRow & {
   location_name: string;
   city: string;
   state: string;
+  latitude?: number | null;
+  longitude?: number | null;
 };
 
 type CreateCampaignBody = {
@@ -585,9 +592,20 @@ async function linkUserToNonprofit(
   );
 }
 
+/**
+ * GET /api/builder/businesses
+ * query: { q?: string, lat?: number, lng?: number, radiusMiles?: number }
+ * response: business[] with locations
+ *
+ * Optional nearby filter (additive): when lat+lng provided, drop locations whose
+ * coordinates are outside radiusMiles (default 8). Locations with NULL coords stay.
+ * Businesses with no remaining locations are omitted. Nearest location wins sort.
+ */
 builderRouter.get("/businesses", async (req, res) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const origin = parseLatLng(req.query.lat, req.query.lng);
+    const radiusMiles = parseRadiusMiles(req.query.radiusMiles);
     const params: string[] = [];
     let where = "WHERE bl.active_status = TRUE";
     if (q) {
@@ -609,7 +627,9 @@ builderRouter.get("/businesses", async (req, res) => {
          bl.id AS location_id,
          bl.location_name,
          bl.city,
-         bl.state
+         bl.state,
+         bl.latitude,
+         bl.longitude
        FROM businesses b
        JOIN business_locations bl ON bl.business_id = b.id
        ${where}
@@ -625,11 +645,27 @@ builderRouter.get("/businesses", async (req, res) => {
         businessType: string;
         defaultGivebackPercentage: number;
         capabilities: MethodType[];
-        locations: { id: number; locationName: string; city: string; state: string }[];
+        locations: {
+          id: number;
+          locationName: string;
+          city: string;
+          state: string;
+          distanceMiles: number | null;
+        }[];
+        /** Internal: nearest known distance for sort (not serialized). */
+        _nearestMiles: number | null;
       }
     >();
 
     for (const row of rows) {
+      const nearby = nearbyKeepDecision(
+        origin,
+        row.latitude as number | null | undefined,
+        row.longitude as number | null | undefined,
+        radiusMiles,
+      );
+      if (!nearby.keep) continue;
+
       const capabilities = (Object.keys(METHOD_CAPABILITY) as MethodType[]).filter((m) =>
         businessSupportsMethod(row, m),
       );
@@ -642,18 +678,39 @@ builderRouter.get("/businesses", async (req, res) => {
           defaultGivebackPercentage: Number(row.default_giveback_percentage ?? 10),
           capabilities,
           locations: [],
+          _nearestMiles: null,
         });
       }
 
-      grouped.get(row.id)!.locations.push({
+      const entry = grouped.get(row.id)!;
+      entry.locations.push({
         id: row.location_id,
         locationName: row.location_name,
         city: row.city ?? "",
         state: row.state ?? "",
+        distanceMiles: nearby.distanceMiles,
       });
+      if (nearby.distanceMiles != null) {
+        if (entry._nearestMiles == null || nearby.distanceMiles < entry._nearestMiles) {
+          entry._nearestMiles = nearby.distanceMiles;
+        }
+      }
     }
 
-    res.json([...grouped.values()]);
+    const payload = [...grouped.values()]
+      .sort((a, b) => {
+        if (origin) {
+          const da = a._nearestMiles;
+          const db = b._nearestMiles;
+          if (da != null && db != null && da !== db) return da - db;
+          if (da != null && db == null) return -1;
+          if (da == null && db != null) return 1;
+        }
+        return a.businessName.localeCompare(b.businessName);
+      })
+      .map(({ _nearestMiles: _drop, ...rest }) => rest);
+
+    res.json(payload);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch businesses" });

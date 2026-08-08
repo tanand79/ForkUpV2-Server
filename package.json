@@ -32,6 +32,8 @@
     "db:campaign-ai": "tsx src/legacy/db/migrate-campaign-ai.ts",
     "db:ai-campaign-flow": "tsx src/legacy/db/migrate-ai-campaign-flow.ts",
     "db:fundraiser-invites": "tsx src/legacy/db/migrate-fundraiser-invites.ts",
+    "db:geo-coordinates": "tsx src/legacy/db/migrate-geo-coordinates.ts",
+    "db:backfill-geo-coordinates": "tsx src/legacy/db/backfill-geo-coordinates.ts",
     "db:superadmin": "tsx src/legacy/db/migrate-superadmin.ts",
     "automation:run": "node scripts/trigger-automation.mjs",
     "db:setup": "npm run db:migrate && npm run db:foundation && npm run db:superadmin && npm run db:seed",
