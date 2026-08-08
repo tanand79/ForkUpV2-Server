@@ -448,7 +448,7 @@ exports.manageRouter.get("/nonprofits/:nonprofitId/pending-invites", async (req,
             res.status(400).json({ error: "Invalid nonprofit id" });
             return;
         }
-        const { rows: rows } = await pool_1.pool.query(`SELECT
+        const { rows: businessRows } = await pool_1.pool.query(`SELECT
          nci.token,
          nci.invitation_status,
          nci.giveback_percentage,
@@ -465,17 +465,52 @@ exports.manageRouter.get("/nonprofits/:nonprofitId/pending-invites", async (req,
        JOIN campaign_methods cm ON cm.id = nci.method_id
        WHERE nci.nonprofit_id = $1 AND nci.invitation_status = 'pending'
        ORDER BY nci.sent_at DESC`, [nonprofitId]);
-        res.json(rows.map((r) => ({
+        const { rows: fundraiserRows } = await pool_1.pool.query(`SELECT
+         fci.token,
+         fci.invitation_status,
+         fci.sent_at,
+         fci.fundraiser_name,
+         fci.fundraiser_email,
+         c.campaign_name,
+         c.slug AS campaign_slug
+       FROM fundraiser_campaign_invitations fci
+       JOIN campaigns c ON c.id = fci.campaign_id
+       WHERE fci.nonprofit_id = $1 AND fci.invitation_status = 'pending'
+       ORDER BY fci.sent_at DESC`, [nonprofitId]);
+        const businessInvites = businessRows.map((r) => ({
             token: r.token,
+            inviteSource: "business",
             businessName: r.business_name,
             locationName: r.location_name,
+            fundraiserName: null,
+            fundraiserEmail: null,
             campaignName: r.campaign_name,
             campaignSlug: r.campaign_slug,
             methodName: r.method_name,
             givebackPercentage: Number(r.giveback_percentage),
             sentAt: r.sent_at,
             acceptPath: `/?step=nonprofit-accepts-invite&token=${r.token}`,
-        })));
+        }));
+        const fundraiserInvites = fundraiserRows.map((r) => ({
+            token: r.token,
+            inviteSource: "fundraiser",
+            businessName: r.fundraiser_name || "Fundraiser",
+            locationName: "Fundraiser proposal",
+            fundraiserName: r.fundraiser_name || null,
+            fundraiserEmail: r.fundraiser_email || null,
+            campaignName: r.campaign_name,
+            campaignSlug: r.campaign_slug,
+            methodName: "Fundraiser partnership",
+            givebackPercentage: 0,
+            sentAt: r.sent_at,
+            acceptPath: `/?step=fundraiser-invite-accept&token=${r.token}`,
+        }));
+        const merged = [...businessInvites, ...fundraiserInvites].sort((a, b) => {
+            const at = a.sentAt ? new Date(a.sentAt).getTime() : 0;
+            const bt = b.sentAt ? new Date(b.sentAt).getTime() : 0;
+            return bt - at;
+        });
+        res.json(merged);
     }
     catch (err) {
         console.error(err);

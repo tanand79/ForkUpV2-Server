@@ -5,13 +5,17 @@
  * Open Graph / Twitter meta tags on the org website, Facebook page, and
  * Instagram profile (public HTML only — no Meta Graph API).
  *
- * Inputs: optional facebookUrl, instagramHandle, websiteUrl, limit (default 6)
- * Outputs: deduped list of { url, source, sourceUrl }
+ * Inputs: optional facebookUrl, instagramHandle, websiteUrl, linkedinUrl,
+ *         youtubeUrl, limit (default 6)
+ * Outputs: deduped list of { url, source, sourceUrl, caption? }
  *
  * Changelog: Prefer real photos over logo/icon/SVG URLs when ranking suggestions.
  * Collect extra same-host <img> candidates so OG brand marks do not fill the slot.
  * Social-first image scrape; fall back to website when social OG returns nothing.
  * Additive: extract/discover Facebook/Instagram/LinkedIn/YouTube hrefs from org website HTML.
+ * Additive: after profile URLs are known, extract public post captions + images
+ * (see extract-social-posts.ts); keep profile/website OG scrape as fallback.
+ * Additive: strict channel order Instagram → Facebook → LinkedIn → YouTube → website.
  */
 
 export type SuggestedImageSource =
@@ -24,6 +28,8 @@ export interface SuggestedImage {
   url: string;
   source: SuggestedImageSource;
   sourceUrl: string | null;
+  /** Optional public post caption when extracted from a social post. */
+  caption?: string | null;
 }
 
 const DEFAULT_LIMIT = 6;
@@ -52,6 +58,8 @@ export function looksLikeLogoUrl(url: string): boolean {
   const raw = (url || "").trim();
   if (!raw) return false;
   if (/\.svg(\?|$)/i.test(raw)) return true;
+  // LinkedIn chrome / generic aero assets are not usable campaign photos.
+  if (/static\.licdn\.com\/aero/i.test(raw)) return true;
   return /logo|icon|favicon|avatar|profile[_-]?pic|wordmark|seal|badge|sprite|emoji|brand[_-]?mark|webclip|apple[_-]?touch/i.test(
     raw,
   );
@@ -519,16 +527,88 @@ export async function discoverSocialLinksFromWebsite(websiteUrl: string): Promis
 }
 
 /**
+ * Map a social platform name to the gallery source enum allowed by campaign_images.
+ * Inputs: platform string from extract-social-posts. Outputs: SuggestedImageSource.
+ */
+function suggestedSourceForPlatform(platform: string): SuggestedImageSource {
+  if (platform === "facebook") return "facebook";
+  if (platform === "instagram") return "instagram";
+  return "social_suggest";
+}
+
+/**
+ * Channel priority for returned gallery order.
+ * Instagram → Facebook → LinkedIn → YouTube → other social → website.
+ * Inputs: SuggestedImage. Outputs: lower number = preferred.
+ */
+function suggestedChannelRank(img: SuggestedImage): number {
+  if (img.source === "instagram") return 0;
+  if (img.source === "facebook") return 10;
+  if (img.source === "social_suggest") {
+    const ref = `${img.sourceUrl || ""} ${img.url || ""}`;
+    if (/linkedin\.com|licdn\.com/i.test(ref)) return 20;
+    if (/youtube\.com|youtu\.be|ytimg\.com/i.test(ref)) return 30;
+    return 35;
+  }
+  if (img.source === "website") return 40;
+  return 50;
+}
+
+/**
+ * Append reachable post images from one profile into `out` (stops at poolLimit).
+ * Inputs: profile URL, max posts, out array, pool limit.
+ * Outputs: void (mutates out).
+ */
+async function appendImagesFromProfilePosts(
+  profileUrl: string | null,
+  maxPosts: number,
+  out: SuggestedImage[],
+  poolLimit: number,
+): Promise<void> {
+  if (!profileUrl || out.length >= poolLimit) return;
+  try {
+    const { extractPostsFromProfileUrl } = await import("./extract-social-posts.js");
+    const posts = await extractPostsFromProfileUrl(profileUrl, maxPosts);
+    for (const post of posts) {
+      if (out.length >= poolLimit) break;
+      if (post.status !== "ok" && post.status !== "no_images") continue;
+      for (const imageUrl of post.imageUrls) {
+        if (out.length >= poolLimit) break;
+        if (out.some((i) => i.url === imageUrl)) continue;
+        const ok = await isReachableImage(imageUrl);
+        if (!ok) continue;
+        out.push({
+          url: imageUrl,
+          source: suggestedSourceForPlatform(post.platform),
+          sourceUrl: post.postUrl || post.profileUrl,
+          caption: post.caption,
+        });
+      }
+    }
+  } catch {
+    /* keep going with remaining channels */
+  }
+}
+
+/**
  * Collect up to `limit` public preview images from the provided social/website URLs.
  * Logos/icons are kept only as fallback after real photos.
  *
- * Priority: Facebook/Instagram first when present; if social scrape yields no
- * images, fall back to the organization website.
+ * Priority (strict channel order):
+ *  1) Instagram posts / profile
+ *  2) Facebook posts / profile
+ *  3) LinkedIn posts
+ *  4) YouTube videos
+ *  5) Website only when social yields nothing
  */
 export async function suggestSocialImages(input: {
   facebookUrl?: string;
   instagramHandle?: string;
   websiteUrl?: string;
+  /** Additive: LinkedIn company/profile URL for post extraction. */
+  linkedinUrl?: string;
+  /** Additive: YouTube channel URL for recent video thumbnails. */
+  youtubeUrl?: string;
   limit?: number;
 }): Promise<SuggestedImage[]> {
   const limit = Math.min(
@@ -541,14 +621,25 @@ export async function suggestSocialImages(input: {
   const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
   const facebook = normalizeFacebookUrl(trimStr(input.facebookUrl));
   const instagram = normalizeInstagramUrl(trimStr(input.instagramHandle));
-  const hasSocial = Boolean(facebook || instagram);
+  const linkedin = normalizeLinkedInUrl(trimStr(input.linkedinUrl));
+  const youtube = normalizeYouTubeUrl(trimStr(input.youtubeUrl));
+  const hasSocial = Boolean(facebook || instagram || linkedin || youtube);
 
+  // Post extraction in product order: IG → FB → LI → YT.
   if (hasSocial) {
-    if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
-    if (instagram) await collectFromPage(instagram, "instagram", out, poolLimit);
+    await appendImagesFromProfilePosts(instagram, 8, out, poolLimit);
+    await appendImagesFromProfilePosts(facebook, 4, out, poolLimit);
+    await appendImagesFromProfilePosts(linkedin, 4, out, poolLimit);
+    await appendImagesFromProfilePosts(youtube, 4, out, poolLimit);
   }
 
-  // Website fallback: no social URLs, or social pages blocked/empty OG images.
+  // Profile-page OG scrape fills remaining slots (IG before FB).
+  if (hasSocial && out.length < poolLimit) {
+    if (instagram) await collectFromPage(instagram, "instagram", out, poolLimit);
+    if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
+  }
+
+  // Website fallback: no social URLs, or social pages blocked/empty images.
   if (website && out.length === 0) {
     for (const variant of websiteUrlVariants(website)) {
       if (out.length >= poolLimit) break;
@@ -556,6 +647,10 @@ export async function suggestSocialImages(input: {
     }
   }
 
-  out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
+  out.sort((a, b) => {
+    const channel = suggestedChannelRank(a) - suggestedChannelRank(b);
+    if (channel !== 0) return channel;
+    return photoCoverRank(a.url) - photoCoverRank(b.url);
+  });
   return out.slice(0, limit);
 }

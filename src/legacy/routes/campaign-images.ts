@@ -2,8 +2,8 @@
  * Campaign gallery images API (additive).
  *
  * POST /api/campaign-images/suggest
- *   body: { facebookUrl?, instagramHandle?, websiteUrl?, limit? }
- *   response: { images: { url, source, sourceUrl }[] }
+ *   body: { facebookUrl?, instagramHandle?, websiteUrl?, linkedinUrl?, youtubeUrl?, limit? }
+ *   response: { images: { url, source, sourceUrl, caption? }[] }
  *
  * GET /api/campaign-images/:slug
  *   response: { images: { id, imageUrl, source, sourceUrl, sortOrder, isCover }[] }
@@ -81,13 +81,12 @@ async function userCanEditCampaign(
 /**
  * POST /api/campaign-images/suggest
  * Suggest up to 10 public preview images from social / website handles.
+ * Prefer public post images when social URLs are present.
  */
 campaignImagesRouter.post("/suggest", async (req, res) => {
   try {
-    const { facebookUrl, instagramHandle, websiteUrl, limit } = req.body as Record<
-      string,
-      unknown
-    >;
+    const { facebookUrl, instagramHandle, websiteUrl, linkedinUrl, youtubeUrl, limit } =
+      req.body as Record<string, unknown>;
 
     const requested =
       typeof limit === "number" && Number.isFinite(limit) ? Math.floor(limit) : MAX_GALLERY;
@@ -95,6 +94,8 @@ campaignImagesRouter.post("/suggest", async (req, res) => {
       facebookUrl: typeof facebookUrl === "string" ? facebookUrl : "",
       instagramHandle: typeof instagramHandle === "string" ? instagramHandle : "",
       websiteUrl: typeof websiteUrl === "string" ? websiteUrl : "",
+      linkedinUrl: typeof linkedinUrl === "string" ? linkedinUrl : "",
+      youtubeUrl: typeof youtubeUrl === "string" ? youtubeUrl : "",
       limit: Math.min(10, Math.max(1, requested)),
     });
 

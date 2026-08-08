@@ -26,6 +26,8 @@ function looksLikeLogoUrl(url) {
         return false;
     if (/\.svg(\?|$)/i.test(raw))
         return true;
+    if (/static\.licdn\.com\/aero/i.test(raw))
+        return true;
     return /logo|icon|favicon|avatar|profile[_-]?pic|wordmark|seal|badge|sprite|emoji|brand[_-]?mark|webclip|apple[_-]?touch/i.test(raw);
 }
 function photoCoverRank(url) {
@@ -470,6 +472,61 @@ async function discoverSocialLinksFromWebsite(websiteUrl) {
     }
     return empty;
 }
+function suggestedSourceForPlatform(platform) {
+    if (platform === "facebook")
+        return "facebook";
+    if (platform === "instagram")
+        return "instagram";
+    return "social_suggest";
+}
+function suggestedChannelRank(img) {
+    if (img.source === "instagram")
+        return 0;
+    if (img.source === "facebook")
+        return 10;
+    if (img.source === "social_suggest") {
+        const ref = `${img.sourceUrl || ""} ${img.url || ""}`;
+        if (/linkedin\.com|licdn\.com/i.test(ref))
+            return 20;
+        if (/youtube\.com|youtu\.be|ytimg\.com/i.test(ref))
+            return 30;
+        return 35;
+    }
+    if (img.source === "website")
+        return 40;
+    return 50;
+}
+async function appendImagesFromProfilePosts(profileUrl, maxPosts, out, poolLimit) {
+    if (!profileUrl || out.length >= poolLimit)
+        return;
+    try {
+        const { extractPostsFromProfileUrl } = await import("./extract-social-posts.js");
+        const posts = await extractPostsFromProfileUrl(profileUrl, maxPosts);
+        for (const post of posts) {
+            if (out.length >= poolLimit)
+                break;
+            if (post.status !== "ok" && post.status !== "no_images")
+                continue;
+            for (const imageUrl of post.imageUrls) {
+                if (out.length >= poolLimit)
+                    break;
+                if (out.some((i) => i.url === imageUrl))
+                    continue;
+                const ok = await isReachableImage(imageUrl);
+                if (!ok)
+                    continue;
+                out.push({
+                    url: imageUrl,
+                    source: suggestedSourceForPlatform(post.platform),
+                    sourceUrl: post.postUrl || post.profileUrl,
+                    caption: post.caption,
+                });
+            }
+        }
+    }
+    catch {
+    }
+}
 async function suggestSocialImages(input) {
     const limit = Math.min(MAX_SUGGEST_LIMIT, Math.max(1, Number.isFinite(input.limit) ? Number(input.limit) : DEFAULT_LIMIT));
     const poolLimit = Math.min(CANDIDATE_POOL, Math.max(limit * 3, limit));
@@ -477,12 +534,20 @@ async function suggestSocialImages(input) {
     const website = normalizeWebsiteUrl(trimStr(input.websiteUrl));
     const facebook = normalizeFacebookUrl(trimStr(input.facebookUrl));
     const instagram = normalizeInstagramUrl(trimStr(input.instagramHandle));
-    const hasSocial = Boolean(facebook || instagram);
+    const linkedin = normalizeLinkedInUrl(trimStr(input.linkedinUrl));
+    const youtube = normalizeYouTubeUrl(trimStr(input.youtubeUrl));
+    const hasSocial = Boolean(facebook || instagram || linkedin || youtube);
     if (hasSocial) {
-        if (facebook)
-            await collectFromPage(facebook, "facebook", out, poolLimit);
+        await appendImagesFromProfilePosts(instagram, 8, out, poolLimit);
+        await appendImagesFromProfilePosts(facebook, 4, out, poolLimit);
+        await appendImagesFromProfilePosts(linkedin, 4, out, poolLimit);
+        await appendImagesFromProfilePosts(youtube, 4, out, poolLimit);
+    }
+    if (hasSocial && out.length < poolLimit) {
         if (instagram)
             await collectFromPage(instagram, "instagram", out, poolLimit);
+        if (facebook)
+            await collectFromPage(facebook, "facebook", out, poolLimit);
     }
     if (website && out.length === 0) {
         for (const variant of websiteUrlVariants(website)) {
@@ -491,7 +556,12 @@ async function suggestSocialImages(input) {
             await collectFromPage(variant, "website", out, poolLimit);
         }
     }
-    out.sort((a, b) => photoCoverRank(a.url) - photoCoverRank(b.url));
+    out.sort((a, b) => {
+        const channel = suggestedChannelRank(a) - suggestedChannelRank(b);
+        if (channel !== 0)
+            return channel;
+        return photoCoverRank(a.url) - photoCoverRank(b.url);
+    });
     return out.slice(0, limit);
 }
 //# sourceMappingURL=suggest-social-images.js.map

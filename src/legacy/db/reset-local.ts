@@ -1,21 +1,41 @@
 /**
  * Wipe all local dev data (users, org links, campaigns) and re-seed demo data.
  * Refuses to run against production.
+ *
+ * After wipe: seed showcase orgs/campaigns, then recreate platform superadmin
+ * (users table is fully cleared — same as a fresh `db:setup` ending).
  */
 import type { PoolClient, QueryResultRow } from "pg";
 import { isDirectRun, type DbTaskOptions } from "./cli";
 import { config } from "../config";
 import { pool } from "./pool";
 import { seed } from "./seed";
+import { migrateSuperadmin } from "./migrate-superadmin";
 
-/** Tables included in a local-only PostgreSQL reset. */
+/**
+ * Tables included in a local-only PostgreSQL reset.
+ * Child tables first so FK deletes succeed. Newer feature tables are listed so
+ * `db:reset` after migrate-* scripts does not leave orphans or block deletes.
+ */
 const LOCAL_RESET_TABLES = [
+  "email_log",
+  "automation_runs",
+  "payouts",
+  "password_reset_tokens",
   "auth_sessions",
   "organization_users",
-  "donations",
+  "organization_access_requests",
+  "organization_library_items",
+  "organization_ai_campaign_ideas",
+  "organization_ai_analysis_sessions",
   "organization_imports",
+  "campaign_ai_insights",
+  "campaign_images",
+  "donations",
   "business_invitations",
   "nonprofit_campaign_invitations",
+  "fundraiser_campaign_invitations",
+  "campaign_fundraisers",
   "success_engine_actions",
   "settlements",
   "receipts",
@@ -69,11 +89,15 @@ export async function resetLocal(options: DbTaskOptions = {}) {
   }
 
   await seed({ closePool: false, force: true });
+  // Users were wiped — recreate platform superadmin (same as db:setup).
+  await migrateSuperadmin({ closePool: false });
+
   if (options.closePool !== false) {
     await pool.end();
   }
   console.log("\nLocal reset complete. Clear browser storage before signing in again:");
   console.log("  DevTools → Application → Local Storage → localhost:3000 → Clear");
+  console.log("  (The web app also clears stale auth automatically on next 401.)");
 }
 
 if (isDirectRun(import.meta.url)) {

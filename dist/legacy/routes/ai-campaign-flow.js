@@ -98,4 +98,40 @@ exports.aiCampaignFlowRouter.get("/sessions/:sessionToken", async (req, res) => 
         res.status(500).json({ error: "Failed to load analysis session." });
     }
 });
+exports.aiCampaignFlowRouter.post("/draft-from-purpose", async (req, res) => {
+    try {
+        const body = (req.body ?? {});
+        const purpose = trimBodyString(body.purpose);
+        if (!purpose || purpose.length > 2000) {
+            res.status(400).json({ error: "Tell us what you're raising money for." });
+            return;
+        }
+        const methods = Array.isArray(body.methods)
+            ? body.methods.filter((m) => typeof m === "string" && !!m.trim())
+            : undefined;
+        const draft = await (0, organization_ai_campaign_flow_1.draftCampaignFromPurpose)({
+            purpose,
+            organizationName: trimBodyString(body.organizationName) || "Your organization",
+            mission: trimBodyString(body.mission) || null,
+            causeCategory: trimBodyString(body.causeCategory) || null,
+            website: trimBodyString(body.website) || null,
+            methods,
+            goal: body.goal != null && String(body.goal).trim() !== ""
+                ? body.goal
+                : null,
+        });
+        res.json({
+            title: draft.title,
+            story: draft.story,
+            purpose: draft.purpose,
+            ...(draft.suggestedGoal != null ? { suggestedGoal: draft.suggestedGoal } : {}),
+            provider: draft.provider,
+        });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : "Could not prepare the campaign draft.";
+        const status = /No AI provider configured/i.test(message) ? 503 : 400;
+        res.status(status).json({ error: message });
+    }
+});
 //# sourceMappingURL=ai-campaign-flow.js.map

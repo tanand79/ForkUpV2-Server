@@ -3,6 +3,7 @@ export interface SuggestedImage {
     url: string;
     source: SuggestedImageSource;
     sourceUrl: string | null;
+    caption?: string | null;
 }
 export declare function looksLikeLogoUrl(url: string): boolean;
 export declare function photoCoverRank(url: string): number;
@@ -28,5 +29,7 @@ export declare function suggestSocialImages(input: {
     facebookUrl?: string;
     instagramHandle?: string;
     websiteUrl?: string;
+    linkedinUrl?: string;
+    youtubeUrl?: string;
     limit?: number;
 }): Promise<SuggestedImage[]>;

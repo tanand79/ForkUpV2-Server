@@ -28,6 +28,7 @@ export type AnalysisPayload = {
     facebookUrl: string | null;
     instagramUrl: string | null;
     linkedinUrl: string | null;
+    youtubeUrl?: string | null;
     mission: string | null;
     causeCategory: string | null;
     city: string | null;
@@ -104,4 +105,19 @@ export declare function generateCampaignIdeasFromAnalysis(params: {
 }>;
 export declare function getAnalysisSessionByToken(sessionToken: string): Promise<AnalysisSessionRecord | null>;
 export declare function runOrganizationAiCampaignFlow(input: AnalyzeOrgInput): Promise<AnalysisSessionRecord>;
+export declare function draftCampaignFromPurpose(params: {
+    purpose: string;
+    organizationName: string;
+    mission?: string | null;
+    causeCategory?: string | null;
+    website?: string | null;
+    methods?: string[];
+    goal?: string | number | null;
+}): Promise<{
+    title: string;
+    story: string;
+    purpose: string;
+    suggestedGoal: number | null;
+    provider: string;
+}>;
 export {};

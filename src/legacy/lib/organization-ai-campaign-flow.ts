@@ -9,6 +9,12 @@
  * Outputs: session token, analysis payload, idea cards (confidence-ranked).
  *
  * Guest campaign draft body is NOT stored here (browser localStorage).
+ *
+ * Changelog: Pass linkedinUrl/youtubeUrl into suggestSocialImages so post
+ * extractor can pull captions + images after Nova/website URL discovery.
+ * Additive: persist youtubeUrl inside analysis_json for resume/hydrate.
+ * Additive: draftCampaignFromPurpose for AI-flow scratch path (title+story).
+ * Additive: fitVarchar clamps website/social/thumbnail to VARCHAR(512) before INSERT.
  */
 import { randomBytes } from "crypto";
 import type { QueryResultRow } from "pg";
@@ -72,6 +78,8 @@ export type AnalysisPayload = {
   facebookUrl: string | null;
   instagramUrl: string | null;
   linkedinUrl: string | null;
+  /** Additive: YouTube channel URL used for post/thumbnail extraction. */
+  youtubeUrl?: string | null;
   mission: string | null;
   causeCategory: string | null;
   city: string | null;
@@ -160,6 +168,16 @@ type IdeaRow = QueryResultRow & {
 
 function trimStr(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Fit a string into a VARCHAR(n) column for AI session persistence.
+ * Inputs: raw string or null, max length. Outputs: trimmed ≤ max, or null.
+ */
+function fitVarchar(value: string | null | undefined, max: number): string | null {
+  const s = typeof value === "string" ? value.trim() : "";
+  if (!s) return null;
+  return s.length <= max ? s : s.slice(0, max);
 }
 
 function toIso(value: Date | string): string {
@@ -433,11 +451,11 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     organizationName,
     ein,
     nonprofitId,
-    website,
-    facebookUrl,
-    instagramUrl,
-    linkedinUrl,
-    youtubeUrl,
+    website: fitVarchar(website, 512),
+    facebookUrl: fitVarchar(facebookUrl, 512),
+    instagramUrl: fitVarchar(instagramUrl, 512),
+    linkedinUrl: fitVarchar(linkedinUrl, 512),
+    youtubeUrl: fitVarchar(youtubeUrl, 512),
     mission,
     causeCategory,
     city,
@@ -716,6 +734,8 @@ export async function runOrganizationAiCampaignFlow(
         websiteUrl: sources.website || undefined,
         facebookUrl: sources.facebookUrl || undefined,
         instagramHandle: sources.instagramUrl || undefined,
+        linkedinUrl: sources.linkedinUrl || undefined,
+        youtubeUrl: sources.youtubeUrl || undefined,
         limit: 6,
       }),
     ]);
@@ -738,6 +758,7 @@ export async function runOrganizationAiCampaignFlow(
       facebookUrl: sources.facebookUrl,
       instagramUrl: sources.instagramUrl,
       linkedinUrl: sources.linkedinUrl,
+      youtubeUrl: sources.youtubeUrl,
       mission,
       causeCategory: sources.causeCategory,
       city: sources.city,
@@ -782,7 +803,7 @@ export async function runOrganizationAiCampaignFlow(
           idea.title,
           idea.description,
           idea.confidence,
-          thumbnail,
+          fitVarchar(thumbnail, 512),
           idea.suggestedGoal,
           JSON.stringify(idea.suggestedMethods),
           JSON.stringify({
@@ -809,4 +830,119 @@ export async function runOrganizationAiCampaignFlow(
     );
     throw err instanceof Error ? err : new Error(message);
   }
+}
+
+/**
+ * Purpose: Turn a short organizer purpose phrase into a campaign title + story
+ * for the AI-flow "Start from scratch" path (site create campaign).
+ * Does not write to the database — caller applies result to browser draft state.
+ *
+ * Inputs: purpose + optional org/mission/methods/goal context.
+ * Outputs: { title, story, purpose, suggestedGoal?, provider }
+ */
+export async function draftCampaignFromPurpose(params: {
+  purpose: string;
+  organizationName: string;
+  mission?: string | null;
+  causeCategory?: string | null;
+  website?: string | null;
+  methods?: string[];
+  goal?: string | number | null;
+}): Promise<{
+  title: string;
+  story: string;
+  purpose: string;
+  suggestedGoal: number | null;
+  provider: string;
+}> {
+  if (aiProviderName() === "none") {
+    throw new Error(
+      "No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY.",
+    );
+  }
+
+  const purpose = trimStr(params.purpose).slice(0, 2000);
+  if (!purpose) {
+    throw new Error("Tell us what you're raising money for.");
+  }
+
+  const organizationName =
+    trimStr(params.organizationName).slice(0, 255) || "Your organization";
+  const mission = trimStr(params.mission) || null;
+  const causeCategory = trimStr(params.causeCategory) || null;
+  const website = trimStr(params.website) || null;
+  const methods = Array.isArray(params.methods)
+    ? params.methods.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
+    : [];
+  const goalRaw =
+    params.goal != null && String(params.goal).trim() !== ""
+      ? String(params.goal).trim()
+      : "";
+  const needsSuggestedGoal = !goalRaw;
+
+  const system = [
+    "You are an expert nonprofit fundraising campaign writer for the ForkUp platform.",
+    "Given a short purpose from a nonprofit organizer, prepare a campaign draft they will review and edit.",
+    "Write in the organization's authentic voice. Be specific and truthful — never invent facts, names, dates, or past results.",
+    "Prioritize emotional connection, clarity, impact, and a clear reason to participate.",
+    "Guidelines:",
+    "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
+    "- story: 120-220 words, warm and concrete, explaining why the cause matters and how support helps. No generic clichés or invented statistics.",
+    "- purpose: a single short sentence summarizing the campaign goal.",
+    needsSuggestedGoal
+      ? "- suggestedGoal: a realistic whole-dollar USD fundraising target (integer, no $ or commas) based on purpose and methods. Typical community campaigns: 2500–25000. Recommendation only — do not put the dollar amount in the story as a fact."
+      : "- Do not invent a fundraising goal amount; the organizer already provided one.",
+    needsSuggestedGoal
+      ? 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "suggestedGoal": number}.'
+      : 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string}.',
+    "Do not include markdown, code fences, preamble, or commentary.",
+  ].join("\n");
+
+  const userParts = [
+    `What they're raising money for: ${purpose}`,
+    `Organization: ${organizationName}`,
+    mission ? `Mission: ${mission}` : "",
+    causeCategory ? `Cause category: ${causeCategory}` : "",
+    website ? `Organization website: ${website}` : "",
+    goalRaw
+      ? `Fundraising goal: ${goalRaw}`
+      : "Fundraising goal: not provided — suggest a realistic target.",
+    methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
+  ].filter(Boolean);
+
+  const raw = await aiChat({
+    system,
+    user: userParts.join("\n"),
+    json: true,
+    maxTokens: 2048,
+    temperature: 0.4,
+  });
+
+  let draft: {
+    title?: unknown;
+    story?: unknown;
+    purpose?: unknown;
+    suggestedGoal?: unknown;
+  } = {};
+  try {
+    draft = parseAiJson(raw);
+  } catch {
+    draft = { story: raw };
+  }
+
+  const title =
+    trimStr(draft.title).slice(0, 120) || `${organizationName} Fundraiser`;
+  const story = trimStr(draft.story) || purpose;
+  const purposeOut = trimStr(draft.purpose) || purpose;
+  const suggestedGoal = needsSuggestedGoal
+    ? parseSuggestedGoal(draft.suggestedGoal)
+    : null;
+
+  return {
+    title,
+    story,
+    purpose: purposeOut,
+    suggestedGoal,
+    provider: aiProviderName(),
+  };
 }

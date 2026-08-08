@@ -572,7 +572,7 @@ manageRouter.get("/nonprofits/:nonprofitId/pending-invites", async (req, res) =>
       return;
     }
 
-    const { rows: rows } = await pool.query<QueryResultRow>(
+    const { rows: businessRows } = await pool.query<QueryResultRow>(
       `SELECT
          nci.token,
          nci.invitation_status,
@@ -593,19 +593,60 @@ manageRouter.get("/nonprofits/:nonprofitId/pending-invites", async (req, res) =>
       [nonprofitId],
     );
 
-    res.json(
-      rows.map((r) => ({
-        token: r.token,
-        businessName: r.business_name,
-        locationName: r.location_name,
-        campaignName: r.campaign_name,
-        campaignSlug: r.campaign_slug,
-        methodName: r.method_name,
-        givebackPercentage: Number(r.giveback_percentage),
-        sentAt: r.sent_at,
-        acceptPath: `/?step=nonprofit-accepts-invite&token=${r.token}`,
-      })),
+    /** Additive: fundraiser → nonprofit campaign proposals (same dashboard list). */
+    const { rows: fundraiserRows } = await pool.query<QueryResultRow>(
+      `SELECT
+         fci.token,
+         fci.invitation_status,
+         fci.sent_at,
+         fci.fundraiser_name,
+         fci.fundraiser_email,
+         c.campaign_name,
+         c.slug AS campaign_slug
+       FROM fundraiser_campaign_invitations fci
+       JOIN campaigns c ON c.id = fci.campaign_id
+       WHERE fci.nonprofit_id = $1 AND fci.invitation_status = 'pending'
+       ORDER BY fci.sent_at DESC`,
+      [nonprofitId],
     );
+
+    const businessInvites = businessRows.map((r) => ({
+      token: r.token as string,
+      inviteSource: "business" as const,
+      businessName: r.business_name as string,
+      locationName: r.location_name as string,
+      fundraiserName: null as string | null,
+      fundraiserEmail: null as string | null,
+      campaignName: r.campaign_name as string,
+      campaignSlug: r.campaign_slug as string,
+      methodName: r.method_name as string,
+      givebackPercentage: Number(r.giveback_percentage),
+      sentAt: r.sent_at,
+      acceptPath: `/?step=nonprofit-accepts-invite&token=${r.token}`,
+    }));
+
+    const fundraiserInvites = fundraiserRows.map((r) => ({
+      token: r.token as string,
+      inviteSource: "fundraiser" as const,
+      businessName: (r.fundraiser_name as string) || "Fundraiser",
+      locationName: "Fundraiser proposal",
+      fundraiserName: (r.fundraiser_name as string) || null,
+      fundraiserEmail: (r.fundraiser_email as string) || null,
+      campaignName: r.campaign_name as string,
+      campaignSlug: r.campaign_slug as string,
+      methodName: "Fundraiser partnership",
+      givebackPercentage: 0,
+      sentAt: r.sent_at,
+      acceptPath: `/?step=fundraiser-invite-accept&token=${r.token}`,
+    }));
+
+    const merged = [...businessInvites, ...fundraiserInvites].sort((a, b) => {
+      const at = a.sentAt ? new Date(a.sentAt as string | Date).getTime() : 0;
+      const bt = b.sentAt ? new Date(b.sentAt as string | Date).getTime() : 0;
+      return bt - at;
+    });
+
+    res.json(merged);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to fetch pending invitations" });

@@ -5,6 +5,7 @@ exports.resolveAnalysisSources = resolveAnalysisSources;
 exports.generateCampaignIdeasFromAnalysis = generateCampaignIdeasFromAnalysis;
 exports.getAnalysisSessionByToken = getAnalysisSessionByToken;
 exports.runOrganizationAiCampaignFlow = runOrganizationAiCampaignFlow;
+exports.draftCampaignFromPurpose = draftCampaignFromPurpose;
 const crypto_1 = require("crypto");
 const pool_1 = require("../db/pool");
 const ai_chat_1 = require("./ai-chat");
@@ -24,6 +25,12 @@ const METHOD_VALUES = [
 ];
 function trimStr(value) {
     return typeof value === "string" ? value.trim() : "";
+}
+function fitVarchar(value, max) {
+    const s = typeof value === "string" ? value.trim() : "";
+    if (!s)
+        return null;
+    return s.length <= max ? s : s.slice(0, max);
 }
 function toIso(value) {
     if (value instanceof Date)
@@ -274,11 +281,11 @@ async function resolveAnalysisSources(input) {
         organizationName,
         ein,
         nonprofitId,
-        website,
-        facebookUrl,
-        instagramUrl,
-        linkedinUrl,
-        youtubeUrl,
+        website: fitVarchar(website, 512),
+        facebookUrl: fitVarchar(facebookUrl, 512),
+        instagramUrl: fitVarchar(instagramUrl, 512),
+        linkedinUrl: fitVarchar(linkedinUrl, 512),
+        youtubeUrl: fitVarchar(youtubeUrl, 512),
         mission,
         causeCategory,
         city,
@@ -478,6 +485,8 @@ async function runOrganizationAiCampaignFlow(input) {
                 websiteUrl: sources.website || undefined,
                 facebookUrl: sources.facebookUrl || undefined,
                 instagramHandle: sources.instagramUrl || undefined,
+                linkedinUrl: sources.linkedinUrl || undefined,
+                youtubeUrl: sources.youtubeUrl || undefined,
                 limit: 6,
             }),
         ]);
@@ -498,6 +507,7 @@ async function runOrganizationAiCampaignFlow(input) {
             facebookUrl: sources.facebookUrl,
             instagramUrl: sources.instagramUrl,
             linkedinUrl: sources.linkedinUrl,
+            youtubeUrl: sources.youtubeUrl,
             mission,
             causeCategory: sources.causeCategory,
             city: sources.city,
@@ -535,7 +545,7 @@ async function runOrganizationAiCampaignFlow(input) {
                 idea.title,
                 idea.description,
                 idea.confidence,
-                thumbnail,
+                fitVarchar(thumbnail, 512),
                 idea.suggestedGoal,
                 JSON.stringify(idea.suggestedMethods),
                 JSON.stringify({
@@ -558,5 +568,80 @@ async function runOrganizationAiCampaignFlow(input) {
         WHERE id = $1`, [session.id, message.slice(0, 2000)]);
         throw err instanceof Error ? err : new Error(message);
     }
+}
+async function draftCampaignFromPurpose(params) {
+    if ((0, ai_chat_1.aiProviderName)() === "none") {
+        throw new Error("No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY.");
+    }
+    const purpose = trimStr(params.purpose).slice(0, 2000);
+    if (!purpose) {
+        throw new Error("Tell us what you're raising money for.");
+    }
+    const organizationName = trimStr(params.organizationName).slice(0, 255) || "Your organization";
+    const mission = trimStr(params.mission) || null;
+    const causeCategory = trimStr(params.causeCategory) || null;
+    const website = trimStr(params.website) || null;
+    const methods = Array.isArray(params.methods)
+        ? params.methods.filter((m) => typeof m === "string" && m.trim()).map((m) => m.trim())
+        : [];
+    const goalRaw = params.goal != null && String(params.goal).trim() !== ""
+        ? String(params.goal).trim()
+        : "";
+    const needsSuggestedGoal = !goalRaw;
+    const system = [
+        "You are an expert nonprofit fundraising campaign writer for the ForkUp platform.",
+        "Given a short purpose from a nonprofit organizer, prepare a campaign draft they will review and edit.",
+        "Write in the organization's authentic voice. Be specific and truthful — never invent facts, names, dates, or past results.",
+        "Prioritize emotional connection, clarity, impact, and a clear reason to participate.",
+        "Guidelines:",
+        "- title: a compelling campaign title, max ~70 characters, no quotation marks.",
+        "- story: 120-220 words, warm and concrete, explaining why the cause matters and how support helps. No generic clichés or invented statistics.",
+        "- purpose: a single short sentence summarizing the campaign goal.",
+        needsSuggestedGoal
+            ? "- suggestedGoal: a realistic whole-dollar USD fundraising target (integer, no $ or commas) based on purpose and methods. Typical community campaigns: 2500–25000. Recommendation only — do not put the dollar amount in the story as a fact."
+            : "- Do not invent a fundraising goal amount; the organizer already provided one.",
+        needsSuggestedGoal
+            ? 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string, "suggestedGoal": number}.'
+            : 'Return ONLY valid minified JSON with exactly these keys: {"title": string, "story": string, "purpose": string}.',
+        "Do not include markdown, code fences, preamble, or commentary.",
+    ].join("\n");
+    const userParts = [
+        `What they're raising money for: ${purpose}`,
+        `Organization: ${organizationName}`,
+        mission ? `Mission: ${mission}` : "",
+        causeCategory ? `Cause category: ${causeCategory}` : "",
+        website ? `Organization website: ${website}` : "",
+        goalRaw
+            ? `Fundraising goal: ${goalRaw}`
+            : "Fundraising goal: not provided — suggest a realistic target.",
+        methods.length ? `Fundraising methods: ${methods.join(", ")}` : "",
+    ].filter(Boolean);
+    const raw = await (0, ai_chat_1.aiChat)({
+        system,
+        user: userParts.join("\n"),
+        json: true,
+        maxTokens: 2048,
+        temperature: 0.4,
+    });
+    let draft = {};
+    try {
+        draft = (0, ai_chat_1.parseAiJson)(raw);
+    }
+    catch {
+        draft = { story: raw };
+    }
+    const title = trimStr(draft.title).slice(0, 120) || `${organizationName} Fundraiser`;
+    const story = trimStr(draft.story) || purpose;
+    const purposeOut = trimStr(draft.purpose) || purpose;
+    const suggestedGoal = needsSuggestedGoal
+        ? parseSuggestedGoal(draft.suggestedGoal)
+        : null;
+    return {
+        title,
+        story,
+        purpose: purposeOut,
+        suggestedGoal,
+        provider: (0, ai_chat_1.aiProviderName)(),
+    };
 }
 //# sourceMappingURL=organization-ai-campaign-flow.js.map

@@ -94,7 +94,7 @@ const businesses: BusinessSeed[] = [
     supports_dine_and_donate: true,
     supports_shop_and_donate: false,
     supports_service_giveback: false,
-    supports_guest_bartending: false,
+    supports_guest_bartending: true,
     locations: [{ location_name: "Downtown", city: "Bayside", state: "CA" }],
   },
   {
@@ -118,7 +118,7 @@ const businesses: BusinessSeed[] = [
     supports_dine_and_donate: true,
     supports_shop_and_donate: false,
     supports_service_giveback: false,
-    supports_guest_bartending: false,
+    supports_guest_bartending: true,
     locations: [{ location_name: "Pearl District", city: "Portland", state: "OR" }],
   },
 ];
