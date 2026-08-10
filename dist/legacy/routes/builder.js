@@ -535,7 +535,7 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
         const authUser = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
         if (authUser)
             await linkUserToNonprofit(connection, authUser.id, nonprofitId);
-        if (!["draft", "ready_to_launch", "in_review"].includes(currentStatus) &&
+        if (!["draft", "ready_to_launch", "in_review", "live", "invitation_phase"].includes(currentStatus) &&
             !body.launch) {
             res.status(400).json({ error: "This campaign can no longer be edited" });
             return;
@@ -573,15 +573,24 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             ? (0, date_only_1.subtractCalendarDays)(deadlineAnchor, 7)
             : null;
         const submitLaunchForReview = Boolean(body.launch) && launchRequiresForkupReview(timingFields);
-        let nextStatus = body.launch
-            ? submitLaunchForReview
+        let nextStatus;
+        if (currentStatus === "live" || currentStatus === "invitation_phase") {
+            nextStatus = currentStatus;
+        }
+        else if (body.launch) {
+            nextStatus = submitLaunchForReview
                 ? "in_review"
-                : await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave)
-            : currentStatus === "ready_to_launch"
-                ? "ready_to_launch"
-                : currentStatus === "in_review"
-                    ? "in_review"
-                    : "draft";
+                : await resolveLaunchStatus(connection, campaignId, resolvedStartDate ?? undefined, methodsForSave);
+        }
+        else if (currentStatus === "ready_to_launch") {
+            nextStatus = "ready_to_launch";
+        }
+        else if (currentStatus === "in_review") {
+            nextStatus = "in_review";
+        }
+        else {
+            nextStatus = "draft";
+        }
         await connection.query(`UPDATE campaigns SET
         campaign_name = $1,
         campaign_story = $2,

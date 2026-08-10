@@ -322,6 +322,136 @@ campaignsRouter.get("/:slug/donations", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/campaigns/:slug/leaderboard
+ * Public Top Fundraisers + Top Donors for the public campaign page.
+ *
+ * Query:
+ *   fundraisersLimit?: number (1–50, default 5)
+ *   donorsLimit?: number (1–50, default 5)
+ *
+ * Response:
+ *   {
+ *     fundraisers: { name, raised, donationCount }[],
+ *     donors: { donorName, totalAmount, donationCount, anonymous }[],
+ *     fundraisersTotalCount: number,
+ *     donorsTotalCount: number
+ *   }
+ *
+ * Changelog: Added public leaderboard ranking (additive; no schema change).
+ */
+campaignsRouter.get("/:slug/leaderboard", async (req, res) => {
+  try {
+    const { rows: campaigns } = await pool.query<QueryResultRow>(
+      `SELECT id, campaign_status FROM campaigns WHERE slug = $1`,
+      [req.params.slug],
+    );
+    if (campaigns.length === 0) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+
+    const campaign = campaigns[0];
+    const status = String(campaign.campaign_status);
+    if (status !== "live" && status !== "closed") {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+
+    const campaignId = Number(campaign.id);
+    const clampLimit = (raw: unknown, fallback: number) =>
+      Math.min(50, Math.max(1, Number(raw) || fallback));
+    const fundraisersLimit = clampLimit(req.query.fundraisersLimit, 5);
+    const donorsLimit = clampLimit(req.query.donorsLimit, 5);
+
+    const { rows: fundraiserCountRows } = await pool.query<QueryResultRow>(
+      `SELECT COUNT(*) AS count
+       FROM campaign_participants
+       WHERE campaign_id = $1
+         AND participant_type = 'ambassador'
+         AND leaderboard_enabled = TRUE
+         AND status IN ('active', 'completed')`,
+      [campaignId],
+    );
+
+    const { rows: fundraiserRows } = await pool.query<QueryResultRow>(
+      `SELECT
+         cp.name,
+         COALESCE(SUM(d.amount), 0) AS raised,
+         COUNT(d.id)::int AS donation_count
+       FROM campaign_participants cp
+       LEFT JOIN donations d
+         ON d.campaign_id = cp.campaign_id
+        AND d.payment_status = 'completed'
+        AND d.donation_type = 'virtual'
+        AND d.attribution_code IS NOT NULL
+        AND d.attribution_code = cp.tracking_code
+       WHERE cp.campaign_id = $1
+         AND cp.participant_type = 'ambassador'
+         AND cp.leaderboard_enabled = TRUE
+         AND cp.status IN ('active', 'completed')
+       GROUP BY cp.id, cp.name
+       ORDER BY raised DESC, cp.name ASC
+       LIMIT $2`,
+      [campaignId, fundraisersLimit],
+    );
+
+    const { rows: donorCountRows } = await pool.query<QueryResultRow>(
+      `SELECT COUNT(*) AS count FROM (
+         SELECT d.supporter_id
+         FROM donations d
+         WHERE d.campaign_id = $1
+           AND d.payment_status = 'completed'
+           AND d.donation_type = 'virtual'
+           AND d.supporter_id IS NOT NULL
+         GROUP BY d.supporter_id
+       ) donor_groups`,
+      [campaignId],
+    );
+
+    const { rows: donorRows } = await pool.query<QueryResultRow>(
+      `SELECT
+         d.supporter_id,
+         BOOL_OR(d.notes = 'anonymous') AS any_anonymous,
+         MAX(s.first_name) AS first_name,
+         SUM(d.amount) AS total_amount,
+         COUNT(*)::int AS donation_count
+       FROM donations d
+       LEFT JOIN supporters s ON s.id = d.supporter_id
+       WHERE d.campaign_id = $1
+         AND d.payment_status = 'completed'
+         AND d.donation_type = 'virtual'
+         AND d.supporter_id IS NOT NULL
+       GROUP BY d.supporter_id
+       ORDER BY total_amount DESC, MAX(d.created_at) DESC
+       LIMIT $2`,
+      [campaignId, donorsLimit],
+    );
+
+    res.json({
+      fundraisersTotalCount: Number(fundraiserCountRows[0]?.count ?? 0),
+      donorsTotalCount: Number(donorCountRows[0]?.count ?? 0),
+      fundraisers: fundraiserRows.map((row) => ({
+        name: String(row.name),
+        raised: Number(row.raised),
+        donationCount: Number(row.donation_count ?? 0),
+      })),
+      donors: donorRows.map((row) => {
+        const anonymous = Boolean(row.any_anonymous) || !row.first_name;
+        return {
+          donorName: anonymous ? "Anonymous" : String(row.first_name),
+          totalAmount: Number(row.total_amount),
+          donationCount: Number(row.donation_count ?? 0),
+          anonymous,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch leaderboard" });
+  }
+});
+
 campaignsRouter.post("/:slug/donations", async (req, res) => {
   const connection = await pool.connect();
   try {

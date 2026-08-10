@@ -45,6 +45,13 @@
  *     organizationType, organization, locations?, accessRequest,
  *     activitySummary, campaigns[]  // creator-parity KPIs (raised, supporters, etc.)
  *   }
+ *
+ * GET     /api/superadmin/live-campaigns
+ *   response: [{ slug, name, nonprofit, status, goal, raised, startDate, endDate, updatedAt }]
+ *
+ * DELETE  /api/superadmin/live-campaigns/:slug
+ *   response: { success, slug }
+ *   Hard-deletes only when campaign_status = 'live' (child rows cascade).
  */
 import { Router } from "express";
 import crypto from "crypto";
@@ -821,6 +828,84 @@ superadminRouter.post("/forkup-review/:slug/request-changes", async (req, res) =
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to request changes on ForkUp review" });
+  }
+});
+
+/**
+ * List all live campaigns for superadmin console.
+ * Method: GET /api/superadmin/live-campaigns
+ * Response: [{ slug, name, nonprofit, status, goal, raised, startDate, endDate, updatedAt }]
+ */
+superadminRouter.get("/live-campaigns", async (_req, res) => {
+  try {
+    const { rows } = await pool.query<QueryResultRow>(
+      `SELECT c.slug, c.campaign_name, c.campaign_status, c.campaign_goal, c.raised,
+              c.campaign_start_date, c.campaign_end_date, c.updated_at,
+              n.organization_name
+       FROM campaigns c
+       JOIN nonprofits n ON n.id = c.nonprofit_id
+       WHERE c.campaign_status = 'live'
+       ORDER BY c.updated_at DESC
+       LIMIT 500`,
+    );
+    res.json(
+      rows.map((r) => ({
+        slug: String(r.slug),
+        name: String(r.campaign_name),
+        nonprofit: String(r.organization_name),
+        status: String(r.campaign_status),
+        goal: Number(r.campaign_goal ?? 0),
+        raised: Number(r.raised ?? 0),
+        startDate: r.campaign_start_date
+          ? String(r.campaign_start_date).slice(0, 10)
+          : null,
+        endDate: r.campaign_end_date
+          ? String(r.campaign_end_date).slice(0, 10)
+          : null,
+        updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
+      })),
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load live campaigns" });
+  }
+});
+
+/**
+ * Hard-delete a live campaign (superadmin).
+ * Method: DELETE /api/superadmin/live-campaigns/:slug
+ * Response: { success, slug }
+ * Only deletes when campaign_status = 'live'. Related rows cascade via FKs.
+ */
+superadminRouter.delete("/live-campaigns/:slug", async (req, res) => {
+  const connection = await pool.connect();
+  try {
+    const slug = typeof req.params.slug === "string" ? req.params.slug.trim() : "";
+    if (!slug) {
+      res.status(400).json({ error: "Campaign slug is required" });
+      return;
+    }
+
+    await connection.query("BEGIN");
+    const { rows } = await connection.query<QueryResultRow>(
+      `SELECT id FROM campaigns WHERE slug = $1 AND campaign_status = 'live'`,
+      [slug],
+    );
+    if (rows.length === 0) {
+      await connection.query("ROLLBACK");
+      res.status(404).json({ error: "Live campaign not found" });
+      return;
+    }
+
+    await connection.query("DELETE FROM campaigns WHERE id = $1", [rows[0].id]);
+    await connection.query("COMMIT");
+    res.json({ success: true, slug });
+  } catch (err) {
+    await connection.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Failed to delete live campaign" });
+  } finally {
+    connection.release();
   }
 });
 

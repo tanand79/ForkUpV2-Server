@@ -894,7 +894,9 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
     if (authUser) await linkUserToNonprofit(connection, authUser.id, nonprofitId);
 
     if (
-      !["draft", "ready_to_launch", "in_review"].includes(currentStatus) &&
+      !["draft", "ready_to_launch", "in_review", "live", "invitation_phase"].includes(
+        currentStatus,
+      ) &&
       !body.launch
     ) {
       res.status(400).json({ error: "This campaign can no longer be edited" });
@@ -959,21 +961,27 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       : null;
     const submitLaunchForReview =
       Boolean(body.launch) && launchRequiresForkupReview(timingFields);
+    // Post-launch NPO edits: keep live / invitation_phase (do not re-review).
     // Option 2: short timeline → in_review; otherwise resolve normal launch status.
-    let nextStatus: LaunchStatus | "draft" | "in_review" = body.launch
-      ? submitLaunchForReview
+    let nextStatus: LaunchStatus | "draft" | "in_review";
+    if (currentStatus === "live" || currentStatus === "invitation_phase") {
+      nextStatus = currentStatus;
+    } else if (body.launch) {
+      nextStatus = submitLaunchForReview
         ? "in_review"
         : await resolveLaunchStatus(
             connection,
             campaignId,
             resolvedStartDate ?? undefined,
             methodsForSave,
-          )
-      : currentStatus === "ready_to_launch"
-        ? "ready_to_launch"
-        : currentStatus === "in_review"
-          ? "in_review"
-          : "draft";
+          );
+    } else if (currentStatus === "ready_to_launch") {
+      nextStatus = "ready_to_launch";
+    } else if (currentStatus === "in_review") {
+      nextStatus = "in_review";
+    } else {
+      nextStatus = "draft";
+    }
 
     await connection.query(
       `UPDATE campaigns SET
