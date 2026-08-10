@@ -35,6 +35,7 @@ import {
   parseRadiusMiles,
 } from "../lib/geo-distance";
 import { assertUserMayLinkOrganization } from "../lib/assert-may-link-organization";
+import { parseFeaturedYoutubeFromBody } from "../lib/featured-youtube";
 
 type InviteEmailRow = QueryResultRow & {
   token: string;
@@ -87,6 +88,11 @@ type CreateCampaignBody = {
   /** Guest Bartending single event date (Nick V2 Layer 2). */
   eventDate?: string;
   coverImage: string;
+  /**
+   * Additive: optional featured YouTube watch/shorts URL for public hero.
+   * Omit to leave unchanged on PATCH; null/"" to clear; valid URL to set.
+   */
+  featuredYoutubeUrl?: string | null;
   methods: MethodType[];
   invitations?: {
     businessId: number;
@@ -737,7 +743,8 @@ builderRouter.get("/campaigns/:slug", async (req, res) => {
     const slug = req.params.slug.replace(/\/+$/, "");
     const { rows: campaigns } = await pool.query<QueryResultRow>(
       `SELECT c.id, c.slug, c.nonprofit_id, c.campaign_name, c.campaign_story, c.campaign_goal,
-              c.campaign_start_date, c.campaign_end_date, c.cover_image_url, c.campaign_status
+              c.campaign_start_date, c.campaign_end_date, c.cover_image_url,
+              c.featured_youtube_url, c.campaign_status
        FROM campaigns c WHERE c.slug = $1`,
       [slug],
     );
@@ -783,6 +790,12 @@ builderRouter.get("/campaigns/:slug", async (req, res) => {
       startDate: formatDate(campaign.campaign_start_date),
       endDate: formatDate(campaign.campaign_end_date),
       coverImageUrl: await resolveStoredImageUrl(campaign.cover_image_url),
+      /** Additive: featured YouTube watch/shorts URL when set. */
+      featuredYoutubeUrl:
+        campaign.featured_youtube_url != null &&
+        String(campaign.featured_youtube_url).trim()
+          ? String(campaign.featured_youtube_url).trim()
+          : null,
       status: campaign.campaign_status,
       origin: originRows.length > 0 ? "business_invite" : "nonprofit",
       methods: methods.map((m) => m.method_type),
@@ -852,6 +865,11 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       });
       return;
     }
+    const featuredYtParse = parseFeaturedYoutubeFromBody(body);
+    if (!featuredYtParse.ok) {
+      res.status(400).json({ error: featuredYtParse.error });
+      return;
+    }
     let coverImageUrl: string;
     try {
       coverImageUrl = await ensureDurableImageUrl(body.coverImage.trim(), "covers");
@@ -878,7 +896,7 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
     await connection.query("BEGIN");
 
     const { rows: campaigns } = await connection.query<QueryResultRow>(
-      "SELECT id, campaign_status, nonprofit_id FROM campaigns WHERE slug = $1",
+      "SELECT id, campaign_status, nonprofit_id, featured_youtube_url FROM campaigns WHERE slug = $1",
       [slug],
     );
     if (campaigns.length === 0) {
@@ -889,6 +907,14 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
     const campaignId = Number(campaigns[0].id);
     const nonprofitId = Number(campaigns[0].nonprofit_id);
     const currentStatus = campaigns[0].campaign_status;
+    /** Additive: omit keeps existing; null clears; string sets normalized URL. */
+    const featuredYoutubeUrl =
+      featuredYtParse.value === undefined
+        ? campaigns[0].featured_youtube_url != null &&
+          String(campaigns[0].featured_youtube_url).trim()
+          ? String(campaigns[0].featured_youtube_url).trim()
+          : null
+        : featuredYtParse.value;
 
     const authUser = await resolveAuthUser(bearerToken(req));
     if (authUser) await linkUserToNonprofit(connection, authUser.id, nonprofitId);
@@ -992,23 +1018,24 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
         campaign_end_date = $5,
         event_date = $6,
         cover_image_url = $7,
-        invitation_deadline = $8,
-        campaign_status = $9,
-        terms_accepted = $10,
-        terms_accepted_at = CASE WHEN $11 THEN NOW() ELSE terms_accepted_at END,
-        business_timing_status = $12,
+        featured_youtube_url = $8,
+        invitation_deadline = $9,
+        campaign_status = $10,
+        terms_accepted = $11,
+        terms_accepted_at = CASE WHEN $12 THEN NOW() ELSE terms_accepted_at END,
+        business_timing_status = $13,
         forkup_review_status = CASE
-          WHEN $13 = 'pending' THEN 'pending'
+          WHEN $14 = 'pending' THEN 'pending'
           WHEN forkup_review_status = 'approved' THEN 'approved'
-          ELSE $13
+          ELSE $14
         END,
-        forkup_review_reason = COALESCE($14, forkup_review_reason),
+        forkup_review_reason = COALESCE($15, forkup_review_reason),
         forkup_review_requested_at = CASE
-          WHEN $13 = 'pending' THEN COALESCE(forkup_review_requested_at, NOW())
+          WHEN $14 = 'pending' THEN COALESCE(forkup_review_requested_at, NOW())
           ELSE forkup_review_requested_at
         END,
         updated_at = NOW()
-       WHERE id = $15`,
+       WHERE id = $16`,
       [
         body.campaignName.trim(),
         body.campaignStory.trim(),
@@ -1017,6 +1044,7 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
         resolvedEndDate,
         resolvedEventDate,
         coverImageUrl,
+        featuredYoutubeUrl,
         invitationDeadline,
         nextStatus,
         body.termsAccepted,
@@ -1234,6 +1262,8 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       nonprofitId,
       campaignStatus: nextStatus,
       campaignName: body.campaignName,
+      /** Additive: featured YouTube watch/shorts URL after save. */
+      featuredYoutubeUrl,
       businessTimingStatus: timingFields.businessTimingStatus,
       forkupReviewStatus: timingFields.forkupReviewStatus,
       timing: timingEval,
@@ -1317,6 +1347,16 @@ builderRouter.post("/campaigns", async (req, res) => {
       });
       return;
     }
+    const featuredYtParseCreate = parseFeaturedYoutubeFromBody(body);
+    if (!featuredYtParseCreate.ok) {
+      res.status(400).json({ error: featuredYtParseCreate.error });
+      return;
+    }
+    /** Additive: create treats omit as null (no video). */
+    const featuredYoutubeUrlCreate =
+      featuredYtParseCreate.value === undefined
+        ? null
+        : featuredYtParseCreate.value;
     let coverImageUrl: string;
     try {
       coverImageUrl = await ensureDurableImageUrl(body.coverImage.trim(), "covers");
@@ -1437,10 +1477,11 @@ builderRouter.post("/campaigns", async (req, res) => {
       `INSERT INTO campaigns (
         slug, nonprofit_id, campaign_name, campaign_story, campaign_goal,
         campaign_start_date, campaign_end_date, event_date, campaign_status, cover_image_url,
+        featured_youtube_url,
         invitation_deadline, terms_accepted, terms_accepted_at,
         business_timing_status, forkup_review_status, forkup_review_reason,
         forkup_review_requested_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING id`,
       [
         slug,
@@ -1453,6 +1494,7 @@ builderRouter.post("/campaigns", async (req, res) => {
         resolvedEventDate,
         campaignStatus,
         coverImageUrl,
+        featuredYoutubeUrlCreate,
         invitationDeadline,
         body.termsAccepted,
         body.termsAccepted ? new Date() : null,
@@ -1654,6 +1696,8 @@ builderRouter.post("/campaigns", async (req, res) => {
       nonprofitId,
       campaignStatus,
       campaignName: body.campaignName,
+      /** Additive: featured YouTube watch/shorts URL after create. */
+      featuredYoutubeUrl: featuredYoutubeUrlCreate,
       businessTimingStatus: timingFields.businessTimingStatus,
       forkupReviewStatus: timingFields.forkupReviewStatus,
       timing: timingEval,

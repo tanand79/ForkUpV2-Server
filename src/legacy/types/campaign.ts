@@ -85,4 +85,9 @@ export interface CampaignDetail extends CampaignListItem {
   participatingLocations: ParticipatingLocation[];
   /** Guest Bartending event date (YYYY-MM-DD), when set. Additive public field. */
   eventDate: string | null;
+  /**
+   * Additive: optional featured YouTube watch/shorts URL for public hero media.
+   * Null when unset. Plays first in the hero slider when present.
+   */
+  featuredYoutubeUrl: string | null;
 }

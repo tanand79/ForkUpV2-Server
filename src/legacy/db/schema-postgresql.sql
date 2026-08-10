@@ -124,6 +124,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   campaign_status VARCHAR(30) NOT NULL DEFAULT 'draft'
     CHECK (campaign_status IN ('draft', 'in_review', 'invitation_phase', 'ready_to_launch', 'live', 'closed', 'settlement')),
   cover_image_url VARCHAR(2048) NOT NULL,
+  -- Additive: optional YouTube watch/shorts URL for public hero (video first when set)
+  featured_youtube_url VARCHAR(512),
   logo_url VARCHAR(512),
   raised INTEGER NOT NULL DEFAULT 0,
   supporters_going INTEGER NOT NULL DEFAULT 0,

@@ -17,6 +17,7 @@
     "src/legacy/db/migrate-library.ts",
     "src/legacy/db/migrate-campaign-images.ts",
     "src/legacy/db/migrate-cover-image-url-width.ts",
+    "src/legacy/db/migrate-featured-youtube-url.ts",
     "src/legacy/db/migrate-campaign-images-url-width.ts",
     "src/legacy/db/migrate-payouts.ts",
     "src/legacy/db/migrate-automation.ts",

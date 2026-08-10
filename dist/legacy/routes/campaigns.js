@@ -143,6 +143,10 @@ async function fetchCampaignBySlug(slug, options) {
         methods,
         participatingLocations: locations,
         eventDate: (0, date_only_1.toDateOnlyString)(campaign.event_date),
+        featuredYoutubeUrl: campaign.featured_youtube_url != null &&
+            String(campaign.featured_youtube_url).trim()
+            ? String(campaign.featured_youtube_url).trim()
+            : null,
     };
 }
 exports.campaignsRouter.get("/", async (req, res) => {

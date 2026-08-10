@@ -63,4 +63,5 @@ export interface CampaignDetail extends CampaignListItem {
     methods: CampaignMethod[];
     participatingLocations: ParticipatingLocation[];
     eventDate: string | null;
+    featuredYoutubeUrl: string | null;
 }

@@ -26,6 +26,8 @@ type CampaignRow = QueryResultRow & {
   event_date: string | Date | null;
   campaign_status: CampaignStatus;
   cover_image_url: string;
+  /** Additive: optional featured YouTube watch/shorts URL. */
+  featured_youtube_url?: string | null;
   raised: number;
   supporters_going: number;
   expected_guests: number;
@@ -215,6 +217,12 @@ async function fetchCampaignBySlug(slug: string, options?: { publicOnly?: boolea
     methods,
     participatingLocations: locations,
     eventDate: toDateOnlyString(campaign.event_date),
+    /** Additive: featured YouTube watch/shorts URL when set. */
+    featuredYoutubeUrl:
+      campaign.featured_youtube_url != null &&
+      String(campaign.featured_youtube_url).trim()
+        ? String(campaign.featured_youtube_url).trim()
+        : null,
   };
 }
 
