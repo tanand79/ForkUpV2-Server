@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.campaignsRouter = void 0;
 const express_1 = require("express");
 const pool_1 = require("../db/pool");
+const date_only_1 = require("../lib/date-only");
 const s3_1 = require("../lib/s3");
 exports.campaignsRouter = (0, express_1.Router)();
 function toDateInput(value) {
@@ -141,6 +142,7 @@ async function fetchCampaignBySlug(slug, options) {
         description: campaign.campaign_story,
         methods,
         participatingLocations: locations,
+        eventDate: (0, date_only_1.toDateOnlyString)(campaign.event_date),
     };
 }
 exports.campaignsRouter.get("/", async (req, res) => {

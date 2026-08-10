@@ -4,10 +4,11 @@ exports.campaignImagesRouter = void 0;
 const express_1 = require("express");
 const auth_1 = require("../lib/auth");
 const pool_1 = require("../db/pool");
+const ensure_durable_image_1 = require("../lib/ensure-durable-image");
 const s3_1 = require("../lib/s3");
 const suggest_social_images_1 = require("../lib/suggest-social-images");
 exports.campaignImagesRouter = (0, express_1.Router)();
-const MAX_GALLERY = 6;
+const MAX_GALLERY = 8;
 const ALLOWED_SOURCES = new Set([
     "manual",
     "website",
@@ -129,7 +130,7 @@ exports.campaignImagesRouter.put("/:slug", async (req, res) => {
                 });
                 return;
             }
-            if (imageUrl.length > 512) {
+            if (imageUrl.length > 2048) {
                 res.status(400).json({ error: "imageUrl is too long" });
                 return;
             }
@@ -144,10 +145,26 @@ exports.campaignImagesRouter.put("/:slug", async (req, res) => {
             const sourceUrl = typeof row.sourceUrl === "string" && row.sourceUrl.trim()
                 ? row.sourceUrl.trim().slice(0, 512)
                 : null;
+            let durableUrl;
+            try {
+                durableUrl = await (0, ensure_durable_image_1.ensureDurableImageUrl)(imageUrl, "covers");
+            }
+            catch (mirrorErr) {
+                console.warn("Failed to re-host campaign image:", mirrorErr);
+                res.status(400).json({
+                    error: "Could not store that image. Upload the file directly or pick another image.",
+                });
+                return;
+            }
+            if (durableUrl.length > 512) {
+                res.status(400).json({ error: "imageUrl is too long" });
+                return;
+            }
             normalized.push({
-                imageUrl,
+                imageUrl: durableUrl,
                 source,
-                sourceUrl,
+                sourceUrl: sourceUrl ||
+                    (durableUrl !== imageUrl ? imageUrl.slice(0, 512) : null),
                 isCover: Boolean(row.isCover),
             });
         }

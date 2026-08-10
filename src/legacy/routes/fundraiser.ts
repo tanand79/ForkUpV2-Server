@@ -27,6 +27,7 @@ import { uniqueCampaignSlug } from "../lib/slug";
 import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
 import { toDateOnlyString } from "../lib/date-only";
+import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
 
 export const fundraiserRouter = Router();
 
@@ -139,9 +140,21 @@ fundraiserRouter.post("/invites", async (req, res) => {
     const nonprofit = npRows[0];
 
     const methods = normalizeInviteMethods(body.methods);
-    const coverImage =
+    let coverImage =
       (typeof body.coverImage === "string" && body.coverImage.trim()) ||
       "/placeholder-cover.jpg";
+    if (coverImage !== "/placeholder-cover.jpg") {
+      try {
+        coverImage = await ensureDurableImageUrl(coverImage, "covers");
+      } catch (mirrorErr) {
+        console.warn("Failed to re-host fundraiser cover image:", mirrorErr);
+        res.status(400).json({
+          error:
+            "Could not store the campaign cover image. Upload the file directly or pick another image.",
+        });
+        return;
+      }
+    }
     const startDate = toDateOnlyString(body.startDate);
     const endDate = toDateOnlyString(body.endDate);
     const eventDate = toDateOnlyString(body.eventDate);

@@ -8,6 +8,7 @@ const methods_1 = require("../lib/methods");
 const date_only_1 = require("../lib/date-only");
 const auth_1 = require("../lib/auth");
 const s3_1 = require("../lib/s3");
+const ensure_durable_image_1 = require("../lib/ensure-durable-image");
 const organization_library_1 = require("../lib/organization-library");
 const campaign_timing_1 = require("../lib/campaign-timing");
 const business_invite_timing_1 = require("../lib/business-invite-timing");
@@ -500,6 +501,17 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             });
             return;
         }
+        let coverImageUrl;
+        try {
+            coverImageUrl = await (0, ensure_durable_image_1.ensureDurableImageUrl)(body.coverImage.trim(), "covers");
+        }
+        catch (mirrorErr) {
+            console.warn("Failed to re-host builder cover image:", mirrorErr);
+            res.status(400).json({
+                error: "Could not store the campaign cover image. Upload the file directly or pick another image.",
+            });
+            return;
+        }
         if (body.launch && !body.termsAccepted) {
             res.status(400).json({ error: "Terms must be accepted before launch" });
             return;
@@ -601,7 +613,7 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
             resolvedStartDate,
             resolvedEndDate,
             resolvedEventDate,
-            body.coverImage,
+            coverImageUrl,
             invitationDeadline,
             nextStatus,
             body.termsAccepted,
@@ -827,6 +839,17 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             });
             return;
         }
+        let coverImageUrl;
+        try {
+            coverImageUrl = await (0, ensure_durable_image_1.ensureDurableImageUrl)(body.coverImage.trim(), "covers");
+        }
+        catch (mirrorErr) {
+            console.warn("Failed to re-host builder cover image:", mirrorErr);
+            res.status(400).json({
+                error: "Could not store the campaign cover image. Upload the file directly or pick another image.",
+            });
+            return;
+        }
         if (body.launch && !body.termsAccepted) {
             res.status(400).json({ error: "Terms must be accepted before launch" });
             return;
@@ -924,7 +947,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             resolvedEndDate,
             resolvedEventDate,
             campaignStatus,
-            body.coverImage,
+            coverImageUrl,
             invitationDeadline,
             body.termsAccepted,
             body.termsAccepted ? new Date() : null,

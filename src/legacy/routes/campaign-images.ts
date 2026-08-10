@@ -10,7 +10,7 @@
  *
  * PUT /api/campaign-images/:slug
  *   auth required (nonprofit member, creator, or platform admin)
- *   body: { images: { imageUrl, source?, sourceUrl?, isCover? }[] }  // max 6
+ *   body: { images: { imageUrl, source?, sourceUrl?, isCover? }[] }  // max 8
  *   response: { images: ... }  (same shape as GET)
  */
 
@@ -18,6 +18,7 @@ import { Router } from "express";
 import type { QueryResultRow } from "pg";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { pool } from "../db/pool";
+import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
 import { resolveStoredImageUrl } from "../lib/s3";
 import {
   suggestSocialImages,
@@ -25,7 +26,7 @@ import {
 
 export const campaignImagesRouter = Router();
 
-const MAX_GALLERY = 6;
+const MAX_GALLERY = 8;
 const ALLOWED_SOURCES = new Set([
   "manual",
   "website",
@@ -140,7 +141,7 @@ campaignImagesRouter.get("/:slug", async (req, res) => {
 
 /**
  * PUT /api/campaign-images/:slug
- * Replace gallery (max 6). Auth required.
+ * Replace gallery (max 8). Auth required.
  */
 campaignImagesRouter.put("/:slug", async (req, res) => {
   const connection = await pool.connect();
@@ -209,7 +210,7 @@ campaignImagesRouter.put("/:slug", async (req, res) => {
         });
         return;
       }
-      if (imageUrl.length > 512) {
+      if (imageUrl.length > 2048) {
         res.status(400).json({ error: "imageUrl is too long" });
         return;
       }
@@ -229,10 +230,28 @@ campaignImagesRouter.put("/:slug", async (req, res) => {
         typeof row.sourceUrl === "string" && row.sourceUrl.trim()
           ? row.sourceUrl.trim().slice(0, 512)
           : null;
+      // Re-host fragile http(s) hotlinks to s3:// or /uploads/… before persist.
+      let durableUrl: string;
+      try {
+        durableUrl = await ensureDurableImageUrl(imageUrl, "covers");
+      } catch (mirrorErr) {
+        console.warn("Failed to re-host campaign image:", mirrorErr);
+        res.status(400).json({
+          error:
+            "Could not store that image. Upload the file directly or pick another image.",
+        });
+        return;
+      }
+      if (durableUrl.length > 512) {
+        res.status(400).json({ error: "imageUrl is too long" });
+        return;
+      }
       normalized.push({
-        imageUrl,
+        imageUrl: durableUrl,
         source,
-        sourceUrl,
+        sourceUrl:
+          sourceUrl ||
+          (durableUrl !== imageUrl ? imageUrl.slice(0, 512) : null),
         isCover: Boolean(row.isCover),
       });
     }

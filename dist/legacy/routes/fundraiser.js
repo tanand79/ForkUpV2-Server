@@ -11,6 +11,7 @@ const campaign_timing_1 = require("../lib/campaign-timing");
 const slug_1 = require("../lib/slug");
 const pool_1 = require("../db/pool");
 const date_only_1 = require("../lib/date-only");
+const ensure_durable_image_1 = require("../lib/ensure-durable-image");
 exports.fundraiserRouter = (0, express_1.Router)();
 const DEFAULT_METHODS = ["virtual_donations", "ambassador_fundraising"];
 const ALL_METHOD_TYPES = new Set(Object.keys(methods_1.METHOD_LABELS));
@@ -70,8 +71,20 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
         }
         const nonprofit = npRows[0];
         const methods = normalizeInviteMethods(body.methods);
-        const coverImage = (typeof body.coverImage === "string" && body.coverImage.trim()) ||
+        let coverImage = (typeof body.coverImage === "string" && body.coverImage.trim()) ||
             "/placeholder-cover.jpg";
+        if (coverImage !== "/placeholder-cover.jpg") {
+            try {
+                coverImage = await (0, ensure_durable_image_1.ensureDurableImageUrl)(coverImage, "covers");
+            }
+            catch (mirrorErr) {
+                console.warn("Failed to re-host fundraiser cover image:", mirrorErr);
+                res.status(400).json({
+                    error: "Could not store the campaign cover image. Upload the file directly or pick another image.",
+                });
+                return;
+            }
+        }
         const startDate = (0, date_only_1.toDateOnlyString)(body.startDate);
         const endDate = (0, date_only_1.toDateOnlyString)(body.endDate);
         const eventDate = (0, date_only_1.toDateOnlyString)(body.eventDate);

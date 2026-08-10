@@ -62,4 +62,5 @@ export interface CampaignDetail extends CampaignListItem {
     description: string;
     methods: CampaignMethod[];
     participatingLocations: ParticipatingLocation[];
+    eventDate: string | null;
 }

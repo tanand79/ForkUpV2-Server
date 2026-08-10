@@ -107,10 +107,15 @@ export function isWithinRadiusMiles(
 }
 
 /**
- * Keep a row when it has no coordinates, or when it is within radius.
- * Matches product rule: NULL coords stay visible until backfill.
+ * Keep a row when it is within radius of origin.
  *
- * Inputs: origin (or null = keep all), optional row lat/lng, radiusMiles.
+ * Inputs:
+ * - origin (or null = keep all)
+ * - optional row lat/lng
+ * - radiusMiles
+ * - options.requireCoordinates — when true and origin is set, NULL coords are dropped
+ *   (strict Find Your Organization nearby mode).
+ *
  * Outputs: { keep: boolean, distanceMiles: number | null }.
  */
 export function nearbyKeepDecision(
@@ -118,6 +123,7 @@ export function nearbyKeepDecision(
   rowLat: number | null | undefined,
   rowLng: number | null | undefined,
   radiusMiles: number,
+  options?: { requireCoordinates?: boolean },
 ): { keep: boolean; distanceMiles: number | null } {
   if (!origin) return { keep: true, distanceMiles: null };
   if (
@@ -126,7 +132,11 @@ export function nearbyKeepDecision(
     !Number.isFinite(Number(rowLat)) ||
     !Number.isFinite(Number(rowLng))
   ) {
-    return { keep: true, distanceMiles: null };
+    // Soft (default): keep unmapped rows. Strict: hide them when GPS is active.
+    return {
+      keep: options?.requireCoordinates ? false : true,
+      distanceMiles: null,
+    };
   }
   const distanceMiles = milesBetween(
     origin.latitude,
@@ -179,6 +189,80 @@ export async function geocodeUsZip(
   }
 }
 
+/**
+ * Geocode a US city + state to lat/lng.
+ * Prefer Zippopotam (stable, no key); fall back to Nominatim.
+ *
+ * Inputs: city, state (2-letter preferred).
+ * Outputs: LatLng or null.
+ */
+export async function geocodeUsCityState(
+  cityRaw: string,
+  stateRaw: string,
+): Promise<LatLng | null> {
+  const city = cityRaw.trim();
+  const state = stateRaw.trim().toUpperCase();
+  if (!city || !state) return null;
+
+  const fromZippo = await geocodeUsCityStateZippopotam(city, state);
+  if (fromZippo) return fromZippo;
+
+  return geocodeUsCityStateNominatim(city, state);
+}
+
+async function geocodeUsCityStateZippopotam(
+  city: string,
+  state: string,
+): Promise<LatLng | null> {
+  if (!/^[A-Z]{2}$/.test(state)) return null;
+  try {
+    const place = encodeURIComponent(city.toLowerCase());
+    const res = await fetch(`https://api.zippopotam.us/us/${state}/${place}`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as ZippopotamResponse;
+    const hit = data.places?.[0];
+    if (!hit?.latitude || !hit?.longitude) return null;
+    const latitude = Number(hit.latitude);
+    const longitude = Number(hit.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return { latitude, longitude };
+  } catch {
+    return null;
+  }
+}
+
+async function geocodeUsCityStateNominatim(
+  city: string,
+  state: string,
+): Promise<LatLng | null> {
+  try {
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("format", "json");
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("countrycodes", "us");
+    url.searchParams.set("q", `${city}, ${state}, USA`);
+    const res = await fetch(url.toString(), {
+      headers: {
+        "User-Agent": "ForkUp/1.0 (nearby nonprofit search; contact support@forkup.app)",
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Array<{ lat?: string; lon?: string }>;
+    const hit = data[0];
+    if (!hit?.lat || !hit?.lon) return null;
+    const latitude = Number(hit.lat);
+    const longitude = Number(hit.lon);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return { latitude, longitude };
+  } catch {
+    return null;
+  }
+}
+
 type NominatimReverse = {
   address?: {
     state?: string;
@@ -191,13 +275,26 @@ type NominatimReverse = {
 };
 
 /**
- * Reverse-geocode browser GPS to US city/state/zip (OpenStreetMap Nominatim).
- * Used to bias IRS ProPublica search when only lat/lng is available.
+ * Reverse-geocode browser GPS to US city/state/zip (OpenStreetMap Nominatim,
+ * with BigDataCloud fallback when Nominatim is rate-limited).
  *
  * Inputs: latitude, longitude.
  * Outputs: { city, state, zip } best-effort; null on failure.
  */
 export async function reverseGeocodeUs(
+  latitude: number,
+  longitude: number,
+): Promise<{ city: string | null; state: string | null; zip: string | null } | null> {
+  const fromNominatim = await reverseGeocodeUsNominatim(latitude, longitude);
+  if (fromNominatim?.state) return fromNominatim;
+
+  const fromBdc = await reverseGeocodeUsBigDataCloud(latitude, longitude);
+  if (fromBdc?.state) return fromBdc;
+
+  return fromNominatim ?? fromBdc;
+}
+
+async function reverseGeocodeUsNominatim(
   latitude: number,
   longitude: number,
 ): Promise<{ city: string | null; state: string | null; zip: string | null } | null> {
@@ -213,7 +310,7 @@ export async function reverseGeocodeUs(
         "User-Agent": "ForkUp/1.0 (nearby nonprofit search; contact support@forkup.app)",
         Accept: "application/json",
       },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(6000),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as NominatimReverse;
@@ -229,6 +326,54 @@ export async function reverseGeocodeUs(
     const city = addr.city || addr.town || addr.village || null;
     const zip = addr.postcode?.replace(/\D/g, "").slice(0, 5) || null;
     return { city, state, zip };
+  } catch {
+    return null;
+  }
+}
+
+type BigDataCloudReverse = {
+  city?: string;
+  locality?: string;
+  principalSubdivisionCode?: string;
+  postcode?: string;
+  countryCode?: string;
+};
+
+async function reverseGeocodeUsBigDataCloud(
+  latitude: number,
+  longitude: number,
+): Promise<{ city: string | null; state: string | null; zip: string | null } | null> {
+  try {
+    const url = new URL(
+      "https://api.bigdatacloud.net/data/reverse-geocode-client",
+    );
+    url.searchParams.set("latitude", String(latitude));
+    url.searchParams.set("longitude", String(longitude));
+    url.searchParams.set("localityLanguage", "en");
+    const res = await fetch(url.toString(), {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as BigDataCloudReverse;
+    if ((data.countryCode ?? "").toUpperCase() !== "US") {
+      // Still return city if present for messaging, but no US state for IRS filter.
+      return {
+        city: data.city || data.locality || null,
+        state: null,
+        zip: data.postcode?.replace(/\D/g, "").slice(0, 5) || null,
+      };
+    }
+    const subdiv = (data.principalSubdivisionCode ?? "").trim().toUpperCase();
+    const state = /^US-[A-Z]{2}$/.test(subdiv)
+      ? subdiv.slice(3)
+      : /^[A-Z]{2}$/.test(subdiv)
+        ? subdiv
+        : null;
+    return {
+      city: data.city || data.locality || null,
+      state,
+      zip: data.postcode?.replace(/\D/g, "").slice(0, 5) || null,
+    };
   } catch {
     return null;
   }

@@ -83,4 +83,6 @@ export interface CampaignDetail extends CampaignListItem {
   description: string;
   methods: CampaignMethod[];
   participatingLocations: ParticipatingLocation[];
+  /** Guest Bartending event date (YYYY-MM-DD), when set. Additive public field. */
+  eventDate: string | null;
 }

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
+import { toDateOnlyString } from "../lib/date-only";
 import { resolveStoredImageUrl } from "../lib/s3";
 import type {
   CampaignDetail,
@@ -22,6 +23,7 @@ type CampaignRow = QueryResultRow & {
   campaign_goal: number;
   campaign_start_date: string | Date | null;
   campaign_end_date: string | Date | null;
+  event_date: string | Date | null;
   campaign_status: CampaignStatus;
   cover_image_url: string;
   raised: number;
@@ -212,6 +214,7 @@ async function fetchCampaignBySlug(slug: string, options?: { publicOnly?: boolea
     description: campaign.campaign_story,
     methods,
     participatingLocations: locations,
+    eventDate: toDateOnlyString(campaign.event_date),
   };
 }
 

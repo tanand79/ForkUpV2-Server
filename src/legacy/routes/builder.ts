@@ -11,6 +11,7 @@ import {
 import { addCalendarDays, subtractCalendarDays, toDateOnlyString } from "../lib/date-only";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { resolveStoredImageUrl } from "../lib/s3";
+import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
 import {
   fetchApprovedLibraryItems,
   pickLaunchSnippet,
@@ -851,6 +852,17 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       });
       return;
     }
+    let coverImageUrl: string;
+    try {
+      coverImageUrl = await ensureDurableImageUrl(body.coverImage.trim(), "covers");
+    } catch (mirrorErr) {
+      console.warn("Failed to re-host builder cover image:", mirrorErr);
+      res.status(400).json({
+        error:
+          "Could not store the campaign cover image. Upload the file directly or pick another image.",
+      });
+      return;
+    }
     if (body.launch && !body.termsAccepted) {
       res.status(400).json({ error: "Terms must be accepted before launch" });
       return;
@@ -996,7 +1008,7 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
         resolvedStartDate,
         resolvedEndDate,
         resolvedEventDate,
-        body.coverImage,
+        coverImageUrl,
         invitationDeadline,
         nextStatus,
         body.termsAccepted,
@@ -1297,6 +1309,17 @@ builderRouter.post("/campaigns", async (req, res) => {
       });
       return;
     }
+    let coverImageUrl: string;
+    try {
+      coverImageUrl = await ensureDurableImageUrl(body.coverImage.trim(), "covers");
+    } catch (mirrorErr) {
+      console.warn("Failed to re-host builder cover image:", mirrorErr);
+      res.status(400).json({
+        error:
+          "Could not store the campaign cover image. Upload the file directly or pick another image.",
+      });
+      return;
+    }
     if (body.launch && !body.termsAccepted) {
       res.status(400).json({ error: "Terms must be accepted before launch" });
       return;
@@ -1421,7 +1444,7 @@ builderRouter.post("/campaigns", async (req, res) => {
         resolvedEndDate,
         resolvedEventDate,
         campaignStatus,
-        body.coverImage,
+        coverImageUrl,
         invitationDeadline,
         body.termsAccepted,
         body.termsAccepted ? new Date() : null,

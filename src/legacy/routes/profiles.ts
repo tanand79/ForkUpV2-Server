@@ -433,7 +433,8 @@ profilesRouter.get("/nonprofits", async (req, res) => {
  *
  * Optional nearby filter (additive):
  *   query: lat, lng, radiusMiles? (default 8)
- *   Rows with NULL coords stay visible; rows with coords outside radius are dropped.
+ *   When lat+lng are present: STRICT — only rows with coordinates within radius.
+ *   Rows with NULL coords are hidden while GPS filter is active.
  *   Sorted by match strength, then nearest first when distance is known.
  */
 profilesRouter.get("/nonprofits/search", async (req, res) => {
@@ -487,6 +488,7 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
     );
 
     const terms: SearchTerms = { q, domain, ein, location };
+    const strictNearby = Boolean(origin);
     const candidates = rows
       .map((row) => {
         const nearby = nearbyKeepDecision(
@@ -494,6 +496,7 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
           row.latitude,
           row.longitude,
           radiusMiles,
+          { requireCoordinates: strictNearby },
         );
         return {
           ...mapNonprofit(row),
