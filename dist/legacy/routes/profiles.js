@@ -348,10 +348,9 @@ exports.profilesRouter.get("/nonprofits/search", async (req, res) => {
         const where = clauses.length ? `WHERE ${clauses.join(" OR ")}` : "WHERE 1=1";
         const { rows: rows } = await pool_1.pool.query(`SELECT * FROM nonprofits ${where} ORDER BY organization_name LIMIT 25`, params);
         const terms = { q, domain, ein, location };
-        const strictNearby = Boolean(origin);
         const candidates = rows
             .map((row) => {
-            const nearby = (0, geo_distance_1.nearbyKeepDecision)(origin, row.latitude, row.longitude, radiusMiles, { requireCoordinates: strictNearby });
+            const nearby = (0, geo_distance_1.nearbyKeepDecision)(origin, row.latitude, row.longitude, radiusMiles, { requireCoordinates: false });
             return {
                 ...mapNonprofit(row),
                 matchStrength: computeMatchStrength(row, terms),

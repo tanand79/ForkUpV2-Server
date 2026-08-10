@@ -153,8 +153,27 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
             limit: fetchLimit,
         });
         let candidates = result.candidates;
+        let appliedRadius = radiusMiles;
+        let softStateFallback = false;
         if (origin) {
             candidates = await filterIrsCandidatesByNearby(candidates, origin, radiusMiles, limit, derivedCity, derivedState || state || null);
+            if (candidates.length === 0) {
+                appliedRadius = Math.max(radiusMiles, 25);
+                candidates = await filterIrsCandidatesByNearby(result.candidates, origin, appliedRadius, limit, derivedCity, derivedState || state || null);
+            }
+            if (candidates.length === 0 && (derivedState || state)) {
+                softStateFallback = true;
+                const cityNorm = normCity(derivedCity);
+                const ranked = [...result.candidates].sort((a, b) => {
+                    const aSame = cityNorm && normCity(a.city) === cityNorm ? 0 : 1;
+                    const bSame = cityNorm && normCity(b.city) === cityNorm ? 0 : 1;
+                    return aSame - bSame;
+                });
+                candidates = ranked.slice(0, limit).map((c) => ({
+                    ...c,
+                    distanceMiles: cityNorm && normCity(c.city) === cityNorm ? 0 : null,
+                }));
+            }
         }
         else {
             candidates = candidates.slice(0, limit);
@@ -172,8 +191,9 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
                     longitude: origin.longitude,
                     derivedState,
                     derivedCity,
-                    radiusMiles,
-                    strict: true,
+                    radiusMiles: appliedRadius,
+                    strict: !softStateFallback,
+                    softStateFallback,
                 }
                 : null,
         });

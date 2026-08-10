@@ -488,15 +488,15 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
     );
 
     const terms: SearchTerms = { q, domain, ein, location };
-    const strictNearby = Boolean(origin);
     const candidates = rows
       .map((row) => {
+        // Soft nearby: drop only mapped rows outside radius; unmapped rows stay.
         const nearby = nearbyKeepDecision(
           origin,
           row.latitude,
           row.longitude,
           radiusMiles,
-          { requireCoordinates: strictNearby },
+          { requireCoordinates: false },
         );
         return {
           ...mapNonprofit(row),
