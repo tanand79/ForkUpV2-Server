@@ -5,6 +5,7 @@ const express_1 = require("express");
 const pool_1 = require("../db/pool");
 const auth_1 = require("../lib/auth");
 const mailer_1 = require("../lib/mailer");
+const geo_distance_1 = require("../lib/geo-distance");
 exports.profilesRouter = (0, express_1.Router)();
 function slugify(name) {
     return name
@@ -27,6 +28,8 @@ function mapNonprofit(row) {
         city: row.city ?? null,
         state: row.state ?? null,
         zip: row.zip ?? null,
+        latitude: row.latitude != null ? Number(row.latitude) : null,
+        longitude: row.longitude != null ? Number(row.longitude) : null,
         verificationStatus: row.verification_status,
         claimStatus: row.claim_status,
         profileStatus: row.profile_status ?? "preloaded",
@@ -312,6 +315,8 @@ exports.profilesRouter.get("/nonprofits/search", async (req, res) => {
         const website = typeof req.query.website === "string" ? req.query.website.trim() : "";
         const einRaw = typeof req.query.ein === "string" ? req.query.ein.trim() : "";
         const location = typeof req.query.location === "string" ? req.query.location.trim() : "";
+        const origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
+        const radiusMiles = (0, geo_distance_1.parseRadiusMiles)(req.query.radiusMiles);
         if (!q && !website && !einRaw && !location) {
             res.status(400).json({ error: "q, website, ein, or location is required" });
             return;
@@ -344,11 +349,31 @@ exports.profilesRouter.get("/nonprofits/search", async (req, res) => {
         const { rows: rows } = await pool_1.pool.query(`SELECT * FROM nonprofits ${where} ORDER BY organization_name LIMIT 25`, params);
         const terms = { q, domain, ein, location };
         const candidates = rows
-            .map((row) => ({
-            ...mapNonprofit(row),
-            matchStrength: computeMatchStrength(row, terms),
-        }))
-            .sort((a, b) => STRENGTH_RANK[a.matchStrength] - STRENGTH_RANK[b.matchStrength]);
+            .map((row) => {
+            const nearby = (0, geo_distance_1.nearbyKeepDecision)(origin, row.latitude, row.longitude, radiusMiles);
+            return {
+                ...mapNonprofit(row),
+                matchStrength: computeMatchStrength(row, terms),
+                distanceMiles: nearby.distanceMiles,
+                _nearbyKeep: nearby.keep,
+            };
+        })
+            .filter((c) => c._nearbyKeep)
+            .map(({ _nearbyKeep: _drop, ...rest }) => rest)
+            .sort((a, b) => {
+            const strengthDiff = STRENGTH_RANK[a.matchStrength] - STRENGTH_RANK[b.matchStrength];
+            if (strengthDiff !== 0)
+                return strengthDiff;
+            const da = a.distanceMiles;
+            const db = b.distanceMiles;
+            if (da != null && db != null)
+                return da - db;
+            if (da != null)
+                return -1;
+            if (db != null)
+                return 1;
+            return 0;
+        });
         const businessWarning = domain ? await findBusinessByDomain(domain) : null;
         res.json({
             query: q,
@@ -360,6 +385,13 @@ exports.profilesRouter.get("/nonprofits/search", async (req, res) => {
             candidates,
             businessWarning,
             requiresConfirmation: true,
+            nearby: origin
+                ? {
+                    latitude: origin.latitude,
+                    longitude: origin.longitude,
+                    radiusMiles,
+                }
+                : null,
         });
     }
     catch (err) {

@@ -4,12 +4,31 @@ exports.fundraiserRouter = void 0;
 const express_1 = require("express");
 const auth_1 = require("../lib/auth");
 const invitations_1 = require("../lib/invitations");
+const fundraiser_accept_launch_1 = require("../lib/fundraiser-accept-launch");
 const mailer_1 = require("../lib/mailer");
 const methods_1 = require("../lib/methods");
+const campaign_timing_1 = require("../lib/campaign-timing");
 const slug_1 = require("../lib/slug");
 const pool_1 = require("../db/pool");
+const date_only_1 = require("../lib/date-only");
 exports.fundraiserRouter = (0, express_1.Router)();
 const DEFAULT_METHODS = ["virtual_donations", "ambassador_fundraising"];
+const ALL_METHOD_TYPES = new Set(Object.keys(methods_1.METHOD_LABELS));
+function withImpliedAmbassador(methods) {
+    if (methods.includes("guest_bartending_event") &&
+        !methods.includes("ambassador_fundraising")) {
+        return [...methods, "ambassador_fundraising"];
+    }
+    return methods;
+}
+function normalizeInviteMethods(raw) {
+    if (!Array.isArray(raw) || raw.length === 0)
+        return [...DEFAULT_METHODS];
+    const parsed = raw.filter((m) => typeof m === "string" && ALL_METHOD_TYPES.has(m));
+    if (parsed.length === 0)
+        return [...DEFAULT_METHODS];
+    return withImpliedAmbassador(parsed);
+}
 async function userIsNonprofitMember(userId, nonprofitId) {
     const { rows } = await pool_1.pool.query(`SELECT 1 AS ok FROM organization_users
      WHERE organization_type = 'nonprofit'
@@ -50,13 +69,36 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             return;
         }
         const nonprofit = npRows[0];
-        const methods = Array.isArray(body.methods) && body.methods.length > 0
-            ? body.methods
-            : DEFAULT_METHODS;
+        const methods = normalizeInviteMethods(body.methods);
         const coverImage = (typeof body.coverImage === "string" && body.coverImage.trim()) ||
             "/placeholder-cover.jpg";
-        const startDate = body.startDate?.trim() || null;
-        const endDate = body.endDate?.trim() || null;
+        const startDate = (0, date_only_1.toDateOnlyString)(body.startDate);
+        const endDate = (0, date_only_1.toDateOnlyString)(body.endDate);
+        const eventDate = (0, date_only_1.toDateOnlyString)(body.eventDate);
+        const dateError = (0, campaign_timing_1.validateMethodDateRequirements)({
+            methods,
+            startDate,
+            endDate,
+            eventDate,
+        });
+        if (dateError) {
+            res.status(400).json({ error: dateError });
+            return;
+        }
+        const timingEval = (0, campaign_timing_1.evaluateBusinessMethodTiming)({
+            methods,
+            startDate,
+            eventDate,
+        });
+        const submitForForkupReview = Boolean(body.submitForForkupReview);
+        const needsForkupReview = submitForForkupReview || timingEval.status === "needs_forkup_review";
+        const businessTimingStatus = needsForkupReview
+            ? "needs_forkup_review"
+            : "ok";
+        const forkupReviewStatus = needsForkupReview ? "pending" : "none";
+        const methodTimingStatus = needsForkupReview
+            ? "needs_forkup_review"
+            : "ok";
         const fundraiserName = authUser.fullName?.trim() || authUser.email;
         const fundraiserEmail = authUser.email;
         await connection.query("BEGIN");
@@ -66,9 +108,13 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
         });
         const { rows: campResult } = await connection.query(`INSERT INTO campaigns (
         slug, nonprofit_id, campaign_name, campaign_story, campaign_goal,
-        campaign_start_date, campaign_end_date, campaign_status, cover_image_url,
-        created_by_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, $9)
+        campaign_start_date, campaign_end_date, event_date, campaign_status, cover_image_url,
+        created_by_user_id, business_timing_status, forkup_review_status,
+        forkup_review_requested_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, $12,
+        CASE WHEN $13 THEN NOW() ELSE NULL END
+      )
        RETURNING id`, [
             slug,
             nonprofitId,
@@ -77,18 +123,24 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             body.campaignGoal ?? 0,
             startDate,
             endDate,
+            eventDate,
             coverImage,
             authUser.id,
+            businessTimingStatus,
+            forkupReviewStatus,
+            needsForkupReview,
         ]);
         const campaignId = campResult[0].id;
         for (const methodType of methods) {
             await connection.query(`INSERT INTO campaign_methods (
           campaign_id, method_type, method_name, method_status,
           requires_business_acceptance, timing_status
-        ) VALUES ($1, $2, $3, 'draft', FALSE, 'ok')`, [
+        ) VALUES ($1, $2, $3, 'draft', $4, $5)`, [
                 campaignId,
                 methodType,
                 methods_1.METHOD_LABELS[methodType] ?? methodType,
+                methods_1.METHOD_REQUIRES_BUSINESS[methodType],
+                methods_1.METHOD_REQUIRES_BUSINESS[methodType] ? methodTimingStatus : "ok",
             ]);
         }
         await connection.query(`INSERT INTO campaign_fundraisers (campaign_id, user_id, status)
@@ -217,12 +269,15 @@ exports.fundraiserRouter.post("/invites/:token/accept", async (req, res) => {
         await connection.query(`UPDATE campaign_fundraisers
        SET status = 'active'
        WHERE campaign_id = $1 AND user_id = $2`, [invite.campaign_id, invite.fundraiser_user_id]);
-        const { rows: campaign } = await connection.query("SELECT slug FROM campaigns WHERE id = $1", [invite.campaign_id]);
+        const { rows: campaign } = await connection.query(`SELECT slug, campaign_status, campaign_start_date
+       FROM campaigns WHERE id = $1`, [invite.campaign_id]);
+        const campaignStatus = await (0, fundraiser_accept_launch_1.promoteFundraiserDraftOnAccept)(connection, Number(invite.campaign_id), campaign[0]?.campaign_start_date ?? null);
         await connection.query("COMMIT");
         res.json({
             success: true,
             invitationStatus: "accepted",
             campaignSlug: campaign[0]?.slug,
+            campaignStatus,
         });
     }
     catch (err) {

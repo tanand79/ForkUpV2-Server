@@ -3,16 +3,26 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.usNonprofitSuggestRouter = void 0;
 const express_1 = require("express");
 const us_nonprofit_directory_1 = require("../lib/us-nonprofit-directory");
+const geo_distance_1 = require("../lib/geo-distance");
 exports.usNonprofitSuggestRouter = (0, express_1.Router)();
 exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
     try {
         const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-        const state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+        let state = typeof req.query.state === "string" ? req.query.state.trim() : "";
         const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
         const limit = Number.isFinite(limitRaw) ? limitRaw : 8;
+        const origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
+        let derivedState = null;
         if (!q) {
             res.status(400).json({ error: "q is required" });
             return;
+        }
+        if (!state && origin) {
+            const geo = await (0, geo_distance_1.reverseGeocodeUs)(origin.latitude, origin.longitude);
+            if (geo?.state) {
+                state = geo.state;
+                derivedState = geo.state;
+            }
         }
         const result = await (0, us_nonprofit_directory_1.suggestUsNonprofits)({
             q,
@@ -26,6 +36,13 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
             totalResults: result.totalResults,
             provider: result.provider,
             candidates: result.candidates,
+            nearby: origin
+                ? {
+                    latitude: origin.latitude,
+                    longitude: origin.longitude,
+                    derivedState,
+                }
+                : null,
         });
     }
     catch (err) {

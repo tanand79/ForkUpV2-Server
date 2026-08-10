@@ -33,6 +33,7 @@ import {
   parseLatLng,
   parseRadiusMiles,
 } from "../lib/geo-distance";
+import { assertUserMayLinkOrganization } from "../lib/assert-may-link-organization";
 
 type InviteEmailRow = QueryResultRow & {
   token: string;
@@ -579,11 +580,24 @@ async function upsertNewBusinessInvite(
   return true;
 }
 
+/**
+ * Attach auth user to a nonprofit only when the shared link guard allows it.
+ * Purpose: builder create/update must not steal claimed orgs (e.g. Headstrong).
+ * Inputs: connection, userId, nonprofitId. Outputs: void (skips insert when denied).
+ */
 async function linkUserToNonprofit(
   connection: PoolClient,
   userId: number,
   nonprofitId: number,
 ) {
+  const mayLink = await assertUserMayLinkOrganization(connection, {
+    userId,
+    organizationType: "nonprofit",
+    organizationId: nonprofitId,
+  });
+  if (!mayLink.ok) {
+    return;
+  }
   await connection.query(
     `INSERT INTO organization_users (organization_type, organization_id, user_id, role)
      VALUES ('nonprofit', $1, $2, 'admin')
@@ -1711,5 +1725,298 @@ builderRouter.post("/campaigns/:slug/resubmit-forkup-review", async (req, res) =
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to resubmit ForkUp review" });
+  }
+});
+
+/**
+ * POST /api/builder/campaigns/:slug/business-invitations
+ *
+ * Purpose: Append business partner invitations after a campaign has launched
+ * (invitation_phase / ready_to_launch / live) without editing campaign fields.
+ *
+ * Body: {
+ *   invitations?: { businessId, locationId, methodType, givebackPercentage?,
+ *     businessEmail?, messageToBusiness?, proposedTerms? }[],
+ *   newBusinessInvites?: { businessName, businessEmail, methodType,
+ *     messageToBusiness?, proposedTerms? }[]
+ * }
+ *
+ * Response: {
+ *   slug, campaignStatus, addedCount, invitationLinks: [{
+ *     businessName, locationName, token, acceptanceStatus, acceptPath
+ *   }]
+ * }
+ *
+ * Changelog: Additive endpoint only — does not modify PUT /campaigns/:slug.
+ */
+builderRouter.post("/campaigns/:slug/business-invitations", async (req, res) => {
+  const connection = await pool.connect();
+  try {
+    const slug = String(req.params.slug ?? "").replace(/\/+$/, "");
+    const body = req.body as {
+      invitations?: CreateCampaignBody["invitations"];
+      newBusinessInvites?: CreateCampaignBody["newBusinessInvites"];
+    };
+
+    const authUser = await resolveAuthUser(bearerToken(req));
+    if (!authUser) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const invitations = Array.isArray(body.invitations) ? body.invitations : [];
+    const newBusinessInvites = Array.isArray(body.newBusinessInvites)
+      ? body.newBusinessInvites
+      : [];
+    if (invitations.length === 0 && newBusinessInvites.length === 0) {
+      res.status(400).json({ error: "Add at least one business invitation" });
+      return;
+    }
+
+    await connection.query("BEGIN");
+
+    const { rows: campaigns } = await connection.query<QueryResultRow>(
+      `SELECT id, campaign_status, nonprofit_id, created_by_user_id,
+              campaign_start_date, campaign_end_date, event_date,
+              business_timing_status
+       FROM campaigns WHERE slug = $1`,
+      [slug],
+    );
+    if (campaigns.length === 0) {
+      await connection.query("ROLLBACK");
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+
+    const campaign = campaigns[0];
+    const campaignId = Number(campaign.id);
+    const nonprofitId = Number(campaign.nonprofit_id);
+    const currentStatus = String(campaign.campaign_status);
+    const allowedStatuses = [
+      "invitation_phase",
+      "ready_to_launch",
+      "live",
+      "in_review",
+    ];
+    if (!allowedStatuses.includes(currentStatus)) {
+      await connection.query("ROLLBACK");
+      res.status(400).json({
+        error:
+          "Businesses can only be invited while the campaign is in review, invitation, scheduled, or live",
+      });
+      return;
+    }
+
+    const createdBy =
+      campaign.created_by_user_id != null
+        ? Number(campaign.created_by_user_id)
+        : null;
+    const isCreator = createdBy != null && createdBy === authUser.id;
+    const { rows: membership } = await connection.query<QueryResultRow>(
+      `SELECT 1 FROM organization_users
+       WHERE organization_type = 'nonprofit'
+         AND organization_id = $1
+         AND user_id = $2
+       LIMIT 1`,
+      [nonprofitId, authUser.id],
+    );
+    if (!authUser.isPlatformAdmin && !isCreator && membership.length === 0) {
+      await connection.query("ROLLBACK");
+      res.status(403).json({ error: "Not allowed to invite businesses on this campaign" });
+      return;
+    }
+
+    const { rows: methodRows } = await connection.query<QueryResultRow>(
+      `SELECT id, method_type FROM campaign_methods WHERE campaign_id = $1`,
+      [campaignId],
+    );
+    const methodIdByType = new Map<MethodType, number>();
+    for (const row of methodRows) {
+      methodIdByType.set(String(row.method_type) as MethodType, Number(row.id));
+    }
+    const hasBusinessMethod = [...methodIdByType.keys()].some(
+      (m) => METHOD_REQUIRES_BUSINESS[m],
+    );
+    if (!hasBusinessMethod) {
+      await connection.query("ROLLBACK");
+      res.status(400).json({
+        error: "This campaign has no business fundraising methods to invite partners for",
+      });
+      return;
+    }
+
+    const { rows: existingPartners } = await connection.query<QueryResultRow>(
+      `SELECT cbl.business_id, cbl.location_id, cm.method_type,
+              LOWER(b.contact_email) AS contact_email
+       FROM campaign_business_locations cbl
+       JOIN businesses b ON b.id = cbl.business_id
+       JOIN campaign_methods cm ON cm.id = cbl.method_id
+       WHERE cbl.campaign_id = $1`,
+      [campaignId],
+    );
+    const existingPartnerKeys = new Set(
+      existingPartners.map((p) =>
+        partnerInviteKey(String(p.business_id), String(p.location_id), String(p.method_type)),
+      ),
+    );
+    const existingPartnerEmails = new Set(
+      existingPartners
+        .map((p) =>
+          p.contact_email
+            ? partnerEmailMethodKey(String(p.contact_email), String(p.method_type))
+            : "",
+        )
+        .filter(Boolean),
+    );
+
+    const inviteAnchorDate =
+      toDateOnlyString(campaign.event_date) ||
+      toDateOnlyString(campaign.campaign_start_date) ||
+      toDateOnlyString(campaign.campaign_end_date);
+    const invitedByUserId = authUser.id;
+    let addedCount = 0;
+
+    for (const invite of invitations) {
+      const { rows: bizRows } = await connection.query<BusinessRow>(
+        `SELECT b.*, bl.id AS location_id
+         FROM businesses b
+         JOIN business_locations bl ON bl.business_id = b.id
+         WHERE b.id = $1 AND bl.id = $2`,
+        [invite.businessId, invite.locationId],
+      );
+      if (bizRows.length === 0) continue;
+
+      const biz = bizRows[0];
+      const methodType = resolvePersistedMethodType(
+        biz,
+        invite.methodType,
+        methodIdByType,
+      );
+      if (!methodType) continue;
+
+      const methodId = methodIdByType.get(methodType);
+      if (!methodId) continue;
+
+      const key = partnerInviteKey(
+        invite.businessId,
+        invite.locationId,
+        methodType,
+      );
+      if (existingPartnerKeys.has(key)) continue;
+
+      const respondByDate = computeRespondByDate({
+        sentDate: new Date(),
+        startOrEventDate: inviteAnchorDate,
+      });
+      const givebackPercentage =
+        invite.givebackPercentage ?? biz.default_giveback_percentage ?? 10;
+      const messageToBusiness = invite.messageToBusiness?.trim() || null;
+      const proposedTerms = invite.proposedTerms?.trim() || null;
+      const businessEmail =
+        (invite.businessEmail?.trim() ||
+          (biz.contact_email ? String(biz.contact_email).trim() : "") ||
+          "").toLowerCase() || "unknown@invite.local";
+
+      const { rows: cblResult } = await connection.query<{ id: number }>(
+        `INSERT INTO campaign_business_locations (
+          campaign_id, method_id, business_id, location_id,
+          invite_status, acceptance_status, giveback_percentage,
+          respond_by_date, invited_by_user_id, setup_status,
+          message_to_business, proposed_terms
+        ) VALUES ($1, $2, $3, $4, 'invited', 'invited', $5, $6, $7, 'pending', $8, $9)
+         RETURNING id`,
+        [
+          campaignId,
+          methodId,
+          invite.businessId,
+          invite.locationId,
+          givebackPercentage,
+          respondByDate,
+          invitedByUserId,
+          messageToBusiness,
+          proposedTerms,
+        ],
+      );
+      await ensureInvitationToken(connection, cblResult[0].id);
+      await insertBusinessInvitationRecord(connection, {
+        campaignId,
+        nonprofitId,
+        methodId,
+        businessId: invite.businessId,
+        businessName: String(biz.business_name),
+        businessEmail,
+        campaignBusinessLocationId: cblResult[0].id,
+        respondByDate,
+        invitedByUserId,
+        proposedGivebackPercentage: Number(givebackPercentage),
+        messageToBusiness,
+        proposedTerms,
+      });
+      existingPartnerKeys.add(key);
+      if (biz.contact_email) {
+        existingPartnerEmails.add(
+          partnerEmailMethodKey(String(biz.contact_email), methodType),
+        );
+      }
+      addedCount += 1;
+    }
+
+    for (const invite of newBusinessInvites) {
+      const methodId = methodIdByType.get(invite.methodType);
+      if (!methodId) continue;
+      const inserted = await upsertNewBusinessInvite(connection, {
+        campaignId,
+        nonprofitId,
+        methodId,
+        invite,
+        existingPartnerKeys,
+        existingPartnerEmails,
+        startOrEventDate: inviteAnchorDate,
+        invitedByUserId,
+      });
+      if (inserted) addedCount += 1;
+    }
+
+    await connection.query("COMMIT");
+
+    const canEmail =
+      String(campaign.business_timing_status ?? "ok") === "ok";
+    if (addedCount > 0 && canEmail) {
+      await sendBusinessInviteEmails(campaignId);
+    }
+
+    const { rows: inviteRows } = await connection.query<InviteEmailRow>(
+      `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status, b.contact_email
+       FROM campaign_business_locations cbl
+       JOIN invitation_tokens it ON it.campaign_business_location_id = cbl.id
+       JOIN businesses b ON b.id = cbl.business_id
+       JOIN business_locations bl ON bl.id = cbl.location_id
+       WHERE cbl.campaign_id = $1
+       ORDER BY cbl.id DESC`,
+      [campaignId],
+    );
+
+    res.json({
+      slug,
+      campaignStatus: currentStatus,
+      addedCount,
+      message:
+        addedCount > 0
+          ? `Added ${addedCount} business invitation${addedCount === 1 ? "" : "s"}`
+          : "No new invitations added (duplicates skipped)",
+      invitationLinks: inviteRows.map((row) => ({
+        businessName: row.business_name,
+        locationName: row.location_name,
+        token: row.token,
+        acceptanceStatus: row.acceptance_status,
+        acceptPath: `/?step=business-acceptance&token=${row.token}`,
+      })),
+    });
+  } catch (err) {
+    await connection.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Failed to append business invitations" });
+  } finally {
+    connection.release();
   }
 });

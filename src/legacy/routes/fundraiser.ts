@@ -16,15 +16,22 @@ import { Router } from "express";
 import type { QueryResultRow } from "pg";
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { generateInvitationToken } from "../lib/invitations";
+import { promoteFundraiserDraftOnAccept } from "../lib/fundraiser-accept-launch";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
-import { METHOD_LABELS } from "../lib/methods";
+import { METHOD_LABELS, METHOD_REQUIRES_BUSINESS } from "../lib/methods";
+import {
+  evaluateBusinessMethodTiming,
+  validateMethodDateRequirements,
+} from "../lib/campaign-timing";
 import { uniqueCampaignSlug } from "../lib/slug";
 import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
+import { toDateOnlyString } from "../lib/date-only";
 
 export const fundraiserRouter = Router();
 
 const DEFAULT_METHODS: MethodType[] = ["virtual_donations", "ambassador_fundraising"];
+const ALL_METHOD_TYPES = new Set<MethodType>(Object.keys(METHOD_LABELS) as MethodType[]);
 
 type CreateInviteBody = {
   nonprofitId?: number;
@@ -33,10 +40,36 @@ type CreateInviteBody = {
   campaignGoal?: number;
   startDate?: string | null;
   endDate?: string | null;
+  /** Guest Bartending event date (Nick V2 Layer 2). */
+  eventDate?: string | null;
   coverImage?: string | null;
   message?: string | null;
   methods?: MethodType[];
+  /** Fundraiser submitted short timeline for ForkUp review in the AI dates UI. */
+  submitForForkupReview?: boolean;
 };
+
+/**
+ * Guest Bartending always includes Ambassador Sharing (same as builder).
+ */
+function withImpliedAmbassador(methods: MethodType[]): MethodType[] {
+  if (
+    methods.includes("guest_bartending_event") &&
+    !methods.includes("ambassador_fundraising")
+  ) {
+    return [...methods, "ambassador_fundraising"];
+  }
+  return methods;
+}
+
+function normalizeInviteMethods(raw: unknown): MethodType[] {
+  if (!Array.isArray(raw) || raw.length === 0) return [...DEFAULT_METHODS];
+  const parsed = raw.filter(
+    (m): m is MethodType => typeof m === "string" && ALL_METHOD_TYPES.has(m as MethodType),
+  );
+  if (parsed.length === 0) return [...DEFAULT_METHODS];
+  return withImpliedAmbassador(parsed);
+}
 
 async function userIsNonprofitMember(
   userId: number,
@@ -55,8 +88,14 @@ async function userIsNonprofitMember(
 
 /**
  * method: POST /api/fundraiser/invites
- * body: { nonprofitId, campaignName, campaignStory, campaignGoal?, startDate?, endDate?, coverImage?, message?, methods? }
+ * body: {
+ *   nonprofitId, campaignName, campaignStory, campaignGoal?, startDate?, endDate?,
+ *   eventDate?, coverImage?, message?, methods?, submitForForkupReview?
+ * }
  * response: { token, acceptPath, campaignSlug, campaignName }
+ *
+ * Changelog: Persists selected methods + event date + ForkUp timing flags so
+ * NPO accept cannot go live while short-timeline business methods need review.
  */
 fundraiserRouter.post("/invites", async (req, res) => {
   const connection = await pool.connect();
@@ -99,16 +138,40 @@ fundraiserRouter.post("/invites", async (req, res) => {
     }
     const nonprofit = npRows[0];
 
-    const methods =
-      Array.isArray(body.methods) && body.methods.length > 0
-        ? body.methods
-        : DEFAULT_METHODS;
-
+    const methods = normalizeInviteMethods(body.methods);
     const coverImage =
       (typeof body.coverImage === "string" && body.coverImage.trim()) ||
       "/placeholder-cover.jpg";
-    const startDate = body.startDate?.trim() || null;
-    const endDate = body.endDate?.trim() || null;
+    const startDate = toDateOnlyString(body.startDate);
+    const endDate = toDateOnlyString(body.endDate);
+    const eventDate = toDateOnlyString(body.eventDate);
+    const dateError = validateMethodDateRequirements({
+      methods,
+      startDate,
+      endDate,
+      eventDate,
+    });
+    if (dateError) {
+      res.status(400).json({ error: dateError });
+      return;
+    }
+
+    const timingEval = evaluateBusinessMethodTiming({
+      methods,
+      startDate,
+      eventDate,
+    });
+    const submitForForkupReview = Boolean(body.submitForForkupReview);
+    const needsForkupReview =
+      submitForForkupReview || timingEval.status === "needs_forkup_review";
+    const businessTimingStatus = needsForkupReview
+      ? "needs_forkup_review"
+      : "ok";
+    const forkupReviewStatus = needsForkupReview ? "pending" : "none";
+    const methodTimingStatus = needsForkupReview
+      ? "needs_forkup_review"
+      : "ok";
+
     const fundraiserName = authUser.fullName?.trim() || authUser.email;
     const fundraiserEmail = authUser.email;
 
@@ -125,9 +188,13 @@ fundraiserRouter.post("/invites", async (req, res) => {
     const { rows: campResult } = await connection.query<{ id: number }>(
       `INSERT INTO campaigns (
         slug, nonprofit_id, campaign_name, campaign_story, campaign_goal,
-        campaign_start_date, campaign_end_date, campaign_status, cover_image_url,
-        created_by_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, $9)
+        campaign_start_date, campaign_end_date, event_date, campaign_status, cover_image_url,
+        created_by_user_id, business_timing_status, forkup_review_status,
+        forkup_review_requested_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, $12,
+        CASE WHEN $13 THEN NOW() ELSE NULL END
+      )
        RETURNING id`,
       [
         slug,
@@ -137,8 +204,12 @@ fundraiserRouter.post("/invites", async (req, res) => {
         body.campaignGoal ?? 0,
         startDate,
         endDate,
+        eventDate,
         coverImage,
         authUser.id,
+        businessTimingStatus,
+        forkupReviewStatus,
+        needsForkupReview,
       ],
     );
     const campaignId = campResult[0].id;
@@ -148,11 +219,13 @@ fundraiserRouter.post("/invites", async (req, res) => {
         `INSERT INTO campaign_methods (
           campaign_id, method_type, method_name, method_status,
           requires_business_acceptance, timing_status
-        ) VALUES ($1, $2, $3, 'draft', FALSE, 'ok')`,
+        ) VALUES ($1, $2, $3, 'draft', $4, $5)`,
         [
           campaignId,
           methodType,
           METHOD_LABELS[methodType] ?? methodType,
+          METHOD_REQUIRES_BUSINESS[methodType],
+          METHOD_REQUIRES_BUSINESS[methodType] ? methodTimingStatus : "ok",
         ],
       );
     }
@@ -284,7 +357,10 @@ fundraiserRouter.get("/invites/:token", async (req, res) => {
 
 /**
  * method: POST /api/fundraiser/invites/:token/accept
- * response: { success, invitationStatus, campaignSlug }
+ * response: { success, invitationStatus, campaignSlug, campaignStatus }
+ *
+ * Additive: after accept, promote draft campaign with the same launch rules as
+ * builder (ready_to_launch / live / invitation_phase).
  */
 fundraiserRouter.post("/invites/:token/accept", async (req, res) => {
   const connection = await pool.connect();
@@ -320,8 +396,15 @@ fundraiserRouter.post("/invites/:token/accept", async (req, res) => {
     );
 
     const { rows: campaign } = await connection.query<QueryResultRow>(
-      "SELECT slug FROM campaigns WHERE id = $1",
+      `SELECT slug, campaign_status, campaign_start_date
+       FROM campaigns WHERE id = $1`,
       [invite.campaign_id],
+    );
+
+    const campaignStatus = await promoteFundraiserDraftOnAccept(
+      connection,
+      Number(invite.campaign_id),
+      campaign[0]?.campaign_start_date ?? null,
     );
 
     await connection.query("COMMIT");
@@ -329,6 +412,7 @@ fundraiserRouter.post("/invites/:token/accept", async (req, res) => {
       success: true,
       invitationStatus: "accepted",
       campaignSlug: campaign[0]?.slug,
+      campaignStatus,
     });
   } catch (err) {
     await connection.query("ROLLBACK");

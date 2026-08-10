@@ -13,6 +13,7 @@ import {
   loadUserBusinessProfiles,
   loadUserNonprofitProfiles,
 } from "../lib/auth-profiles";
+import { assertUserMayLinkOrganization } from "../lib/assert-may-link-organization";
 
 export const authRouter = Router();
 
@@ -108,6 +109,20 @@ authRouter.post("/register", async (req, res) => {
     if (existing.length > 0) {
       res.status(409).json({ error: "An account with this email already exists" });
       return;
+    }
+
+    // Guard before creating the user so a rejected org link cannot orphan a row.
+    // New accounts use a non-matching userId so only unclaimed / memberless orgs pass.
+    if (organizationType && organizationId) {
+      const preLink = await assertUserMayLinkOrganization(pool, {
+        userId: -1,
+        organizationType,
+        organizationId: Number(organizationId),
+      });
+      if (!preLink.ok) {
+        res.status(preLink.status).json({ error: preLink.error });
+        return;
+      }
     }
 
     const passwordHash = await hashPassword(password);
@@ -223,6 +238,16 @@ authRouter.post("/link-organization", async (req, res) => {
 
     if (!organizationType || !organizationId) {
       res.status(400).json({ error: "organizationType and organizationId are required" });
+      return;
+    }
+
+    const mayLink = await assertUserMayLinkOrganization(pool, {
+      userId: user.id,
+      organizationType,
+      organizationId: Number(organizationId),
+    });
+    if (!mayLink.ok) {
+      res.status(mayLink.status).json({ error: mayLink.error });
       return;
     }
 

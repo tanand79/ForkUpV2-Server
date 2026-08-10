@@ -5,6 +5,7 @@ const express_1 = require("express");
 const auth_1 = require("../lib/auth");
 const pool_1 = require("../db/pool");
 const auth_profiles_1 = require("../lib/auth-profiles");
+const assert_may_link_organization_1 = require("../lib/assert-may-link-organization");
 exports.authRouter = (0, express_1.Router)();
 function normalizeEmail(raw) {
     return raw.trim().toLowerCase();
@@ -76,6 +77,17 @@ exports.authRouter.post("/register", async (req, res) => {
         if (existing.length > 0) {
             res.status(409).json({ error: "An account with this email already exists" });
             return;
+        }
+        if (organizationType && organizationId) {
+            const preLink = await (0, assert_may_link_organization_1.assertUserMayLinkOrganization)(pool_1.pool, {
+                userId: -1,
+                organizationType,
+                organizationId: Number(organizationId),
+            });
+            if (!preLink.ok) {
+                res.status(preLink.status).json({ error: preLink.error });
+                return;
+            }
         }
         const passwordHash = await (0, auth_1.hashPassword)(password);
         const { rows: userResult } = await pool_1.pool.query("INSERT INTO users (email, password_hash, full_name) VALUES ($1, $2, $3) RETURNING id", [normalizedEmail, passwordHash, fullName?.trim() ?? null]);
@@ -162,6 +174,15 @@ exports.authRouter.post("/link-organization", async (req, res) => {
         const { organizationType, organizationId, role } = req.body;
         if (!organizationType || !organizationId) {
             res.status(400).json({ error: "organizationType and organizationId are required" });
+            return;
+        }
+        const mayLink = await (0, assert_may_link_organization_1.assertUserMayLinkOrganization)(pool_1.pool, {
+            userId: user.id,
+            organizationType,
+            organizationId: Number(organizationId),
+        });
+        if (!mayLink.ok) {
+            res.status(mayLink.status).json({ error: mayLink.error });
             return;
         }
         const orgRole = ["owner", "admin", "manager", "viewer"].includes(role ?? "")

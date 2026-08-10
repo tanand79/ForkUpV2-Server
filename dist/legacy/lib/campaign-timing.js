@@ -68,6 +68,16 @@ function validateMethodDateRequirements(input) {
     if (!hasBusinessMethods(methods) && !endDate) {
         return "Campaign end date is required";
     }
+    const today = todayDateOnly();
+    if (startDate && today && startDate < today) {
+        return "Campaign start date cannot be in the past";
+    }
+    if (endDate && today && endDate < today) {
+        return "Campaign end date cannot be in the past";
+    }
+    if (eventDate && today && eventDate < today) {
+        return "Event date cannot be in the past";
+    }
     return null;
 }
 function evaluateBusinessMethodTiming(input) {
