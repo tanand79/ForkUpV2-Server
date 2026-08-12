@@ -7,6 +7,7 @@ exports.milesBetween = milesBetween;
 exports.isWithinRadiusMiles = isWithinRadiusMiles;
 exports.nearbyKeepDecision = nearbyKeepDecision;
 exports.geocodeUsZip = geocodeUsZip;
+exports.resolveUsZip = resolveUsZip;
 exports.geocodeUsCityState = geocodeUsCityState;
 exports.reverseGeocodeUs = reverseGeocodeUs;
 exports.DEFAULT_NEARBY_RADIUS_MILES = 8;
@@ -72,6 +73,12 @@ function nearbyKeepDecision(origin, rowLat, rowLng, radiusMiles, options) {
     };
 }
 async function geocodeUsZip(zipRaw) {
+    const place = await resolveUsZip(zipRaw);
+    if (!place)
+        return null;
+    return { latitude: place.latitude, longitude: place.longitude };
+}
+async function resolveUsZip(zipRaw) {
     const zip = zipRaw.replace(/\D/g, "").slice(0, 5);
     if (zip.length !== 5)
         return null;
@@ -89,7 +96,14 @@ async function geocodeUsZip(zipRaw) {
         const longitude = Number(place.longitude);
         if (!Number.isFinite(latitude) || !Number.isFinite(longitude))
             return null;
-        return { latitude, longitude };
+        const stateAbbr = (place["state abbreviation"] ?? "").trim().toUpperCase();
+        return {
+            zip,
+            latitude,
+            longitude,
+            city: place["place name"]?.trim() || null,
+            state: /^[A-Z]{2}$/.test(stateAbbr) ? stateAbbr : null,
+        };
     }
     catch {
         return null;

@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.uploadsRouter = void 0;
+const crypto_1 = __importDefault(require("crypto"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const express_1 = require("express");
@@ -13,6 +14,9 @@ const KIND_PREFIX = {
     cover: "covers",
     logo: "logos",
 };
+function imageContentHash(buffer) {
+    return crypto_1.default.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+}
 function saveImageToDisk(buffer, mimeType, prefix) {
     const dir = path_1.default.join(process.cwd(), "uploads", prefix);
     fs_1.default.mkdirSync(dir, { recursive: true });
@@ -21,8 +25,11 @@ function saveImageToDisk(buffer, mimeType, prefix) {
         : mimeType.includes("webp")
             ? "webp"
             : "jpg";
-    const filename = `${prefix.slice(0, -1) || "img"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    fs_1.default.writeFileSync(path_1.default.join(dir, filename), buffer);
+    const filename = `${prefix.slice(0, -1) || "img"}-${imageContentHash(buffer)}.${ext}`;
+    const filepath = path_1.default.join(dir, filename);
+    if (!fs_1.default.existsSync(filepath)) {
+        fs_1.default.writeFileSync(filepath, buffer);
+    }
     return `/uploads/${prefix}/${filename}`;
 }
 exports.uploadsRouter.post("/image", async (req, res) => {

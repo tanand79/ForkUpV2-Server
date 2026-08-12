@@ -6,9 +6,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.isDurableCampaignImageUrl = isDurableCampaignImageUrl;
 exports.normalizeDurableCampaignImageUrl = normalizeDurableCampaignImageUrl;
 exports.ensureDurableImageUrl = ensureDurableImageUrl;
+const crypto_1 = __importDefault(require("crypto"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const s3_1 = require("./s3");
+function imageContentHash(buffer) {
+    return crypto_1.default.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+}
 const MAX_BYTES = 8 * 1024 * 1024;
 const FETCH_MS = 15_000;
 function isDurableCampaignImageUrl(url) {
@@ -70,8 +74,11 @@ function saveImageToDisk(buffer, mimeType, prefix) {
             : mimeType.includes("gif")
                 ? "gif"
                 : "jpg";
-    const filename = `${prefix.slice(0, -1) || "img"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    fs_1.default.writeFileSync(path_1.default.join(dir, filename), buffer);
+    const filename = `${prefix.slice(0, -1) || "img"}-${imageContentHash(buffer)}.${ext}`;
+    const filepath = path_1.default.join(dir, filename);
+    if (!fs_1.default.existsSync(filepath)) {
+        fs_1.default.writeFileSync(filepath, buffer);
+    }
     return `/uploads/${prefix}/${filename}`;
 }
 async function ensureDurableImageUrl(imageUrl, prefix = "covers") {

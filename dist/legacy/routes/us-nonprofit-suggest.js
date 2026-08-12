@@ -116,19 +116,38 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
     try {
         const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
         let state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+        const zipRaw = typeof req.query.zip === "string" ? req.query.zip.trim() : "";
+        const zipDigits = zipRaw.replace(/\D/g, "").slice(0, 5);
         const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
         const limit = Number.isFinite(limitRaw) ? limitRaw : 8;
-        const origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
+        let origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
         const radiusMiles = (0, geo_distance_1.parseRadiusMiles)(req.query.radiusMiles);
         let derivedState = null;
         let derivedCity = null;
+        let explicitZip = false;
         if (!q) {
             res.status(400).json({ error: "q is required" });
             return;
         }
+        if (zipDigits.length === 5) {
+            const zipPlace = await (0, geo_distance_1.resolveUsZip)(zipDigits);
+            if (zipPlace) {
+                explicitZip = true;
+                origin = {
+                    latitude: zipPlace.latitude,
+                    longitude: zipPlace.longitude,
+                };
+                if (!state && zipPlace.state)
+                    state = zipPlace.state;
+                if (zipPlace.city)
+                    derivedCity = zipPlace.city;
+                if (zipPlace.state)
+                    derivedState = zipPlace.state;
+            }
+        }
         if (origin) {
             const cityParam = typeof req.query.city === "string" ? req.query.city.trim() : "";
-            if (cityParam)
+            if (cityParam && !derivedCity)
                 derivedCity = cityParam;
             if (!state || !derivedCity) {
                 const geo = await (0, geo_distance_1.reverseGeocodeUs)(origin.latitude, origin.longitude);
@@ -161,7 +180,7 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
                 appliedRadius = Math.max(radiusMiles, 25);
                 candidates = await filterIrsCandidatesByNearby(result.candidates, origin, appliedRadius, limit, derivedCity, derivedState || state || null);
             }
-            if (candidates.length === 0 && (derivedState || state)) {
+            if (candidates.length === 0 && !explicitZip && (derivedState || state)) {
                 softStateFallback = true;
                 const cityNorm = normCity(derivedCity);
                 const ranked = [...result.candidates].sort((a, b) => {
@@ -181,6 +200,7 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
         res.json({
             query: q,
             state: state || null,
+            zip: zipDigits.length === 5 ? zipDigits : null,
             matchCount: candidates.length,
             totalResults: result.totalResults,
             provider: result.provider,
@@ -194,6 +214,7 @@ exports.usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) 
                     radiusMiles: appliedRadius,
                     strict: !softStateFallback,
                     softStateFallback,
+                    fromZip: explicitZip,
                 }
                 : null,
         });

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { Router } from "express";
@@ -11,10 +12,16 @@ const KIND_PREFIX: Record<string, string> = {
   logo: "logos",
 };
 
+/** Short content hash so identical bytes reuse one on-disk file. */
+function imageContentHash(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+}
+
 /**
  * Writes an image buffer under `uploads/<prefix>/` and returns a public
  * `/uploads/<prefix>/<filename>` path (served by express.static in mount.ts).
  * Used when S3 is not configured so local/dev cover uploads still persist.
+ * Same bytes → same path (no duplicate files).
  */
 function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): string {
   const dir = path.join(process.cwd(), "uploads", prefix);
@@ -24,8 +31,11 @@ function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): stri
     : mimeType.includes("webp")
       ? "webp"
       : "jpg";
-  const filename = `${prefix.slice(0, -1) || "img"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  fs.writeFileSync(path.join(dir, filename), buffer);
+  const filename = `${prefix.slice(0, -1) || "img"}-${imageContentHash(buffer)}.${ext}`;
+  const filepath = path.join(dir, filename);
+  if (!fs.existsSync(filepath)) {
+    fs.writeFileSync(filepath, buffer);
+  }
   return `/uploads/${prefix}/${filename}`;
 }
 

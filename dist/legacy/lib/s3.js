@@ -1,10 +1,14 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isS3Enabled = isS3Enabled;
 exports.isS3Ref = isS3Ref;
 exports.uploadImageToS3 = uploadImageToS3;
 exports.presignGetUrl = presignGetUrl;
 exports.resolveStoredImageUrl = resolveStoredImageUrl;
+const crypto_1 = __importDefault(require("crypto"));
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
 const config_1 = require("../config");
@@ -36,9 +40,26 @@ async function uploadImageToS3(buffer, mimeType, prefix) {
         throw new Error("S3 is not configured (set S3_BUCKET)");
     }
     const ext = extensionForMime(mimeType);
-    const key = `${prefix}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    await getS3Client().send(new client_s3_1.PutObjectCommand({
-        Bucket: config_1.config.s3.bucket,
+    const hash = crypto_1.default.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+    const key = `${prefix}/${hash}.${ext}`;
+    const client = getS3Client();
+    const bucket = config_1.config.s3.bucket;
+    try {
+        await client.send(new client_s3_1.HeadObjectCommand({ Bucket: bucket, Key: key }));
+        return `${S3_PREFIX}${key}`;
+    }
+    catch (err) {
+        const status = err && typeof err === "object" && "$metadata" in err
+            ? err.$metadata
+                ?.httpStatusCode
+            : undefined;
+        const name = err && typeof err === "object" && "name" in err ? String(err.name) : "";
+        if (status !== 404 && name !== "NotFound" && name !== "NoSuchKey") {
+            throw err;
+        }
+    }
+    await client.send(new client_s3_1.PutObjectCommand({
+        Bucket: bucket,
         Key: key,
         Body: buffer,
         ContentType: mimeType,

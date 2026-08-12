@@ -1,4 +1,10 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import crypto from "crypto";
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../config";
 
@@ -43,6 +49,7 @@ function extensionForMime(mimeType: string): string {
 /**
  * Uploads an image buffer to S3 under `<prefix>/` and returns its `s3://<key>`
  * reference for storage. Throws if S3 is not configured.
+ * Same bytes → same key; skips Put when the object already exists.
  */
 export async function uploadImageToS3(
   buffer: Buffer,
@@ -53,11 +60,29 @@ export async function uploadImageToS3(
     throw new Error("S3 is not configured (set S3_BUCKET)");
   }
   const ext = extensionForMime(mimeType);
-  const key = `${prefix}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const hash = crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+  const key = `${prefix}/${hash}.${ext}`;
+  const client = getS3Client();
+  const bucket = config.s3.bucket;
 
-  await getS3Client().send(
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return `${S3_PREFIX}${key}`;
+  } catch (err: unknown) {
+    const status =
+      err && typeof err === "object" && "$metadata" in err
+        ? (err as { $metadata?: { httpStatusCode?: number } }).$metadata
+            ?.httpStatusCode
+        : undefined;
+    const name = err && typeof err === "object" && "name" in err ? String((err as { name: unknown }).name) : "";
+    if (status !== 404 && name !== "NotFound" && name !== "NoSuchKey") {
+      throw err;
+    }
+  }
+
+  await client.send(
     new PutObjectCommand({
-      Bucket: config.s3.bucket,
+      Bucket: bucket,
       Key: key,
       Body: buffer,
       ContentType: mimeType,

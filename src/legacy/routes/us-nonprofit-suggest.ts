@@ -6,6 +6,7 @@ import {
   milesBetween,
   parseLatLng,
   parseRadiusMiles,
+  resolveUsZip,
   reverseGeocodeUs,
   type LatLng,
 } from "../lib/geo-distance";
@@ -185,37 +186,61 @@ async function filterIrsCandidatesByNearby(
  * query: {
  *   q: string,
  *   state?: string (2-letter),
+ *   zip?: string (US ZIP — geocoded to origin + state/city; skips soft statewide fallback),
  *   limit?: number,
  *   lat?: number,
  *   lng?: number,
- *   radiusMiles?: number (default 8; used when lat+lng present)
+ *   radiusMiles?: number (default 8; used when lat+lng or zip present)
  * }
  *
  * When lat+lng are provided:
  * - reverse-geocodes to US city/state
  * - STRICT nearby filter (ZIP or city centroid within radiusMiles)
  * - Same-city matches are fast-pathed to avoid Next.js proxy timeouts
+ *
+ * When zip is provided (and resolves):
+ * - origin is the ZIP centroid (preferred over GPS lat/lng)
+ * - state/city come from Zippopotam
+ * - soft statewide fallback is disabled so results stay near the ZIP
  */
 usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
     let state = typeof req.query.state === "string" ? req.query.state.trim() : "";
+    const zipRaw = typeof req.query.zip === "string" ? req.query.zip.trim() : "";
+    const zipDigits = zipRaw.replace(/\D/g, "").slice(0, 5);
     const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
     const limit = Number.isFinite(limitRaw) ? limitRaw : 8;
-    const origin = parseLatLng(req.query.lat, req.query.lng);
+    let origin = parseLatLng(req.query.lat, req.query.lng);
     const radiusMiles = parseRadiusMiles(req.query.radiusMiles);
     let derivedState: string | null = null;
     let derivedCity: string | null = null;
+    let explicitZip = false;
 
     if (!q) {
       res.status(400).json({ error: "q is required" });
       return;
     }
 
+    if (zipDigits.length === 5) {
+      const zipPlace = await resolveUsZip(zipDigits);
+      if (zipPlace) {
+        explicitZip = true;
+        // Prefer ZIP centroid over browser GPS when the user typed a ZIP.
+        origin = {
+          latitude: zipPlace.latitude,
+          longitude: zipPlace.longitude,
+        };
+        if (!state && zipPlace.state) state = zipPlace.state;
+        if (zipPlace.city) derivedCity = zipPlace.city;
+        if (zipPlace.state) derivedState = zipPlace.state;
+      }
+    }
+
     if (origin) {
       const cityParam =
         typeof req.query.city === "string" ? req.query.city.trim() : "";
-      if (cityParam) derivedCity = cityParam;
+      if (cityParam && !derivedCity) derivedCity = cityParam;
 
       if (!state || !derivedCity) {
         const geo = await reverseGeocodeUs(origin.latitude, origin.longitude);
@@ -231,7 +256,7 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
       }
     }
 
-    // Pull a wider IRS page when GPS filtering will discard far cities.
+    // Pull a wider IRS page when GPS/ZIP filtering will discard far cities.
     const fetchLimit = origin ? Math.min(25, Math.max(limit * 3, 20)) : limit;
 
     const result = await suggestUsNonprofits({
@@ -267,8 +292,8 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
       }
 
       // Last resort: same-state text matches so nearby mode never hard-breaks search.
-      // Prefer orgs in the user's city when present.
-      if (candidates.length === 0 && (derivedState || state)) {
+      // Skipped for explicit ZIP searches — user asked for that ZIP, not the whole state.
+      if (candidates.length === 0 && !explicitZip && (derivedState || state)) {
         softStateFallback = true;
         const cityNorm = normCity(derivedCity);
         const ranked = [...result.candidates].sort((a, b) => {
@@ -289,6 +314,7 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
     res.json({
       query: q,
       state: state || null,
+      zip: zipDigits.length === 5 ? zipDigits : null,
       matchCount: candidates.length,
       totalResults: result.totalResults,
       provider: result.provider,
@@ -302,6 +328,7 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
             radiusMiles: appliedRadius,
             strict: !softStateFallback,
             softStateFallback,
+            fromZip: explicitZip,
           }
         : null,
     });

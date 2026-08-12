@@ -170,6 +170,26 @@ type ZippopotamResponse = {
 export async function geocodeUsZip(
   zipRaw: string,
 ): Promise<LatLng | null> {
+  const place = await resolveUsZip(zipRaw);
+  if (!place) return null;
+  return { latitude: place.latitude, longitude: place.longitude };
+}
+
+export type UsZipPlace = LatLng & {
+  zip: string;
+  city: string | null;
+  state: string | null;
+};
+
+/**
+ * Resolve a US ZIP to coordinates + city/state (Zippopotam.us).
+ *
+ * Inputs: ZIP string (digits extracted; needs 5 digits).
+ * Outputs: UsZipPlace or null when not found / request fails.
+ */
+export async function resolveUsZip(
+  zipRaw: string,
+): Promise<UsZipPlace | null> {
   const zip = zipRaw.replace(/\D/g, "").slice(0, 5);
   if (zip.length !== 5) return null;
   try {
@@ -183,7 +203,14 @@ export async function geocodeUsZip(
     const latitude = Number(place.latitude);
     const longitude = Number(place.longitude);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-    return { latitude, longitude };
+    const stateAbbr = (place["state abbreviation"] ?? "").trim().toUpperCase();
+    return {
+      zip,
+      latitude,
+      longitude,
+      city: place["place name"]?.trim() || null,
+      state: /^[A-Z]{2}$/.test(stateAbbr) ? stateAbbr : null,
+    };
   } catch {
     return null;
   }

@@ -481,7 +481,11 @@ profilesRouter.get("/nonprofits/search", async (req, res) => {
       );
     }
 
-    const where = clauses.length ? `WHERE ${clauses.join(" OR ")}` : "WHERE 1=1";
+    // Name + location together = narrow (e.g. org name + ZIP).
+    // Only AND when those are the sole clauses; otherwise keep OR for website/EIN mixes.
+    const joinOp =
+      q && location && clauses.length === 2 ? " AND " : " OR ";
+    const where = clauses.length ? `WHERE ${clauses.join(joinOp)}` : "WHERE 1=1";
     const { rows: rows } = await pool.query<NonprofitRow>(
       `SELECT * FROM nonprofits ${where} ORDER BY organization_name LIMIT 25`,
       params,

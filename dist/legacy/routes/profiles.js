@@ -345,7 +345,8 @@ exports.profilesRouter.get("/nonprofits/search", async (req, res) => {
             params.push(locLike, locLike, locLike);
             clauses.push(`(city ILIKE $${params.length - 2} OR state ILIKE $${params.length - 1} OR zip ILIKE $${params.length})`);
         }
-        const where = clauses.length ? `WHERE ${clauses.join(" OR ")}` : "WHERE 1=1";
+        const joinOp = q && location && clauses.length === 2 ? " AND " : " OR ";
+        const where = clauses.length ? `WHERE ${clauses.join(joinOp)}` : "WHERE 1=1";
         const { rows: rows } = await pool_1.pool.query(`SELECT * FROM nonprofits ${where} ORDER BY organization_name LIMIT 25`, params);
         const terms = { q, domain, ein, location };
         const candidates = rows

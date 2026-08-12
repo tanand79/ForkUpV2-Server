@@ -14,6 +14,12 @@ export declare function nearbyKeepDecision(origin: LatLng | null, rowLat: number
     distanceMiles: number | null;
 };
 export declare function geocodeUsZip(zipRaw: string): Promise<LatLng | null>;
+export type UsZipPlace = LatLng & {
+    zip: string;
+    city: string | null;
+    state: string | null;
+};
+export declare function resolveUsZip(zipRaw: string): Promise<UsZipPlace | null>;
 export declare function geocodeUsCityState(cityRaw: string, stateRaw: string): Promise<LatLng | null>;
 export declare function reverseGeocodeUs(latitude: number, longitude: number): Promise<{
     city: string | null;

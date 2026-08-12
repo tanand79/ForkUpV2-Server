@@ -17,9 +17,15 @@
  * a usable image (so callers can return 400 instead of persisting hotlinks).
  */
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { isS3Enabled, isS3Ref, uploadImageToS3 } from "./s3";
+
+/** Short content hash so identical bytes reuse one on-disk file. */
+function imageContentHash(buffer: Buffer): string {
+  return crypto.createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+}
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const FETCH_MS = 15_000;
@@ -88,8 +94,12 @@ function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): stri
       : mimeType.includes("gif")
         ? "gif"
         : "jpg";
-  const filename = `${prefix.slice(0, -1) || "img"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  fs.writeFileSync(path.join(dir, filename), buffer);
+  // Hash-based name: re-hosting the same photo does not create another file.
+  const filename = `${prefix.slice(0, -1) || "img"}-${imageContentHash(buffer)}.${ext}`;
+  const filepath = path.join(dir, filename);
+  if (!fs.existsSync(filepath)) {
+    fs.writeFileSync(filepath, buffer);
+  }
   return `/uploads/${prefix}/${filename}`;
 }
 
