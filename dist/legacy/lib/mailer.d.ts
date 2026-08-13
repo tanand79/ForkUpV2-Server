@@ -9,6 +9,8 @@ export type SendEmailInput = {
     stakeholderRole?: StakeholderRole | null;
     relatedToken?: string | null;
     onlyOnce?: boolean;
+    replyTo?: string | null;
+    fromName?: string | null;
 };
 export type SendEmailResult = {
     status: "sent" | "failed" | "skipped";

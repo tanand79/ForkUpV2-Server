@@ -25,6 +25,21 @@ export type SendEmailInput = {
    * (e.g. when a campaign is re-launched). Requires relatedToken to take effect.
    */
   onlyOnce?: boolean;
+  /**
+   * Optional Reply-To. When omitted and campaignId is set, mailer fills from
+   * the campaign nonprofit contact_email (platform SMTP From stays smtp_from).
+   */
+  replyTo?: string | null;
+  /**
+   * Optional From display name. When omitted and campaignId is set, mailer
+   * fills from nonprofit organization_name. Address remains smtp_from.
+   */
+  fromName?: string | null;
+  /**
+   * When true, keep plain Super Admin smtp_from (no nonprofit From name /
+   * Reply-To). Use for ForkUp-admin notices such as campaign review approval.
+   */
+  platformSender?: boolean;
 };
 
 export type SendEmailResult = {
@@ -36,6 +51,84 @@ export type SendEmailResult = {
 };
 
 let sesClient: SESClient | null = null;
+
+/**
+ * Escapes a display name for an RFC 5322 mailbox "Name" <addr> From header.
+ * Inputs: raw display name. Outputs: quoted-safe string (no surrounding quotes).
+ */
+function escapeFromDisplayName(name: string): string {
+  return name.replace(/[\r\n]+/g, " ").replace(/"/g, '\\"').trim();
+}
+
+/**
+ * Builds the SMTP From value: keeps authenticated smtp_from address, optionally
+ * prefixes the campaign creator / nonprofit display name.
+ * Inputs: smtpFrom address, optional fromName. Outputs: header From string.
+ */
+function formatSmtpFrom(smtpFrom: string, fromName?: string | null): string {
+  const addr = smtpFrom.trim();
+  const name = typeof fromName === "string" ? fromName.trim() : "";
+  if (!name) return addr;
+  return `"${escapeFromDisplayName(name)}" <${addr}>`;
+}
+
+/**
+ * Loads nonprofit contact_email + organization_name for a campaign so outbound
+ * mail can set Reply-To / From display name without per-caller wiring.
+ * Inputs: campaignId. Outputs: { replyTo, fromName } (nulls when missing).
+ */
+async function resolveCampaignSender(
+  campaignId: number,
+): Promise<{ replyTo: string | null; fromName: string | null }> {
+  try {
+    const { rows } = await pool.query<{
+      contact_email: string | null;
+      organization_name: string | null;
+    }>(
+      `SELECT n.contact_email, n.organization_name
+       FROM campaigns c
+       JOIN nonprofits n ON n.id = c.nonprofit_id
+       WHERE c.id = $1
+       LIMIT 1`,
+      [campaignId],
+    );
+    const row = rows[0];
+    if (!row) return { replyTo: null, fromName: null };
+    const email =
+      typeof row.contact_email === "string" ? row.contact_email.trim() : "";
+    const org =
+      typeof row.organization_name === "string"
+        ? row.organization_name.trim()
+        : "";
+    return {
+      replyTo: email.includes("@") ? email : null,
+      fromName: org || null,
+    };
+  } catch (err) {
+    console.error("[mailer] resolveCampaignSender failed:", err);
+    return { replyTo: null, fromName: null };
+  }
+}
+
+/**
+ * Fills replyTo / fromName from the campaign nonprofit when the caller did not
+ * supply them. Inputs: SendEmailInput. Outputs: same input with sender fields set.
+ */
+async function enrichSenderFromCampaign(
+  input: SendEmailInput,
+): Promise<SendEmailInput> {
+  if (input.platformSender) return input;
+  if (!input.campaignId) return input;
+  const needsReplyTo = !input.replyTo?.trim();
+  const needsFromName = !input.fromName?.trim();
+  if (!needsReplyTo && !needsFromName) return input;
+  const sender = await resolveCampaignSender(input.campaignId);
+  return {
+    ...input,
+    replyTo: needsReplyTo ? sender.replyTo : input.replyTo,
+    fromName: needsFromName ? sender.fromName : input.fromName,
+  };
+}
 
 function isSesConfigured(): boolean {
   return Boolean(
@@ -146,11 +239,16 @@ async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
           ? { user: s.smtp_user, pass: s.smtp_pass }
           : undefined,
     });
+    const replyTo =
+      typeof input.replyTo === "string" && input.replyTo.includes("@")
+        ? input.replyTo.trim()
+        : undefined;
     const info = await transport.sendMail({
-      from: s.smtp_from,
+      from: formatSmtpFrom(s.smtp_from, input.fromName),
       to: input.to,
       subject: input.subject,
       text: input.body,
+      ...(replyTo ? { replyTo } : {}),
     });
     const result: SendEmailResult = {
       status: "sent",
@@ -221,21 +319,25 @@ async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
 /**
  * Sends an email via Super Admin SMTP (or no-op). Legacy SES setting
  * is treated as SMTP. Never throws into the caller.
+ * When campaignId is set, Reply-To / From display name default to the
+ * campaign nonprofit contact_email / organization_name (From address stays smtp_from).
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
-  if (await alreadySent(input)) {
+  const enriched = await enrichSenderFromCampaign(input);
+
+  if (await alreadySent(enriched)) {
     return { status: "skipped", provider: "noop", messageId: null };
   }
 
   const provider = await resolveEmailProvider();
   if (provider === "noop") {
     const result: SendEmailResult = { status: "skipped", provider: "noop", messageId: null };
-    console.info(`[mailer] Provider=noop — skipping. type=${input.emailType} to=${input.to}`);
-    await recordEmailLog(input, result, null);
+    console.info(`[mailer] Provider=noop — skipping. type=${enriched.emailType} to=${enriched.to}`);
+    await recordEmailLog(enriched, result, null);
     return result;
   }
-  if (provider === "smtp") return sendViaSmtp(input);
-  return sendViaSes(input);
+  if (provider === "smtp") return sendViaSmtp(enriched);
+  return sendViaSes(enriched);
 }
 
 /** Resolves the public frontend base URL used to build stakeholder links. */

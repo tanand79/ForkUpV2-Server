@@ -10,6 +10,54 @@ const nodemailer_1 = __importDefault(require("nodemailer"));
 const pool_1 = require("../db/pool");
 const platform_settings_1 = require("./platform-settings");
 let sesClient = null;
+function escapeFromDisplayName(name) {
+    return name.replace(/[\r\n]+/g, " ").replace(/"/g, '\\"').trim();
+}
+function formatSmtpFrom(smtpFrom, fromName) {
+    const addr = smtpFrom.trim();
+    const name = typeof fromName === "string" ? fromName.trim() : "";
+    if (!name)
+        return addr;
+    return `"${escapeFromDisplayName(name)}" <${addr}>`;
+}
+async function resolveCampaignSender(campaignId) {
+    try {
+        const { rows } = await pool_1.pool.query(`SELECT n.contact_email, n.organization_name
+       FROM campaigns c
+       JOIN nonprofits n ON n.id = c.nonprofit_id
+       WHERE c.id = $1
+       LIMIT 1`, [campaignId]);
+        const row = rows[0];
+        if (!row)
+            return { replyTo: null, fromName: null };
+        const email = typeof row.contact_email === "string" ? row.contact_email.trim() : "";
+        const org = typeof row.organization_name === "string"
+            ? row.organization_name.trim()
+            : "";
+        return {
+            replyTo: email.includes("@") ? email : null,
+            fromName: org || null,
+        };
+    }
+    catch (err) {
+        console.error("[mailer] resolveCampaignSender failed:", err);
+        return { replyTo: null, fromName: null };
+    }
+}
+async function enrichSenderFromCampaign(input) {
+    if (!input.campaignId)
+        return input;
+    const needsReplyTo = !input.replyTo?.trim();
+    const needsFromName = !input.fromName?.trim();
+    if (!needsReplyTo && !needsFromName)
+        return input;
+    const sender = await resolveCampaignSender(input.campaignId);
+    return {
+        ...input,
+        replyTo: needsReplyTo ? sender.replyTo : input.replyTo,
+        fromName: needsFromName ? sender.fromName : input.fromName,
+    };
+}
 function isSesConfigured() {
     return Boolean(process.env.SES_FROM_EMAIL?.trim() && process.env.AWS_REGION?.trim());
 }
@@ -103,11 +151,15 @@ async function sendViaSmtp(input) {
                 ? { user: s.smtp_user, pass: s.smtp_pass }
                 : undefined,
         });
+        const replyTo = typeof input.replyTo === "string" && input.replyTo.includes("@")
+            ? input.replyTo.trim()
+            : undefined;
         const info = await transport.sendMail({
-            from: s.smtp_from,
+            from: formatSmtpFrom(s.smtp_from, input.fromName),
             to: input.to,
             subject: input.subject,
             text: input.body,
+            ...(replyTo ? { replyTo } : {}),
         });
         const result = {
             status: "sent",
@@ -173,19 +225,20 @@ async function sendViaSes(input) {
     }
 }
 async function sendEmail(input) {
-    if (await alreadySent(input)) {
+    const enriched = await enrichSenderFromCampaign(input);
+    if (await alreadySent(enriched)) {
         return { status: "skipped", provider: "noop", messageId: null };
     }
     const provider = await resolveEmailProvider();
     if (provider === "noop") {
         const result = { status: "skipped", provider: "noop", messageId: null };
-        console.info(`[mailer] Provider=noop — skipping. type=${input.emailType} to=${input.to}`);
-        await recordEmailLog(input, result, null);
+        console.info(`[mailer] Provider=noop — skipping. type=${enriched.emailType} to=${enriched.to}`);
+        await recordEmailLog(enriched, result, null);
         return result;
     }
     if (provider === "smtp")
-        return sendViaSmtp(input);
-    return sendViaSes(input);
+        return sendViaSmtp(enriched);
+    return sendViaSes(enriched);
 }
 function resolveFrontendBaseUrl() {
     const candidate = process.env.FRONTEND_URL?.split(",")[0]?.trim() ||

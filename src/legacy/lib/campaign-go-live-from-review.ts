@@ -294,6 +294,7 @@ export async function promoteCampaignAfterForkupApproval(
         body,
         emailType: "campaign_review_approved_live",
         campaignId,
+        platformSender: true,
         stakeholderRole: "nonprofit",
         relatedToken: `forkup-approve-${slug}`,
         onlyOnce: true,

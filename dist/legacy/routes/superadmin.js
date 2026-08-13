@@ -1099,6 +1099,381 @@ exports.superadminRouter.get("/organizations/:type/:id", async (req, res) => {
         res.status(500).json({ error: "Failed to load organization details" });
     }
 });
+function parseListQuery(req) {
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const limitRaw = Number(req.query.limit ?? 50);
+    const offsetRaw = Number(req.query.offset ?? 0);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+    const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+    return { search, limit, offset };
+}
+exports.superadminRouter.get("/overview", async (_req, res) => {
+    try {
+        const [users, nonprofits, businesses, campaigns, fundraisers, donations] = await Promise.all([
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM users`),
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM nonprofits`),
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM businesses`),
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM campaigns`),
+            pool_1.pool.query(`SELECT COUNT(DISTINCT user_id)::int AS c FROM campaign_fundraisers`),
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM donations`),
+        ]);
+        res.json({
+            users: users.rows[0]?.c ?? 0,
+            nonprofits: nonprofits.rows[0]?.c ?? 0,
+            businesses: businesses.rows[0]?.c ?? 0,
+            campaigns: campaigns.rows[0]?.c ?? 0,
+            fundraisers: fundraisers.rows[0]?.c ?? 0,
+            donations: donations.rows[0]?.c ?? 0,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load overview" });
+    }
+});
+exports.superadminRouter.get("/users", async (req, res) => {
+    try {
+        const { search, limit, offset } = parseListQuery(req);
+        const params = [];
+        let where = "";
+        if (search) {
+            params.push(`%${search.toLowerCase()}%`);
+            where = `WHERE LOWER(u.email) LIKE $1
+               OR LOWER(COALESCE(u.full_name, '')) LIKE $1
+               OR LOWER(COALESCE(u.username, '')) LIKE $1`;
+        }
+        const countSql = `SELECT COUNT(*)::int AS c FROM users u ${where}`;
+        const { rows: countRows } = await pool_1.pool.query(countSql, params);
+        const listParams = [...params, limit, offset];
+        const limIdx = params.length + 1;
+        const offIdx = params.length + 2;
+        const { rows } = await pool_1.pool.query(`SELECT u.id, u.email, u.full_name, u.username,
+              COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin,
+              u.created_at, u.updated_at,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'organizationType', ou.organization_type,
+                  'organizationId', ou.organization_id,
+                  'role', ou.role
+                ) ORDER BY ou.organization_type, ou.organization_id)
+                FROM organization_users ou WHERE ou.user_id = u.id
+              ), '[]'::json) AS memberships
+       FROM users u
+       ${where}
+       ORDER BY u.id DESC
+       LIMIT $${limIdx} OFFSET $${offIdx}`, listParams);
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            users: rows.map((r) => ({
+                id: Number(r.id),
+                email: r.email,
+                fullName: r.full_name ?? null,
+                username: r.username ?? null,
+                isPlatformAdmin: Boolean(r.is_platform_admin),
+                memberships: Array.isArray(r.memberships) ? r.memberships : [],
+                createdAt: r.created_at,
+                updatedAt: r.updated_at,
+            })),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load users" });
+    }
+});
+exports.superadminRouter.get("/roles", async (_req, res) => {
+    try {
+        const [platform, orgRoles, fundraiser] = await Promise.all([
+            pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM users WHERE COALESCE(is_platform_admin, FALSE) = TRUE`),
+            pool_1.pool.query(`SELECT organization_type, role, COUNT(*)::int AS c
+         FROM organization_users
+         GROUP BY organization_type, role
+         ORDER BY organization_type, role`),
+            pool_1.pool.query(`SELECT COUNT(DISTINCT user_id)::int AS c FROM campaign_fundraisers`),
+        ]);
+        res.json({
+            roles: [
+                {
+                    id: "platform_admin",
+                    roleName: "platform_admin",
+                    description: "Full platform Super Admin access",
+                    userCount: platform.rows[0]?.c ?? 0,
+                },
+                {
+                    id: "fundraiser",
+                    roleName: "fundraiser",
+                    description: "Campaign co-organizer / fundraiser invite sender",
+                    userCount: fundraiser.rows[0]?.c ?? 0,
+                },
+                ...orgRoles.rows.map((r) => ({
+                    id: `${r.organization_type}:${r.role}`,
+                    roleName: `${r.organization_type}_${r.role}`,
+                    description: `${String(r.organization_type)} organization ${String(r.role)}`,
+                    userCount: r.c ?? 0,
+                })),
+            ],
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load roles" });
+    }
+});
+exports.superadminRouter.get("/nonprofits", async (req, res) => {
+    try {
+        const { search, limit, offset } = parseListQuery(req);
+        const params = [];
+        let where = "";
+        if (search) {
+            params.push(`%${search.toLowerCase()}%`);
+            where = `WHERE LOWER(organization_name) LIKE $1
+               OR LOWER(COALESCE(slug, '')) LIKE $1
+               OR LOWER(COALESCE(contact_email, '')) LIKE $1
+               OR LOWER(COALESCE(ein, '')) LIKE $1`;
+        }
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM nonprofits ${where}`, params);
+        const listParams = [...params, limit, offset];
+        const { rows } = await pool_1.pool.query(`SELECT id, organization_name, slug, logo_url, website, contact_name, contact_email,
+              contact_phone, city, state, ein, verification_status, claim_status,
+              profile_status, created_at, updated_at
+       FROM nonprofits
+       ${where}
+       ORDER BY id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, listParams);
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            nonprofits: rows.map((n) => ({
+                id: Number(n.id),
+                organizationName: n.organization_name,
+                slug: n.slug,
+                logoUrl: n.logo_url ?? null,
+                website: n.website ?? null,
+                contactName: n.contact_name ?? null,
+                contactEmail: n.contact_email ?? null,
+                contactPhone: n.contact_phone ?? null,
+                city: n.city ?? null,
+                state: n.state ?? null,
+                ein: n.ein ?? null,
+                verificationStatus: n.verification_status ?? null,
+                claimStatus: n.claim_status ?? null,
+                profileStatus: n.profile_status ?? null,
+                createdAt: n.created_at,
+                updatedAt: n.updated_at,
+            })),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load nonprofits" });
+    }
+});
+exports.superadminRouter.get("/businesses", async (req, res) => {
+    try {
+        const { search, limit, offset } = parseListQuery(req);
+        const params = [];
+        let where = "";
+        if (search) {
+            params.push(`%${search.toLowerCase()}%`);
+            where = `WHERE LOWER(b.business_name) LIKE $1
+               OR LOWER(COALESCE(b.slug, '')) LIKE $1
+               OR LOWER(COALESCE(b.contact_email, '')) LIKE $1`;
+        }
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM businesses b ${where}`, params);
+        const listParams = [...params, limit, offset];
+        const { rows } = await pool_1.pool.query(`SELECT b.id, b.business_name, b.slug, b.business_type, b.logo_url, b.website,
+              b.contact_name, b.contact_email, b.contact_phone,
+              b.business_status, b.claim_status, b.profile_status,
+              b.created_at, b.updated_at,
+              (SELECT COUNT(*)::int FROM business_locations bl WHERE bl.business_id = b.id) AS location_count,
+              (SELECT COUNT(*)::int FROM business_locations bl
+                WHERE bl.business_id = b.id
+                  AND (bl.ach_account_last4 IS NOT NULL OR bl.ach_bank_name IS NOT NULL)
+              ) AS ach_location_count
+       FROM businesses b
+       ${where}
+       ORDER BY b.id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, listParams);
+        const businessIds = rows.map((r) => Number(r.id));
+        const locationsByBiz = new Map();
+        if (businessIds.length > 0) {
+            const { rows: locRows } = await pool_1.pool.query(`SELECT id, business_id, location_name, city, state,
+                ach_bank_name, ach_account_last4, ach_authorization_status,
+                ach_signature_path
+         FROM business_locations
+         WHERE business_id = ANY($1::int[])
+         ORDER BY location_name`, [businessIds]);
+            for (const loc of locRows) {
+                const bid = Number(loc.business_id);
+                const list = locationsByBiz.get(bid) ?? [];
+                list.push(loc);
+                locationsByBiz.set(bid, list);
+            }
+        }
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            businesses: rows.map((b) => {
+                const locs = locationsByBiz.get(Number(b.id)) ?? [];
+                return {
+                    id: Number(b.id),
+                    businessName: b.business_name,
+                    slug: b.slug,
+                    businessType: b.business_type ?? null,
+                    logoUrl: b.logo_url ?? null,
+                    website: b.website ?? null,
+                    contactName: b.contact_name ?? null,
+                    contactEmail: b.contact_email ?? null,
+                    contactPhone: b.contact_phone ?? null,
+                    businessStatus: b.business_status ?? null,
+                    claimStatus: b.claim_status ?? null,
+                    profileStatus: b.profile_status ?? null,
+                    locationCount: Number(b.location_count ?? 0),
+                    achLocationCount: Number(b.ach_location_count ?? 0),
+                    locations: locs.map((l) => ({
+                        id: Number(l.id),
+                        locationName: l.location_name,
+                        city: l.city ?? null,
+                        state: l.state ?? null,
+                        achBankName: l.ach_bank_name ?? null,
+                        achAccountLast4: l.ach_account_last4 ?? null,
+                        achAuthorizationStatus: l.ach_authorization_status ?? null,
+                        hasAchData: Boolean(l.ach_bank_name || l.ach_account_last4),
+                        hasSignature: Boolean(l.ach_signature_path),
+                    })),
+                    createdAt: b.created_at,
+                    updatedAt: b.updated_at,
+                };
+            }),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load businesses" });
+    }
+});
+exports.superadminRouter.get("/campaigns", async (req, res) => {
+    try {
+        const { search, limit, offset } = parseListQuery(req);
+        const status = typeof req.query.status === "string" ? req.query.status.trim().toLowerCase() : "";
+        const params = [];
+        const clauses = [];
+        if (search) {
+            params.push(`%${search.toLowerCase()}%`);
+            clauses.push(`(LOWER(c.campaign_name) LIKE $${params.length} OR LOWER(COALESCE(c.slug, '')) LIKE $${params.length}
+          OR LOWER(COALESCE(n.organization_name, '')) LIKE $${params.length})`);
+        }
+        if (status) {
+            params.push(status);
+            clauses.push(`LOWER(c.campaign_status) = $${params.length}`);
+        }
+        const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*)::int AS c
+       FROM campaigns c
+       LEFT JOIN nonprofits n ON n.id = c.nonprofit_id
+       ${where}`, params);
+        const listParams = [...params, limit, offset];
+        const { rows } = await pool_1.pool.query(`SELECT c.id, c.slug, c.campaign_name, c.campaign_goal, c.campaign_status,
+              c.campaign_start_date, c.campaign_end_date, c.raised,
+              c.created_at, c.updated_at,
+              n.organization_name AS nonprofit_name
+       FROM campaigns c
+       LEFT JOIN nonprofits n ON n.id = c.nonprofit_id
+       ${where}
+       ORDER BY c.updated_at DESC NULLS LAST, c.id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, listParams);
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            campaigns: rows.map((c) => ({
+                id: Number(c.id),
+                slug: c.slug,
+                name: c.campaign_name,
+                nonprofit: c.nonprofit_name ?? null,
+                status: c.campaign_status ?? null,
+                goal: c.campaign_goal != null ? Number(c.campaign_goal) : null,
+                raised: Number(c.raised ?? 0),
+                startDate: c.campaign_start_date
+                    ? String(c.campaign_start_date).slice(0, 10)
+                    : null,
+                endDate: c.campaign_end_date ? String(c.campaign_end_date).slice(0, 10) : null,
+                createdAt: c.created_at,
+                updatedAt: c.updated_at,
+            })),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load campaigns" });
+    }
+});
+exports.superadminRouter.get("/fundraisers", async (req, res) => {
+    try {
+        const { search, limit, offset } = parseListQuery(req);
+        const params = [];
+        let searchClause = "";
+        if (search) {
+            params.push(`%${search.toLowerCase()}%`);
+            searchClause = `AND (LOWER(u.email) LIKE $1 OR LOWER(COALESCE(u.full_name, '')) LIKE $1)`;
+        }
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM (
+         SELECT DISTINCT cf.user_id
+         FROM campaign_fundraisers cf
+         JOIN users u ON u.id = cf.user_id
+         WHERE 1=1 ${searchClause}
+       ) t`, params);
+        const listParams = [...params, limit, offset];
+        const { rows } = await pool_1.pool.query(`SELECT u.id, u.email, u.full_name, u.created_at,
+              COUNT(DISTINCT cf.campaign_id)::int AS campaign_count,
+              MAX(cf.status) AS sample_status
+       FROM campaign_fundraisers cf
+       JOIN users u ON u.id = cf.user_id
+       WHERE 1=1 ${searchClause}
+       GROUP BY u.id, u.email, u.full_name, u.created_at
+       ORDER BY campaign_count DESC, u.id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, listParams);
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            fundraisers: rows.map((r) => ({
+                id: Number(r.id),
+                email: r.email,
+                fullName: r.full_name ?? null,
+                campaignCount: Number(r.campaign_count ?? 0),
+                status: r.sample_status ?? null,
+                createdAt: r.created_at,
+            })),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load fundraisers" });
+    }
+});
+exports.superadminRouter.get("/donations", async (req, res) => {
+    try {
+        const { limit, offset } = parseListQuery(req);
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*)::int AS c FROM donations`);
+        const { rows } = await pool_1.pool.query(`SELECT d.id, d.amount, d.donation_type, d.payment_status, d.created_at,
+              c.campaign_name AS campaign_name, c.slug AS campaign_slug
+       FROM donations d
+       LEFT JOIN campaigns c ON c.id = d.campaign_id
+       ORDER BY d.id DESC
+       LIMIT $1 OFFSET $2`, [limit, offset]);
+        res.json({
+            totalCount: countRows[0]?.c ?? 0,
+            donations: rows.map((d) => ({
+                id: Number(d.id),
+                amount: Number(d.amount ?? 0),
+                donationType: d.donation_type ?? null,
+                paymentStatus: d.payment_status ?? null,
+                campaignName: d.campaign_name ?? null,
+                campaignSlug: d.campaign_slug ?? null,
+                createdAt: d.created_at,
+            })),
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load donations" });
+    }
+});
 async function buildSmtpTransportFromSettings() {
     const s = await (0, platform_settings_1.getPlatformSettings)([
         "smtp_host",

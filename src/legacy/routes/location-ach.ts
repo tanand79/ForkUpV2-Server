@@ -242,11 +242,11 @@ locationAchRouter.post("/locations/:locationId/ach", async (req, res) => {
          ach_routing_number = COALESCE($4, ach_routing_number),
          ach_account_number = COALESCE($5, ach_account_number),
          ach_account_last4 = COALESCE($6, ach_account_last4),
-         ach_authorization_status = $7,
+         ach_authorization_status = $7::varchar,
          ach_authorized_by = COALESCE($8, ach_authorized_by),
          ach_authorized_email = COALESCE($9, ach_authorized_email),
          ach_authorized_at = CASE
-           WHEN $7 = 'authorized' THEN COALESCE(ach_authorized_at, NOW())
+           WHEN $7::text = 'authorized' THEN COALESCE(ach_authorized_at, NOW())
            ELSE ach_authorized_at
          END,
          ach_last_updated_at = NOW(),
