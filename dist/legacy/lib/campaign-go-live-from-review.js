@@ -175,6 +175,7 @@ async function promoteCampaignAfterForkupApproval(slug) {
                 body,
                 emailType: "campaign_review_approved_live",
                 campaignId,
+                platformSender: true,
                 stakeholderRole: "nonprofit",
                 relatedToken: `forkup-approve-${slug}`,
                 onlyOnce: true,

@@ -45,6 +45,8 @@ async function resolveCampaignSender(campaignId) {
     }
 }
 async function enrichSenderFromCampaign(input) {
+    if (input.platformSender)
+        return input;
     if (!input.campaignId)
         return input;
     const needsReplyTo = !input.replyTo?.trim();

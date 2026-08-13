@@ -11,6 +11,7 @@ export type SendEmailInput = {
     onlyOnce?: boolean;
     replyTo?: string | null;
     fromName?: string | null;
+    platformSender?: boolean;
 };
 export type SendEmailResult = {
     status: "sent" | "failed" | "skipped";

@@ -10,6 +10,9 @@ export type StakeholderRole =
   | "supporter"
   | "admin";
 
+/** Who the message is conceptually from (From display name + Reply-To). */
+export type EmailSenderParty = "nonprofit" | "business" | "platform";
+
 export type SendEmailInput = {
   to: string;
   name?: string | null;
@@ -17,6 +20,8 @@ export type SendEmailInput = {
   body: string;
   emailType: string;
   campaignId?: number | null;
+  /** Required when senderParty is "business" (or inferred) so Reply-To / From name resolve. */
+  businessId?: number | null;
   stakeholderRole?: StakeholderRole | null;
   relatedToken?: string | null;
   /**
@@ -26,18 +31,26 @@ export type SendEmailInput = {
    */
   onlyOnce?: boolean;
   /**
-   * Optional Reply-To. When omitted and campaignId is set, mailer fills from
-   * the campaign nonprofit contact_email (platform SMTP From stays smtp_from).
+   * Optional Reply-To. When omitted, mailer may fill from senderParty resolution.
    */
   replyTo?: string | null;
   /**
-   * Optional From display name. When omitted and campaignId is set, mailer
-   * fills from nonprofit organization_name. Address remains smtp_from.
+   * Optional From display name. When omitted, mailer may fill from senderParty.
+   * Address always remains Super Admin smtp_from.
    */
   fromName?: string | null;
   /**
-   * When true, keep plain Super Admin smtp_from (no nonprofit From name /
-   * Reply-To). Use for ForkUp-admin notices such as campaign review approval.
+   * Explicit sender party. When omitted, inferred globally:
+   * - platformSender / admin-style → platform
+   * - stakeholderRole business → nonprofit (NPO → business)
+   * - stakeholderRole nonprofit + businessId → business (business → NPO)
+   * - otherwise → platform
+   */
+  senderParty?: EmailSenderParty;
+  /**
+   * When true, keep plain Super Admin smtp_from (no org From name / Reply-To
+   * unless the caller already set fromName / replyTo). Prefer senderParty:
+   * "platform" for new code; this flag remains for existing call sites.
    */
   platformSender?: boolean;
 };
@@ -73,11 +86,10 @@ function formatSmtpFrom(smtpFrom: string, fromName?: string | null): string {
 }
 
 /**
- * Loads nonprofit contact_email + organization_name for a campaign so outbound
- * mail can set Reply-To / From display name without per-caller wiring.
+ * Loads nonprofit contact_email + organization_name for a campaign.
  * Inputs: campaignId. Outputs: { replyTo, fromName } (nulls when missing).
  */
-async function resolveCampaignSender(
+async function resolveNonprofitSender(
   campaignId: number,
 ): Promise<{ replyTo: string | null; fromName: string | null }> {
   try {
@@ -105,24 +117,84 @@ async function resolveCampaignSender(
       fromName: org || null,
     };
   } catch (err) {
-    console.error("[mailer] resolveCampaignSender failed:", err);
+    console.error("[mailer] resolveNonprofitSender failed:", err);
     return { replyTo: null, fromName: null };
   }
 }
 
 /**
- * Fills replyTo / fromName from the campaign nonprofit when the caller did not
- * supply them. Inputs: SendEmailInput. Outputs: same input with sender fields set.
+ * Loads business contact_email + business_name for business→NPO style mail.
+ * Inputs: businessId. Outputs: { replyTo, fromName } (nulls when missing).
+ */
+async function resolveBusinessSender(
+  businessId: number,
+): Promise<{ replyTo: string | null; fromName: string | null }> {
+  try {
+    const { rows } = await pool.query<{
+      contact_email: string | null;
+      business_name: string | null;
+    }>(
+      `SELECT contact_email, business_name FROM businesses WHERE id = $1 LIMIT 1`,
+      [businessId],
+    );
+    const row = rows[0];
+    if (!row) return { replyTo: null, fromName: null };
+    const email =
+      typeof row.contact_email === "string" ? row.contact_email.trim() : "";
+    const name =
+      typeof row.business_name === "string" ? row.business_name.trim() : "";
+    return {
+      replyTo: email.includes("@") ? email : null,
+      fromName: name || null,
+    };
+  } catch (err) {
+    console.error("[mailer] resolveBusinessSender failed:", err);
+    return { replyTo: null, fromName: null };
+  }
+}
+
+/**
+ * Global sender-party rule (NPO→business / business→NPO / ForkUp platform).
+ * Inputs: SendEmailInput. Outputs: resolved EmailSenderParty.
+ */
+function inferSenderParty(input: SendEmailInput): EmailSenderParty {
+  if (input.platformSender) return "platform";
+  if (input.senderParty === "platform" || input.senderParty === "nonprofit" || input.senderParty === "business") {
+    return input.senderParty;
+  }
+  // NPO → business (invites, lifecycle, settlement to partners, etc.)
+  if (input.stakeholderRole === "business") return "nonprofit";
+  // Business → NPO when we know which business acted
+  if (input.stakeholderRole === "nonprofit" && input.businessId) return "business";
+  // Admin / supporter / nonprofit system notices / unknown → ForkUp platform
+  return "platform";
+}
+
+/**
+ * Fills replyTo / fromName from the inferred sender party when the caller did
+ * not supply them. Never changes the SMTP From address (always smtp_from).
+ * Inputs: SendEmailInput. Outputs: same input with sender fields set.
  */
 async function enrichSenderFromCampaign(
   input: SendEmailInput,
 ): Promise<SendEmailInput> {
-  if (input.platformSender) return input;
-  if (!input.campaignId) return input;
   const needsReplyTo = !input.replyTo?.trim();
   const needsFromName = !input.fromName?.trim();
   if (!needsReplyTo && !needsFromName) return input;
-  const sender = await resolveCampaignSender(input.campaignId);
+
+  const party = inferSenderParty(input);
+  if (party === "platform") return input;
+
+  let sender: { replyTo: string | null; fromName: string | null } = {
+    replyTo: null,
+    fromName: null,
+  };
+  if (party === "nonprofit" && input.campaignId) {
+    sender = await resolveNonprofitSender(input.campaignId);
+  } else if (party === "business" && input.businessId) {
+    sender = await resolveBusinessSender(input.businessId);
+  }
+
   return {
     ...input,
     replyTo: needsReplyTo ? sender.replyTo : input.replyTo,
@@ -319,8 +391,11 @@ async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
 /**
  * Sends an email via Super Admin SMTP (or no-op). Legacy SES setting
  * is treated as SMTP. Never throws into the caller.
- * When campaignId is set, Reply-To / From display name default to the
- * campaign nonprofit contact_email / organization_name (From address stays smtp_from).
+ * Global From/Reply-To rule (address always smtp_from):
+ * - NPO → business (stakeholderRole business) → nonprofit name / contact
+ * - Business → NPO (senderParty business or nonprofit + businessId) → business
+ * - ForkUp admin / system (platformSender or default) → plain smtp_from
+ * Explicit fromName / replyTo always win when provided.
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
   const enriched = await enrichSenderFromCampaign(input);

@@ -296,6 +296,9 @@ fundraiserRouter.post("/invites", async (req, res) => {
         campaignId,
         stakeholderRole: "nonprofit",
         relatedToken: token,
+        platformSender: true,
+        fromName: fundraiserName,
+        replyTo: fundraiserEmail.includes("@") ? fundraiserEmail : null,
       });
     }
 

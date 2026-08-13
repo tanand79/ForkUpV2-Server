@@ -92,6 +92,7 @@ async function notifyNonprofitOfBusinessResponse(
   const email = typeof row?.contact_email === "string" ? row.contact_email.trim() : "";
   if (!row || !email) return;
   const dashUrl = `${resolveFrontendBaseUrl()}/?step=business-invite-flow&campaign=${row.campaign_slug}`;
+  // Global mailer rule: stakeholder nonprofit + businessId → From/Reply-To = business.
   await sendEmail({
     to: email,
     name: typeof row.contact_name === "string" ? row.contact_name : null,
@@ -103,6 +104,8 @@ async function notifyNonprofitOfBusinessResponse(
       `— ForkUp`,
     emailType: `business_invite_${response}`,
     campaignId,
+    businessId,
+    senderParty: "business",
     stakeholderRole: "nonprofit",
   });
 }
@@ -1062,6 +1065,8 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
           `— ForkUp`,
         emailType: "nonprofit_campaign_invitation",
         campaignId,
+        businessId,
+        senderParty: "business",
         stakeholderRole: "nonprofit",
         relatedToken: token,
       });
