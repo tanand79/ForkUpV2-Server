@@ -11,6 +11,8 @@ const TRACK_DISPLAY = {
     pending_setup: "Setup needed",
     needs_forkup_review: "Needs ForkUp Review",
     limited_promotion_window: "Limited Promotion Window",
+    tight_timeline: "Tight Timeline",
+    too_soon: "Too Soon",
 };
 function isAccepted(status) {
     return ["accepted", "ready", "live", "completed"].includes(status);
@@ -25,12 +27,16 @@ function buildCampaignVisibility(input) {
     const missingSetup = accepted.filter((p) => String(p.setupStatus) === "needs_info" ||
         String(p.settlementReadyStatus) === "needs_info" ||
         String(p.inviteStatus) === "needs_info");
-    const timingGate = input.businessTimingStatus === "limited_promotion_window"
-        ? "limited_promotion_window"
-        : input.businessTimingStatus === "needs_forkup_review" ||
-            input.forkupReviewStatus === "pending"
-            ? "needs_forkup_review"
-            : null;
+    const timingGate = input.businessTimingStatus === "too_soon"
+        ? "too_soon"
+        : input.businessTimingStatus === "tight_timeline"
+            ? "tight_timeline"
+            : input.businessTimingStatus === "limited_promotion_window"
+                ? "limited_promotion_window"
+                : input.businessTimingStatus === "needs_forkup_review" ||
+                    input.forkupReviewStatus === "pending"
+                    ? "needs_forkup_review"
+                    : null;
     const basicsReady = Boolean(input.storyPresent && input.endDate);
     let online = "not_selected";
     if (methods.includes("virtual_donations")) {
@@ -97,6 +103,12 @@ function buildCampaignVisibility(input) {
         }
         else if (t.status === "limited_promotion_window") {
             pending.push(`${t.label}: Limited Promotion Window`);
+        }
+        else if (t.status === "tight_timeline") {
+            pending.push(`${t.label}: Tight Timeline — confirm business or request review`);
+        }
+        else if (t.status === "too_soon") {
+            pending.push(`${t.label}: Too Soon — change date or switch methods`);
         }
         else {
             pending.push(`${t.label}: ${t.display}`);

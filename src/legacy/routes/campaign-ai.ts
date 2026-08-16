@@ -405,6 +405,20 @@ campaignAiRouter.get("/:slug/health", async (req, res) => {
           "Limited promotion window — Full Success Engine runway is reduced for late acceptances.",
       });
     }
+    if (String(camp.business_timing_status) === "tight_timeline") {
+      nudges.push({
+        severity: "warn",
+        message:
+          "Tight timeline (8–20 days): confirm an existing business agreement, submit for ForkUp review, or switch to Online Donation / Ambassador Sharing.",
+      });
+    }
+    if (String(camp.business_timing_status) === "too_soon") {
+      nudges.push({
+        severity: "critical",
+        message:
+          "Too soon (0–7 days) for a new business-based campaign. Change the date or continue with Online Donation / Ambassador Sharing only.",
+      });
+    }
 
     const { rows: seRows } = await pool.query<QueryResultRow>(
       `SELECT COUNT(*)::int AS n FROM success_engine_actions WHERE campaign_id = $1`,

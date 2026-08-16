@@ -39,6 +39,8 @@ async function notifyNonprofitOfBusinessResponse(campaignId, businessId, respons
             `— ForkUp`,
         emailType: `business_invite_${response}`,
         campaignId,
+        businessId,
+        senderParty: "business",
         stakeholderRole: "nonprofit",
     });
 }
@@ -521,7 +523,9 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
         if (promoStatus === "limited_promotion_window") {
             await connection.query(`UPDATE campaigns SET
            business_timing_status = CASE
-             WHEN business_timing_status = 'needs_forkup_review' THEN business_timing_status
+             WHEN business_timing_status IN (
+               'needs_forkup_review', 'tight_timeline', 'too_soon'
+             ) THEN business_timing_status
              ELSE 'limited_promotion_window'
            END,
            updated_at = NOW()
@@ -529,7 +533,9 @@ exports.businessRouter.post("/invitations/:token/accept", async (req, res) => {
             if (timingRow?.method_id) {
                 await connection.query(`UPDATE campaign_methods SET
              timing_status = CASE
-               WHEN timing_status = 'needs_forkup_review' THEN timing_status
+               WHEN timing_status IN (
+                 'needs_forkup_review', 'tight_timeline', 'too_soon'
+               ) THEN timing_status
                ELSE 'limited_promotion_window'
              END,
              updated_at = NOW()
@@ -780,6 +786,8 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
                     `— ForkUp`,
                 emailType: "nonprofit_campaign_invitation",
                 campaignId,
+                businessId,
+                senderParty: "business",
                 stakeholderRole: "nonprofit",
                 relatedToken: token,
             });

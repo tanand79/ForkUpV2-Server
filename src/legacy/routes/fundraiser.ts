@@ -21,6 +21,7 @@ import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { METHOD_LABELS, METHOD_REQUIRES_BUSINESS } from "../lib/methods";
 import {
   evaluateBusinessMethodTiming,
+  hasBusinessMethods,
   validateMethodDateRequirements,
 } from "../lib/campaign-timing";
 import { uniqueCampaignSlug } from "../lib/slug";
@@ -174,16 +175,25 @@ fundraiserRouter.post("/invites", async (req, res) => {
       startDate,
       eventDate,
     });
+    if (timingEval.status === "too_soon" && hasBusinessMethods(methods)) {
+      res.status(400).json({
+        error:
+          "This start/event date is too soon for a new business-based campaign (0–7 days). Change the date or continue with Online Donation / Ambassador Sharing only.",
+        timing: timingEval,
+      });
+      return;
+    }
     const submitForForkupReview = Boolean(body.submitForForkupReview);
-    const needsForkupReview =
-      submitForForkupReview || timingEval.status === "needs_forkup_review";
-    const businessTimingStatus = needsForkupReview
+    const wantsForkupReview =
+      submitForForkupReview && timingEval.status === "tight_timeline";
+    const businessTimingStatus = wantsForkupReview
       ? "needs_forkup_review"
-      : "ok";
-    const forkupReviewStatus = needsForkupReview ? "pending" : "none";
-    const methodTimingStatus = needsForkupReview
+      : timingEval.status;
+    const forkupReviewStatus = wantsForkupReview ? "pending" : "none";
+    const methodTimingStatus = wantsForkupReview
       ? "needs_forkup_review"
-      : "ok";
+      : timingEval.status;
+    const needsForkupReview = wantsForkupReview;
 
     const fundraiserName = authUser.fullName?.trim() || authUser.email;
     const fundraiserEmail = authUser.email;

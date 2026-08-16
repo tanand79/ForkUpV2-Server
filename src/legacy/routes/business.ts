@@ -706,7 +706,9 @@ businessRouter.post("/invitations/:token/accept", async (req, res) => {
       await connection.query(
         `UPDATE campaigns SET
            business_timing_status = CASE
-             WHEN business_timing_status = 'needs_forkup_review' THEN business_timing_status
+             WHEN business_timing_status IN (
+               'needs_forkup_review', 'tight_timeline', 'too_soon'
+             ) THEN business_timing_status
              ELSE 'limited_promotion_window'
            END,
            updated_at = NOW()
@@ -717,7 +719,9 @@ businessRouter.post("/invitations/:token/accept", async (req, res) => {
         await connection.query(
           `UPDATE campaign_methods SET
              timing_status = CASE
-               WHEN timing_status = 'needs_forkup_review' THEN timing_status
+               WHEN timing_status IN (
+                 'needs_forkup_review', 'tight_timeline', 'too_soon'
+               ) THEN timing_status
                ELSE 'limited_promotion_window'
              END,
              updated_at = NOW()

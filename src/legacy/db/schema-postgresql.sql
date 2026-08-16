@@ -141,12 +141,23 @@ CREATE TABLE IF NOT EXISTS campaigns (
     CHECK (business_timing_status IN (
       'ok',
       'needs_forkup_review',
-      'limited_promotion_window'
+      'limited_promotion_window',
+      'tight_timeline',
+      'too_soon'
     )),
   forkup_review_status VARCHAR(30) NOT NULL DEFAULT 'none'
     CHECK (forkup_review_status IN ('none', 'pending', 'approved', 'denied', 'changes_requested')),
   forkup_review_reason TEXT,
   forkup_review_requested_at TIMESTAMP,
+  -- Timeline Check: organizer already has a business/venue confirmed (8–20 day band)
+  confirmed_business_name VARCHAR(255),
+  confirmed_contact_name VARCHAR(255),
+  confirmed_contact_email VARCHAR(255),
+  confirmed_method VARCHAR(30)
+    CHECK (confirmed_method IS NULL OR confirmed_method IN ('email', 'phone', 'in_person')),
+  confirmed_status VARCHAR(80),
+  confirmed_notes TEXT,
+  business_confirmed_at TIMESTAMP,
   created_by_user_id INTEGER,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -203,12 +214,14 @@ CREATE TABLE IF NOT EXISTS campaign_methods (
   method_status VARCHAR(30) NOT NULL DEFAULT 'draft'
     CHECK (method_status IN ('draft', 'invited', 'pending_acceptance', 'accepted', 'scheduled', 'live', 'completed', 'closed')),
   requires_business_acceptance BOOLEAN NOT NULL DEFAULT TRUE,
-  -- Nick V2 Layer 2: per-method timing gate (30-day / 21-day rules)
+  -- Nick V2 Layer 2: per-method timing gate (30 / 21–29 / 8–20 / 0–7 bands)
   timing_status VARCHAR(40) NOT NULL DEFAULT 'ok'
     CHECK (timing_status IN (
       'ok',
       'needs_forkup_review',
-      'limited_promotion_window'
+      'limited_promotion_window',
+      'tight_timeline',
+      'too_soon'
     )),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

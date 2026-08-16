@@ -1,5 +1,5 @@
 import type { MethodType } from "../types/campaign";
-export type VisibilityTrackStatus = "not_selected" | "ready" | "waiting_on_business_acceptance" | "event_details_needed" | "payment_setup_needed" | "pending_setup" | "needs_forkup_review" | "limited_promotion_window";
+export type VisibilityTrackStatus = "not_selected" | "ready" | "waiting_on_business_acceptance" | "event_details_needed" | "payment_setup_needed" | "pending_setup" | "needs_forkup_review" | "limited_promotion_window" | "tight_timeline" | "too_soon";
 export type VisibilityTrack = {
     id: string;
     label: string;

@@ -20,7 +20,7 @@ function formatSmtpFrom(smtpFrom, fromName) {
         return addr;
     return `"${escapeFromDisplayName(name)}" <${addr}>`;
 }
-async function resolveCampaignSender(campaignId) {
+async function resolveNonprofitSender(campaignId) {
     try {
         const { rows } = await pool_1.pool.query(`SELECT n.contact_email, n.organization_name
        FROM campaigns c
@@ -40,20 +40,58 @@ async function resolveCampaignSender(campaignId) {
         };
     }
     catch (err) {
-        console.error("[mailer] resolveCampaignSender failed:", err);
+        console.error("[mailer] resolveNonprofitSender failed:", err);
         return { replyTo: null, fromName: null };
     }
 }
-async function enrichSenderFromCampaign(input) {
+async function resolveBusinessSender(businessId) {
+    try {
+        const { rows } = await pool_1.pool.query(`SELECT contact_email, business_name FROM businesses WHERE id = $1 LIMIT 1`, [businessId]);
+        const row = rows[0];
+        if (!row)
+            return { replyTo: null, fromName: null };
+        const email = typeof row.contact_email === "string" ? row.contact_email.trim() : "";
+        const name = typeof row.business_name === "string" ? row.business_name.trim() : "";
+        return {
+            replyTo: email.includes("@") ? email : null,
+            fromName: name || null,
+        };
+    }
+    catch (err) {
+        console.error("[mailer] resolveBusinessSender failed:", err);
+        return { replyTo: null, fromName: null };
+    }
+}
+function inferSenderParty(input) {
     if (input.platformSender)
-        return input;
-    if (!input.campaignId)
-        return input;
+        return "platform";
+    if (input.senderParty === "platform" || input.senderParty === "nonprofit" || input.senderParty === "business") {
+        return input.senderParty;
+    }
+    if (input.stakeholderRole === "business")
+        return "nonprofit";
+    if (input.stakeholderRole === "nonprofit" && input.businessId)
+        return "business";
+    return "platform";
+}
+async function enrichSenderFromCampaign(input) {
     const needsReplyTo = !input.replyTo?.trim();
     const needsFromName = !input.fromName?.trim();
     if (!needsReplyTo && !needsFromName)
         return input;
-    const sender = await resolveCampaignSender(input.campaignId);
+    const party = inferSenderParty(input);
+    if (party === "platform")
+        return input;
+    let sender = {
+        replyTo: null,
+        fromName: null,
+    };
+    if (party === "nonprofit" && input.campaignId) {
+        sender = await resolveNonprofitSender(input.campaignId);
+    }
+    else if (party === "business" && input.businessId) {
+        sender = await resolveBusinessSender(input.businessId);
+    }
     return {
         ...input,
         replyTo: needsReplyTo ? sender.replyTo : input.replyTo,

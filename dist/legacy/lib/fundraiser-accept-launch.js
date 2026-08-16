@@ -32,7 +32,9 @@ async function resolveLaunchStatus(connection, campaignId, startDate) {
 }
 async function promoteFundraiserDraftOnAccept(connection, campaignId, startDate) {
     const { rows } = await connection.query(`SELECT campaign_status, campaign_start_date, event_date,
-            forkup_review_status, business_timing_status
+            forkup_review_status, business_timing_status,
+            confirmed_business_name, confirmed_contact_name,
+            confirmed_contact_email, confirmed_method, confirmed_status
      FROM campaigns WHERE id = $1`, [campaignId]);
     if (rows.length === 0) {
         return "draft";
@@ -49,6 +51,13 @@ async function promoteFundraiserDraftOnAccept(connection, campaignId, startDate)
     const eventDate = (0, date_only_1.toDateOnlyString)(rows[0].event_date);
     const forkupStatus = String(rows[0].forkup_review_status ?? "none");
     const businessTiming = String(rows[0].business_timing_status ?? "ok");
+    const businessConfirmed = (0, campaign_timing_1.isBusinessConfirmationComplete)({
+        confirmedBusinessName: rows[0].confirmed_business_name,
+        confirmedContactName: rows[0].confirmed_contact_name,
+        confirmedContactEmail: rows[0].confirmed_contact_email,
+        confirmedMethod: rows[0].confirmed_method,
+        confirmedStatus: rows[0].confirmed_status,
+    });
     const { rows: methodRows } = await connection.query(`SELECT method_type FROM campaign_methods WHERE campaign_id = $1`, [campaignId]);
     const methodTypes = methodRows.map((r) => String(r.method_type));
     const timingEval = (0, campaign_timing_1.evaluateBusinessMethodTiming)({
@@ -56,6 +65,18 @@ async function promoteFundraiserDraftOnAccept(connection, campaignId, startDate)
         startDate: start,
         eventDate,
     });
+    if (timingEval.status === "too_soon" || businessTiming === "too_soon") {
+        return "draft";
+    }
+    const tightUnresolved = (timingEval.status === "tight_timeline" ||
+        businessTiming === "tight_timeline") &&
+        !businessConfirmed &&
+        forkupStatus !== "pending" &&
+        forkupStatus !== "changes_requested" &&
+        businessTiming !== "needs_forkup_review";
+    if (tightUnresolved) {
+        return "draft";
+    }
     const needsForkupReview = timingEval.status === "needs_forkup_review" ||
         businessTiming === "needs_forkup_review" ||
         forkupStatus === "pending" ||

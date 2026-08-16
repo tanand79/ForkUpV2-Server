@@ -60,13 +60,30 @@ function scoreInviteReadiness(input) {
         });
         score += 25;
     }
+    else if (timing.status === "limited_promotion_window") {
+        factors.push({
+            label: "Business timing",
+            points: 18,
+            note: `Limited promotion window (${timing.daysUntilAnchor ?? "?"} days)`,
+        });
+        score += 18;
+    }
+    else if (timing.status === "tight_timeline") {
+        factors.push({
+            label: "Business timing",
+            points: 8,
+            note: "Tight timeline — confirm business or submit for ForkUp review",
+        });
+        score += 8;
+    }
     else {
         factors.push({
             label: "Business timing",
-            points: 5,
-            note: "Needs ForkUp review or date change",
+            points: 0,
+            note: timing.status === "too_soon"
+                ? "Too soon for business methods (0–7 days)"
+                : "Needs ForkUp review or date change",
         });
-        score += 5;
     }
     if (input.hasBusinessContacts) {
         factors.push({ label: "Business contacts", points: 15, note: "Contact info available" });
@@ -133,13 +150,23 @@ function recommendMethodMix(input) {
         summary +=
             " Your timeline supports adding Dine & Donate / Local Giveback. Invite businesses this week.";
     }
-    else if ((0, campaign_timing_1.hasGivebackMethods)(selected) || (0, campaign_timing_1.hasGuestBartending)(selected)) {
+    else if (timing.status === "limited_promotion_window") {
         summary +=
-            " Business methods are selected but the timeline is short — keep online/ambassador moving and submit business methods for ForkUp review or move the date.";
+            " You have a limited promotion window (21–29 days). Business methods can continue with a shorter runway.";
+    }
+    else if (timing.status === "tight_timeline" ||
+        (0, campaign_timing_1.hasGivebackMethods)(selected) ||
+        (0, campaign_timing_1.hasGuestBartending)(selected)) {
+        summary +=
+            " Business methods on a tight or short timeline need a confirmed business, ForkUp review, a later date, or Online Donation / Ambassador Sharing only.";
+    }
+    else if (timing.status === "too_soon" || (days != null && days < 8)) {
+        summary +=
+            " With 0–7 days remaining, avoid new business giveback — use Online Donation / Ambassador Sharing or move the date.";
     }
     else if (days != null && days < 30) {
         summary +=
-            " With fewer than 30 days, avoid adding business giveback unless ForkUp approves.";
+            " With fewer than 30 days, plan carefully before adding business giveback.";
     }
     if ((0, campaign_timing_1.hasGuestBartending)(selected)) {
         if (!recommended.includes("guest_bartending_event")) {
@@ -162,7 +189,7 @@ function buildTimingGuidance(input) {
             ? `Business-method timeline looks healthy (${timing.daysUntilAnchor ?? "?"} days to ${timing.anchorKind}).`
             : "No business methods selected — online/ambassador timing rules apply (end date; no 30-day hard block)."
         : timing.message ||
-            "This business-method timeline needs ForkUp review.";
+            "This business-method timeline needs attention before inviting businesses.";
     return {
         timing,
         summary,
@@ -177,8 +204,9 @@ async function polishGuidanceWithAi(input) {
         const text = await (0, ai_chat_1.aiChat)({
             system: `${input.systemHint}\n` +
                 "You are ForkUp's campaign coach. Explain clearly, never claim a business is already enrolled, " +
-                "and never contradict hard platform rules (30-day business lead time, 21-day acceptance for full SE, " +
-                "not public until accepted). Keep under 120 words.",
+                "and never contradict hard platform rules (30-day healthy business lead, 21–29 limited promotion, " +
+                "8–20 tight timeline with confirmation/review, 0–7 too soon for new business campaigns, " +
+                "21-day acceptance for full SE, not public until accepted). Keep under 120 words.",
             user: input.facts,
             temperature: 0.4,
             maxTokens: 400,

@@ -18,9 +18,14 @@ import {
   pickImpactSnippet,
 } from "../lib/organization-library";
 import {
+  allowsBusinessInviteEmails,
   evaluateBusinessMethodTiming,
+  hasAnyBusinessConfirmationField,
   hasBusinessMethods,
+  isBusinessConfirmationComplete,
+  validateBusinessConfirmation,
   validateMethodDateRequirements,
+  type BusinessConfirmationInput,
   type MethodTimingEvaluation,
   type TimingStatus,
 } from "../lib/campaign-timing";
@@ -117,6 +122,14 @@ type CreateCampaignBody = {
   submitForForkupReview?: boolean;
   /** Nonprofit chose CTA: drop business methods and continue online/ambassador only. */
   continueWithoutBusinessMethods?: boolean;
+  /** Tight timeline (8–20 days): organizer already has a business/venue confirmed. */
+  confirmedBusinessName?: string | null;
+  confirmedContactName?: string | null;
+  confirmedContactEmail?: string | null;
+  /** email | phone | in_person */
+  confirmedMethod?: string | null;
+  confirmedStatus?: string | null;
+  confirmedNotes?: string | null;
 };
 
 /**
@@ -141,6 +154,11 @@ function resolveStartDate(body: CreateCampaignBody, methods: MethodType[]): stri
   return null;
 }
 
+/**
+ * Maps Timeline Check band → persisted campaign timing / ForkUp review fields.
+ * needs_forkup_review is only set when the organizer explicitly submits for review
+ * from a tight (8–20 day) timeline — not for limited (21–29) or too_soon (0–7).
+ */
 function timingFieldsFromEvaluation(
   evaluation: MethodTimingEvaluation,
   body: CreateCampaignBody,
@@ -150,27 +168,72 @@ function timingFieldsFromEvaluation(
   forkupReviewReason: string | null;
   forkupReviewRequestedAt: Date | null;
 } {
-  const businessTimingStatus = evaluation.status;
-  // Option 2: only short-timeline business methods enter ForkUp review on launch.
-  const needsReview =
-    evaluation.status === "needs_forkup_review" &&
-    (Boolean(body.launch) || Boolean(body.submitForForkupReview));
-  if (needsReview) {
+  const wantsForkupReview =
+    evaluation.status === "tight_timeline" &&
+    Boolean(body.submitForForkupReview);
+
+  if (wantsForkupReview) {
     return {
-      businessTimingStatus,
+      businessTimingStatus: "needs_forkup_review",
       forkupReviewStatus: "pending",
       forkupReviewReason:
         evaluation.message ||
-        "Campaign submitted for ForkUp review (short business-method timeline).",
+        "Campaign submitted for ForkUp review (tight business-method timeline).",
       forkupReviewRequestedAt: new Date(),
     };
   }
+
   return {
-    businessTimingStatus,
+    businessTimingStatus: evaluation.status,
     forkupReviewStatus: "none",
     forkupReviewReason: null,
     forkupReviewRequestedAt: null,
   };
+}
+
+/** Confirmation fields from the create/update body (Timeline Check form). */
+function confirmationFromBody(body: CreateCampaignBody): BusinessConfirmationInput {
+  return {
+    confirmedBusinessName: body.confirmedBusinessName,
+    confirmedContactName: body.confirmedContactName,
+    confirmedContactEmail: body.confirmedContactEmail,
+    confirmedMethod: body.confirmedMethod,
+    confirmedStatus: body.confirmedStatus,
+    confirmedNotes: body.confirmedNotes,
+  };
+}
+
+/**
+ * Hard gates for business methods before save/launch.
+ * Returns an error string when blocked; null when OK to proceed.
+ */
+function businessTimingSaveError(
+  evaluation: MethodTimingEvaluation,
+  body: CreateCampaignBody,
+  methods: MethodType[],
+): string | null {
+  if (!hasBusinessMethods(methods)) return null;
+
+  if (evaluation.status === "too_soon") {
+    return "This start/event date is too soon for a new business-based campaign (0–7 days). Change the date or continue with Online Donation / Ambassador Sharing only.";
+  }
+
+  const confirmation = confirmationFromBody(body);
+  if (hasAnyBusinessConfirmationField(confirmation)) {
+    const confErr = validateBusinessConfirmation(confirmation);
+    if (confErr) return confErr;
+  }
+
+  if (
+    evaluation.status === "tight_timeline" &&
+    body.launch &&
+    !body.submitForForkupReview &&
+    !isBusinessConfirmationComplete(confirmation)
+  ) {
+    return "Tight timeline (8–20 days): confirm an existing business agreement, submit for ForkUp review, change the date, or continue without business methods.";
+  }
+
+  return null;
 }
 
 /** True when Launch must wait for superadmin (short timeline), not go live. */
@@ -891,7 +954,18 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       startDate: body.startDate,
       eventDate: body.eventDate,
     });
+    const timingGateError = businessTimingSaveError(
+      timingEval,
+      body,
+      methodsForSave,
+    );
+    if (timingGateError) {
+      res.status(400).json({ error: timingGateError, timing: timingEval });
+      return;
+    }
     const timingFields = timingFieldsFromEvaluation(timingEval, body);
+    const confirmation = confirmationFromBody(body);
+    const businessConfirmed = isBusinessConfirmationComplete(confirmation);
 
     await connection.query("BEGIN");
 
@@ -964,9 +1038,15 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
           ),
       ).length ?? 0) + (body.newBusinessInvites?.length ?? 0);
 
-    // When timeline needs ForkUp review, business invites emails are deferred —
+    // When timeline needs ForkUp review / is too soon, business invite emails are deferred —
     // partner rows are still persisted (see below) so the Business dashboard reflects them.
-    const canInviteBusinessesEarly = timingFields.businessTimingStatus === "ok";
+    const canInviteBusinessesEarly = allowsBusinessInviteEmails(
+      timingFields.businessTimingStatus,
+      {
+        businessConfirmed,
+        forkupReviewStatus: timingFields.forkupReviewStatus,
+      },
+    );
     if (
       needsBusiness &&
       body.launch &&
@@ -1034,6 +1114,16 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
           WHEN $14 = 'pending' THEN COALESCE(forkup_review_requested_at, NOW())
           ELSE forkup_review_requested_at
         END,
+        confirmed_business_name = COALESCE($17, confirmed_business_name),
+        confirmed_contact_name = COALESCE($18, confirmed_contact_name),
+        confirmed_contact_email = COALESCE($19, confirmed_contact_email),
+        confirmed_method = COALESCE($20, confirmed_method),
+        confirmed_status = COALESCE($21, confirmed_status),
+        confirmed_notes = COALESCE($22, confirmed_notes),
+        business_confirmed_at = CASE
+          WHEN $23 THEN COALESCE(business_confirmed_at, NOW())
+          ELSE business_confirmed_at
+        END,
         updated_at = NOW()
        WHERE id = $16`,
       [
@@ -1053,6 +1143,25 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
         timingFields.forkupReviewStatus,
         timingFields.forkupReviewReason,
         campaignId,
+        businessConfirmed
+          ? String(confirmation.confirmedBusinessName).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedContactName).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedContactEmail).trim().toLowerCase()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedMethod).trim().toLowerCase()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedStatus).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedNotes ?? "").trim() || null
+          : null,
+        businessConfirmed,
       ],
     );
 
@@ -1097,8 +1206,14 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
     }
 
     // Persist partner invite rows even when businessTimingStatus needs ForkUp review.
-    // Nick V2 Layer 2 only defers EMAIL until timing is ok (sendBusinessInviteEmails below).
-    const canInviteBusinesses = timingFields.businessTimingStatus === "ok";
+    // Nick V2 Layer 2 only defers EMAIL until timing allows (sendBusinessInviteEmails below).
+    const canInviteBusinesses = allowsBusinessInviteEmails(
+      timingFields.businessTimingStatus,
+      {
+        businessConfirmed,
+        forkupReviewStatus: timingFields.forkupReviewStatus,
+      },
+    );
     const inviteAnchorDate =
       resolvedEventDate || resolvedStartDate || resolvedEndDate;
     const invitedByUserId = authUser?.id ?? null;
@@ -1378,7 +1493,18 @@ builderRouter.post("/campaigns", async (req, res) => {
       startDate: body.startDate,
       eventDate: body.eventDate,
     });
+    const timingGateError = businessTimingSaveError(
+      timingEval,
+      body,
+      methodsForSave,
+    );
+    if (timingGateError) {
+      res.status(400).json({ error: timingGateError, timing: timingEval });
+      return;
+    }
     const timingFields = timingFieldsFromEvaluation(timingEval, body);
+    const confirmation = confirmationFromBody(body);
+    const businessConfirmed = isBusinessConfirmationComplete(confirmation);
     const hasInvitations =
       (body.invitations?.length ?? 0) + (body.newBusinessInvites?.length ?? 0) > 0;
 
@@ -1386,7 +1512,13 @@ builderRouter.post("/campaigns", async (req, res) => {
     const resolvedStartDate = resolveStartDate(body, methodsForSave);
     const resolvedEndDate = toDateOnlyString(body.endDate);
     const resolvedEventDate = toDateOnlyString(body.eventDate);
-    const canInviteBusinesses = timingFields.businessTimingStatus === "ok";
+    const canInviteBusinesses = allowsBusinessInviteEmails(
+      timingFields.businessTimingStatus,
+      {
+        businessConfirmed,
+        forkupReviewStatus: timingFields.forkupReviewStatus,
+      },
+    );
 
     if (needsBusiness && body.launch && !hasInvitations && canInviteBusinesses) {
       res.status(400).json({
@@ -1480,8 +1612,13 @@ builderRouter.post("/campaigns", async (req, res) => {
         featured_youtube_url,
         invitation_deadline, terms_accepted, terms_accepted_at,
         business_timing_status, forkup_review_status, forkup_review_reason,
-        forkup_review_requested_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        forkup_review_requested_at,
+        confirmed_business_name, confirmed_contact_name, confirmed_contact_email,
+        confirmed_method, confirmed_status, confirmed_notes, business_confirmed_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+        $19, $20, $21, $22, $23, $24, $25
+      )
        RETURNING id`,
       [
         slug,
@@ -1502,6 +1639,25 @@ builderRouter.post("/campaigns", async (req, res) => {
         timingFields.forkupReviewStatus,
         timingFields.forkupReviewReason,
         timingFields.forkupReviewRequestedAt,
+        businessConfirmed
+          ? String(confirmation.confirmedBusinessName).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedContactName).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedContactEmail).trim().toLowerCase()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedMethod).trim().toLowerCase()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedStatus).trim()
+          : null,
+        businessConfirmed
+          ? String(confirmation.confirmedNotes ?? "").trim() || null
+          : null,
+        businessConfirmed ? new Date() : null,
       ],
     );
     const campaignId = campResult[0].id;
@@ -1853,7 +2009,9 @@ builderRouter.post("/campaigns/:slug/business-invitations", async (req, res) => 
     const { rows: campaigns } = await connection.query<QueryResultRow>(
       `SELECT id, campaign_status, nonprofit_id, created_by_user_id,
               campaign_start_date, campaign_end_date, event_date,
-              business_timing_status
+              business_timing_status, forkup_review_status,
+              confirmed_business_name, confirmed_contact_name,
+              confirmed_contact_email, confirmed_method, confirmed_status
        FROM campaigns WHERE slug = $1`,
       [slug],
     );
@@ -2054,8 +2212,19 @@ builderRouter.post("/campaigns/:slug/business-invitations", async (req, res) => 
 
     await connection.query("COMMIT");
 
-    const canEmail =
-      String(campaign.business_timing_status ?? "ok") === "ok";
+    const canEmail = allowsBusinessInviteEmails(
+      String(campaign.business_timing_status ?? "ok"),
+      {
+        businessConfirmed: isBusinessConfirmationComplete({
+          confirmedBusinessName: campaign.confirmed_business_name,
+          confirmedContactName: campaign.confirmed_contact_name,
+          confirmedContactEmail: campaign.confirmed_contact_email,
+          confirmedMethod: campaign.confirmed_method,
+          confirmedStatus: campaign.confirmed_status,
+        }),
+        forkupReviewStatus: String(campaign.forkup_review_status ?? "none"),
+      },
+    );
     if (addedCount > 0 && canEmail) {
       await sendBusinessInviteEmails(campaignId);
     }

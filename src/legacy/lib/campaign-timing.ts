@@ -1,30 +1,42 @@
 /**
- * Campaign method timing rules (Nick V2 Layer 2).
+ * Campaign method timing rules (Nick V2 Layer 2 + Timeline Check bands).
  *
  * Purpose: Server source of truth for business-method lead times.
- * - Online donations / ambassador: end date only; no 30-day hard block.
- * - Dine & Donate / giveback methods: start date + ≥30 days lead, else needs_forkup_review.
- * - Guest Bartending: event date + ≥30 days lead, else needs_forkup_review.
- * - Business acceptance inside 21 days of start/event → limited_promotion_window.
+ * - Online donations / ambassador: end date only; no hard business-lead block.
+ * - Dine & Donate / giveback: start date anchor.
+ * - Guest Bartending: event date anchor.
+ * - Bands (business methods):
+ *   - 30+ days → ok (healthy)
+ *   - 21–29 days → limited_promotion_window (continue with warning)
+ *   - 8–20 days → tight_timeline (confirm business / ForkUp review / switch)
+ *   - 0–7 days → too_soon (block new business-based campaigns)
+ * - Business acceptance inside 21 days of start/event → limited_promotion_window
+ *   (acceptance helper; unchanged).
  *
- * Inputs: selected methods + dates. Outputs: timing status + messages (never "rejected").
+ * Inputs: selected methods + dates (+ optional confirmation / review flags).
+ * Outputs: timing status + messages + CTAs.
  */
 import { toDateOnlyString } from "./date-only";
 import type { MethodType } from "../types/campaign";
 import { METHOD_REQUIRES_BUSINESS } from "./methods";
 
 export const BUSINESS_METHOD_MIN_LEAD_DAYS = 30;
+export const LIMITED_PROMOTION_LEAD_DAYS = 21;
+export const TIGHT_TIMELINE_MIN_DAYS = 8;
 export const FULL_SUCCESS_ENGINE_ACCEPT_LEAD_DAYS = 21;
 export const AMBASSADOR_RECOMMENDED_DAYS = 14;
 
 export type TimingStatus =
   | "ok"
   | "needs_forkup_review"
-  | "limited_promotion_window";
+  | "limited_promotion_window"
+  | "tight_timeline"
+  | "too_soon";
 
 export type TimingCta =
   | "change_date"
   | "continue_without_business_method"
+  | "confirm_business"
   | "submit_for_forkup_review";
 
 export type MethodTimingEvaluation = {
@@ -34,6 +46,16 @@ export type MethodTimingEvaluation = {
   daysUntilAnchor: number | null;
   anchorDate: string | null;
   anchorKind: "start" | "event" | "end" | null;
+};
+
+/** Organizer “I already have a business confirmed” form (Timeline Check). */
+export type BusinessConfirmationInput = {
+  confirmedBusinessName?: string | null;
+  confirmedContactName?: string | null;
+  confirmedContactEmail?: string | null;
+  confirmedMethod?: string | null;
+  confirmedStatus?: string | null;
+  confirmedNotes?: string | null;
 };
 
 function todayDateOnly(): string {
@@ -72,6 +94,82 @@ export function hasGuestBartending(methods: MethodType[]): boolean {
 
 export function hasDefaultFundraisingLayer(methods: MethodType[]): boolean {
   return methods.some((m) => !METHOD_REQUIRES_BUSINESS[m]);
+}
+
+/**
+ * Map whole days until start/event into a Timeline Check band status.
+ * Inputs: days (>=0 expected). Outputs: TimingStatus band (never needs_forkup_review).
+ */
+export function timingBandFromDays(days: number): TimingStatus {
+  if (days >= BUSINESS_METHOD_MIN_LEAD_DAYS) return "ok";
+  if (days >= LIMITED_PROMOTION_LEAD_DAYS) return "limited_promotion_window";
+  if (days >= TIGHT_TIMELINE_MIN_DAYS) return "tight_timeline";
+  return "too_soon";
+}
+
+/**
+ * True when the confirmation form has all required fields.
+ * Required: business name, contact name, email, method (email|phone|in_person), status.
+ */
+export function isBusinessConfirmationComplete(
+  input: BusinessConfirmationInput | null | undefined,
+): boolean {
+  if (!input) return false;
+  const name = String(input.confirmedBusinessName ?? "").trim();
+  const contact = String(input.confirmedContactName ?? "").trim();
+  const email = String(input.confirmedContactEmail ?? "").trim();
+  const method = String(input.confirmedMethod ?? "").trim().toLowerCase();
+  const status = String(input.confirmedStatus ?? "").trim();
+  if (!name || !contact || !email || !method || !status) return false;
+  if (!["email", "phone", "in_person"].includes(method)) return false;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  return true;
+}
+
+/**
+ * Validates confirmation payload when the organizer claims a business is confirmed.
+ * Returns an error string, or null when complete/valid.
+ */
+export function validateBusinessConfirmation(
+  input: BusinessConfirmationInput | null | undefined,
+): string | null {
+  if (isBusinessConfirmationComplete(input)) return null;
+  return "Business confirmation requires business name, contact name, contact email, confirmation method (email / phone / in person), and confirmation status";
+}
+
+/** True when any confirmation field was sent (partial or full). */
+export function hasAnyBusinessConfirmationField(
+  input: BusinessConfirmationInput | null | undefined,
+): boolean {
+  if (!input) return false;
+  return Boolean(
+    String(input.confirmedBusinessName ?? "").trim() ||
+      String(input.confirmedContactName ?? "").trim() ||
+      String(input.confirmedContactEmail ?? "").trim() ||
+      String(input.confirmedMethod ?? "").trim() ||
+      String(input.confirmedStatus ?? "").trim() ||
+      String(input.confirmedNotes ?? "").trim(),
+  );
+}
+
+/**
+ * Whether business-invite emails may go out for this timing status.
+ * limited_promotion_window: yes (warning only).
+ * tight_timeline: only when business is already confirmed.
+ * needs_forkup_review / too_soon: no.
+ */
+export function allowsBusinessInviteEmails(
+  status: string | null | undefined,
+  opts?: {
+    businessConfirmed?: boolean;
+    forkupReviewStatus?: string | null;
+  },
+): boolean {
+  if (opts?.forkupReviewStatus === "approved") return true;
+  const s = status ?? "ok";
+  if (s === "ok" || s === "limited_promotion_window") return true;
+  if (s === "tight_timeline" && opts?.businessConfirmed) return true;
+  return false;
 }
 
 /**
@@ -125,8 +223,40 @@ export function validateMethodDateRequirements(input: {
   return null;
 }
 
+function bandMessage(
+  status: TimingStatus,
+  days: number,
+  kind: "start" | "event",
+): string {
+  const when =
+    kind === "event" ? `event is ${days} day${days === 1 ? "" : "s"} away` : `campaign starts in ${days} day${days === 1 ? "" : "s"}`;
+  if (status === "limited_promotion_window") {
+    return `Limited promotion window: your ${when}. You can continue, but there is less time for businesses to accept and for full promotion.`;
+  }
+  if (status === "tight_timeline") {
+    return `Tight timeline: your ${when}. Businesses usually need more time to prepare and promote. Confirm an existing business agreement, submit for ForkUp review, change the date, or continue with Online Donation / Ambassador Sharing only.`;
+  }
+  if (status === "too_soon") {
+    return `Too soon: your ${when}. New business-based campaigns cannot start within 7 days. Change the date or switch to Online Donation / Ambassador Sharing.`;
+  }
+  return "";
+}
+
+const TIGHT_CTAS: TimingCta[] = [
+  "change_date",
+  "continue_without_business_method",
+  "confirm_business",
+  "submit_for_forkup_review",
+];
+
+const TOO_SOON_CTAS: TimingCta[] = [
+  "change_date",
+  "continue_without_business_method",
+];
+
 /**
- * Evaluates business-method lead time. Short timelines are Needs ForkUp Review — not rejected.
+ * Evaluates business-method lead time into Timeline Check bands.
+ * ForkUp review is a CTA outcome (stored separately), not an automatic band.
  */
 export function evaluateBusinessMethodTiming(input: {
   methods: MethodType[];
@@ -148,19 +278,6 @@ export function evaluateBusinessMethodTiming(input: {
     };
   }
 
-  /**
-   * Evaluate each selected business method on its own date anchor.
-   * When giveback + guest bartending are both selected, both can need ForkUp
-   * review — do not prefer one method and skip the other.
-   */
-  const GIVEBACK_SHORT_MSG =
-    "This campaign starts in less than 30 days. Business giveback campaigns need time for businesses to accept, prepare their team, and promote the campaign. ForkUp review is required before inviting businesses for this timeline.";
-  const GUEST_SHORT_MSG =
-    "Guest Bartending events need enough time to confirm the venue, prepare the guest bartenders, promote the event, and alert the business team. ForkUp review is required for events less than 30 days away.";
-  const OTHER_BUSINESS_SHORT_MSG =
-    "This business-based method starts in less than 30 days. ForkUp review is required before proceeding normally.";
-
-  const shortMessages: string[] = [];
   let worstDays: number | null = null;
   let anchorDate: string | null = null;
   let anchorKind: "start" | "event" | null = null;
@@ -168,7 +285,6 @@ export function evaluateBusinessMethodTiming(input: {
   const considerAnchor = (
     dateStr: string | null | undefined,
     kind: "start" | "event",
-    shortMessage: string,
   ) => {
     const normalized = toDateOnlyString(dateStr);
     const days = daysUntil(normalized);
@@ -178,23 +294,19 @@ export function evaluateBusinessMethodTiming(input: {
       anchorDate = normalized;
       anchorKind = kind;
     }
-    if (days < BUSINESS_METHOD_MIN_LEAD_DAYS && !reviewApproved) {
-      shortMessages.push(shortMessage);
-    }
   };
 
   if (hasGivebackMethods(methods)) {
-    considerAnchor(input.startDate, "start", GIVEBACK_SHORT_MSG);
+    considerAnchor(input.startDate, "start");
   }
   if (hasGuestBartending(methods)) {
-    considerAnchor(input.eventDate, "event", GUEST_SHORT_MSG);
+    considerAnchor(input.eventDate, "event");
   }
   if (!hasGivebackMethods(methods) && !hasGuestBartending(methods)) {
-    // Other business methods (shouldn't happen with current set) — use start.
-    considerAnchor(input.startDate, "start", OTHER_BUSINESS_SHORT_MSG);
+    considerAnchor(input.startDate, "start");
   }
 
-  if (worstDays == null) {
+  if (worstDays == null || !anchorKind) {
     return {
       status: "ok",
       message: null,
@@ -205,7 +317,8 @@ export function evaluateBusinessMethodTiming(input: {
     };
   }
 
-  if (shortMessages.length === 0) {
+  // Approved ForkUp review clears short-timeline gates.
+  if (reviewApproved) {
     return {
       status: "ok",
       message: null,
@@ -216,14 +329,43 @@ export function evaluateBusinessMethodTiming(input: {
     };
   }
 
+  const band = timingBandFromDays(worstDays);
+  if (band === "ok") {
+    return {
+      status: "ok",
+      message: null,
+      ctas: [],
+      daysUntilAnchor: worstDays,
+      anchorDate,
+      anchorKind,
+    };
+  }
+
+  const message = bandMessage(band, worstDays, anchorKind);
+  if (band === "limited_promotion_window") {
+    return {
+      status: "limited_promotion_window",
+      message,
+      ctas: [],
+      daysUntilAnchor: worstDays,
+      anchorDate,
+      anchorKind,
+    };
+  }
+  if (band === "tight_timeline") {
+    return {
+      status: "tight_timeline",
+      message,
+      ctas: [...TIGHT_CTAS],
+      daysUntilAnchor: worstDays,
+      anchorDate,
+      anchorKind,
+    };
+  }
   return {
-    status: "needs_forkup_review",
-    message: shortMessages.join(" "),
-    ctas: [
-      "change_date",
-      "continue_without_business_method",
-      "submit_for_forkup_review",
-    ],
+    status: "too_soon",
+    message,
+    ctas: [...TOO_SOON_CTAS],
     daysUntilAnchor: worstDays,
     anchorDate,
     anchorKind,

@@ -1,11 +1,16 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AMBASSADOR_RECOMMENDED_DAYS = exports.FULL_SUCCESS_ENGINE_ACCEPT_LEAD_DAYS = exports.BUSINESS_METHOD_MIN_LEAD_DAYS = void 0;
+exports.AMBASSADOR_RECOMMENDED_DAYS = exports.FULL_SUCCESS_ENGINE_ACCEPT_LEAD_DAYS = exports.TIGHT_TIMELINE_MIN_DAYS = exports.LIMITED_PROMOTION_LEAD_DAYS = exports.BUSINESS_METHOD_MIN_LEAD_DAYS = void 0;
 exports.daysUntil = daysUntil;
 exports.hasBusinessMethods = hasBusinessMethods;
 exports.hasGivebackMethods = hasGivebackMethods;
 exports.hasGuestBartending = hasGuestBartending;
 exports.hasDefaultFundraisingLayer = hasDefaultFundraisingLayer;
+exports.timingBandFromDays = timingBandFromDays;
+exports.isBusinessConfirmationComplete = isBusinessConfirmationComplete;
+exports.validateBusinessConfirmation = validateBusinessConfirmation;
+exports.hasAnyBusinessConfirmationField = hasAnyBusinessConfirmationField;
+exports.allowsBusinessInviteEmails = allowsBusinessInviteEmails;
 exports.validateMethodDateRequirements = validateMethodDateRequirements;
 exports.evaluateBusinessMethodTiming = evaluateBusinessMethodTiming;
 exports.evaluateAcceptancePromotionWindow = evaluateAcceptancePromotionWindow;
@@ -13,6 +18,8 @@ exports.ambassadorTimingCoachMessage = ambassadorTimingCoachMessage;
 const date_only_1 = require("./date-only");
 const methods_1 = require("./methods");
 exports.BUSINESS_METHOD_MIN_LEAD_DAYS = 30;
+exports.LIMITED_PROMOTION_LEAD_DAYS = 21;
+exports.TIGHT_TIMELINE_MIN_DAYS = 8;
 exports.FULL_SUCCESS_ENGINE_ACCEPT_LEAD_DAYS = 21;
 exports.AMBASSADOR_RECOMMENDED_DAYS = 14;
 function todayDateOnly() {
@@ -44,6 +51,56 @@ function hasGuestBartending(methods) {
 }
 function hasDefaultFundraisingLayer(methods) {
     return methods.some((m) => !methods_1.METHOD_REQUIRES_BUSINESS[m]);
+}
+function timingBandFromDays(days) {
+    if (days >= exports.BUSINESS_METHOD_MIN_LEAD_DAYS)
+        return "ok";
+    if (days >= exports.LIMITED_PROMOTION_LEAD_DAYS)
+        return "limited_promotion_window";
+    if (days >= exports.TIGHT_TIMELINE_MIN_DAYS)
+        return "tight_timeline";
+    return "too_soon";
+}
+function isBusinessConfirmationComplete(input) {
+    if (!input)
+        return false;
+    const name = String(input.confirmedBusinessName ?? "").trim();
+    const contact = String(input.confirmedContactName ?? "").trim();
+    const email = String(input.confirmedContactEmail ?? "").trim();
+    const method = String(input.confirmedMethod ?? "").trim().toLowerCase();
+    const status = String(input.confirmedStatus ?? "").trim();
+    if (!name || !contact || !email || !method || !status)
+        return false;
+    if (!["email", "phone", "in_person"].includes(method))
+        return false;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+        return false;
+    return true;
+}
+function validateBusinessConfirmation(input) {
+    if (isBusinessConfirmationComplete(input))
+        return null;
+    return "Business confirmation requires business name, contact name, contact email, confirmation method (email / phone / in person), and confirmation status";
+}
+function hasAnyBusinessConfirmationField(input) {
+    if (!input)
+        return false;
+    return Boolean(String(input.confirmedBusinessName ?? "").trim() ||
+        String(input.confirmedContactName ?? "").trim() ||
+        String(input.confirmedContactEmail ?? "").trim() ||
+        String(input.confirmedMethod ?? "").trim() ||
+        String(input.confirmedStatus ?? "").trim() ||
+        String(input.confirmedNotes ?? "").trim());
+}
+function allowsBusinessInviteEmails(status, opts) {
+    if (opts?.forkupReviewStatus === "approved")
+        return true;
+    const s = status ?? "ok";
+    if (s === "ok" || s === "limited_promotion_window")
+        return true;
+    if (s === "tight_timeline" && opts?.businessConfirmed)
+        return true;
+    return false;
 }
 function validateMethodDateRequirements(input) {
     const { methods } = input;
@@ -80,6 +137,29 @@ function validateMethodDateRequirements(input) {
     }
     return null;
 }
+function bandMessage(status, days, kind) {
+    const when = kind === "event" ? `event is ${days} day${days === 1 ? "" : "s"} away` : `campaign starts in ${days} day${days === 1 ? "" : "s"}`;
+    if (status === "limited_promotion_window") {
+        return `Limited promotion window: your ${when}. You can continue, but there is less time for businesses to accept and for full promotion.`;
+    }
+    if (status === "tight_timeline") {
+        return `Tight timeline: your ${when}. Businesses usually need more time to prepare and promote. Confirm an existing business agreement, submit for ForkUp review, change the date, or continue with Online Donation / Ambassador Sharing only.`;
+    }
+    if (status === "too_soon") {
+        return `Too soon: your ${when}. New business-based campaigns cannot start within 7 days. Change the date or switch to Online Donation / Ambassador Sharing.`;
+    }
+    return "";
+}
+const TIGHT_CTAS = [
+    "change_date",
+    "continue_without_business_method",
+    "confirm_business",
+    "submit_for_forkup_review",
+];
+const TOO_SOON_CTAS = [
+    "change_date",
+    "continue_without_business_method",
+];
 function evaluateBusinessMethodTiming(input) {
     const methods = input.methods;
     const reviewApproved = input.forkupReviewStatus === "approved";
@@ -93,14 +173,10 @@ function evaluateBusinessMethodTiming(input) {
             anchorKind: null,
         };
     }
-    const GIVEBACK_SHORT_MSG = "This campaign starts in less than 30 days. Business giveback campaigns need time for businesses to accept, prepare their team, and promote the campaign. ForkUp review is required before inviting businesses for this timeline.";
-    const GUEST_SHORT_MSG = "Guest Bartending events need enough time to confirm the venue, prepare the guest bartenders, promote the event, and alert the business team. ForkUp review is required for events less than 30 days away.";
-    const OTHER_BUSINESS_SHORT_MSG = "This business-based method starts in less than 30 days. ForkUp review is required before proceeding normally.";
-    const shortMessages = [];
     let worstDays = null;
     let anchorDate = null;
     let anchorKind = null;
-    const considerAnchor = (dateStr, kind, shortMessage) => {
+    const considerAnchor = (dateStr, kind) => {
         const normalized = (0, date_only_1.toDateOnlyString)(dateStr);
         const days = daysUntil(normalized);
         if (days == null)
@@ -110,20 +186,17 @@ function evaluateBusinessMethodTiming(input) {
             anchorDate = normalized;
             anchorKind = kind;
         }
-        if (days < exports.BUSINESS_METHOD_MIN_LEAD_DAYS && !reviewApproved) {
-            shortMessages.push(shortMessage);
-        }
     };
     if (hasGivebackMethods(methods)) {
-        considerAnchor(input.startDate, "start", GIVEBACK_SHORT_MSG);
+        considerAnchor(input.startDate, "start");
     }
     if (hasGuestBartending(methods)) {
-        considerAnchor(input.eventDate, "event", GUEST_SHORT_MSG);
+        considerAnchor(input.eventDate, "event");
     }
     if (!hasGivebackMethods(methods) && !hasGuestBartending(methods)) {
-        considerAnchor(input.startDate, "start", OTHER_BUSINESS_SHORT_MSG);
+        considerAnchor(input.startDate, "start");
     }
-    if (worstDays == null) {
+    if (worstDays == null || !anchorKind) {
         return {
             status: "ok",
             message: null,
@@ -133,7 +206,7 @@ function evaluateBusinessMethodTiming(input) {
             anchorKind,
         };
     }
-    if (shortMessages.length === 0) {
+    if (reviewApproved) {
         return {
             status: "ok",
             message: null,
@@ -143,14 +216,42 @@ function evaluateBusinessMethodTiming(input) {
             anchorKind,
         };
     }
+    const band = timingBandFromDays(worstDays);
+    if (band === "ok") {
+        return {
+            status: "ok",
+            message: null,
+            ctas: [],
+            daysUntilAnchor: worstDays,
+            anchorDate,
+            anchorKind,
+        };
+    }
+    const message = bandMessage(band, worstDays, anchorKind);
+    if (band === "limited_promotion_window") {
+        return {
+            status: "limited_promotion_window",
+            message,
+            ctas: [],
+            daysUntilAnchor: worstDays,
+            anchorDate,
+            anchorKind,
+        };
+    }
+    if (band === "tight_timeline") {
+        return {
+            status: "tight_timeline",
+            message,
+            ctas: [...TIGHT_CTAS],
+            daysUntilAnchor: worstDays,
+            anchorDate,
+            anchorKind,
+        };
+    }
     return {
-        status: "needs_forkup_review",
-        message: shortMessages.join(" "),
-        ctas: [
-            "change_date",
-            "continue_without_business_method",
-            "submit_for_forkup_review",
-        ],
+        status: "too_soon",
+        message,
+        ctas: [...TOO_SOON_CTAS],
         daysUntilAnchor: worstDays,
         anchorDate,
         anchorKind,

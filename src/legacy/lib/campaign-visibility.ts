@@ -23,7 +23,9 @@ export type VisibilityTrackStatus =
   | "payment_setup_needed"
   | "pending_setup"
   | "needs_forkup_review"
-  | "limited_promotion_window";
+  | "limited_promotion_window"
+  | "tight_timeline"
+  | "too_soon";
 
 export type VisibilityTrack = {
   id: string;
@@ -66,6 +68,8 @@ const TRACK_DISPLAY: Record<VisibilityTrackStatus, string> = {
   pending_setup: "Setup needed",
   needs_forkup_review: "Needs ForkUp Review",
   limited_promotion_window: "Limited Promotion Window",
+  tight_timeline: "Tight Timeline",
+  too_soon: "Too Soon",
 };
 
 function isAccepted(status: string): boolean {
@@ -106,12 +110,16 @@ export function buildCampaignVisibility(input: {
   );
 
   const timingGate: VisibilityTrackStatus | null =
-    input.businessTimingStatus === "limited_promotion_window"
-      ? "limited_promotion_window"
-      : input.businessTimingStatus === "needs_forkup_review" ||
-          input.forkupReviewStatus === "pending"
-        ? "needs_forkup_review"
-        : null;
+    input.businessTimingStatus === "too_soon"
+      ? "too_soon"
+      : input.businessTimingStatus === "tight_timeline"
+        ? "tight_timeline"
+        : input.businessTimingStatus === "limited_promotion_window"
+          ? "limited_promotion_window"
+          : input.businessTimingStatus === "needs_forkup_review" ||
+              input.forkupReviewStatus === "pending"
+            ? "needs_forkup_review"
+            : null;
 
   const basicsReady = Boolean(input.storyPresent && input.endDate);
 
@@ -175,6 +183,10 @@ export function buildCampaignVisibility(input: {
       needsForkupReview.push(`${t.label}: Needs ForkUp Review`);
     } else if (t.status === "limited_promotion_window") {
       pending.push(`${t.label}: Limited Promotion Window`);
+    } else if (t.status === "tight_timeline") {
+      pending.push(`${t.label}: Tight Timeline — confirm business or request review`);
+    } else if (t.status === "too_soon") {
+      pending.push(`${t.label}: Too Soon — change date or switch methods`);
     } else {
       pending.push(`${t.label}: ${t.display}`);
     }

@@ -26,6 +26,7 @@
     "db:payouts": "tsx src/legacy/db/migrate-payouts.ts",
     "db:automation": "tsx src/legacy/db/migrate-automation.ts",
     "db:campaign-timing": "tsx src/legacy/db/migrate-campaign-timing.ts",
+    "db:timeline-bands": "tsx src/legacy/db/migrate-timeline-bands.ts",
     "db:campaign-in-review": "tsx src/legacy/db/migrate-campaign-in-review.ts",
     "db:forkup-review-changes-requested": "tsx src/legacy/db/migrate-forkup-review-changes-requested.ts",
     "db:business-invite-lifecycle": "tsx src/legacy/db/migrate-business-invite-lifecycle.ts",

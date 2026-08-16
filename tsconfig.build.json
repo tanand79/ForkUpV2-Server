@@ -23,6 +23,7 @@
     "src/legacy/db/migrate-automation.ts",
     "src/legacy/db/migrate-superadmin.ts",
     "src/legacy/db/migrate-campaign-timing.ts",
+    "src/legacy/db/migrate-timeline-bands.ts",
     "src/legacy/db/migrate-business-invite-lifecycle.ts",
     "src/legacy/db/migrate-business-invite-status-fields.ts",
     "src/legacy/db/migrate-campaign-ai.ts",
