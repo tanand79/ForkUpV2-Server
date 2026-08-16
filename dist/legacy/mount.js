@@ -28,6 +28,7 @@ const superadmin_1 = require("./routes/superadmin");
 const campaign_ai_1 = require("./routes/campaign-ai");
 const ai_campaign_flow_1 = require("./routes/ai-campaign-flow");
 const fundraiser_1 = require("./routes/fundraiser");
+const support_1 = require("./routes/support");
 const receipts_2 = require("./lib/receipts");
 const pool_1 = require("./db/pool");
 function mountLegacyApi(app) {
@@ -92,6 +93,7 @@ function mountLegacyApi(app) {
     app.use("/api/campaign-ai", campaign_ai_1.campaignAiRouter);
     app.use("/api/ai-campaign-flow", ai_campaign_flow_1.aiCampaignFlowRouter);
     app.use("/api/fundraiser", fundraiser_1.fundraiserRouter);
+    app.use("/api/support", support_1.supportRouter);
     app.use("/api/manage", manage_1.manageRouter);
 }
 //# sourceMappingURL=mount.js.map
