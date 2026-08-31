@@ -163,8 +163,13 @@ async function upsertSnapshotRow(input: {
   donationPercentage: number;
   breakdown: ReturnType<typeof calculateSettlementSnapshot>;
   snapshotTime: Date;
+  bartenderTips?: number;
+  silentAuction?: number;
 }): Promise<void> {
   const b = input.breakdown;
+  const tips = Number(input.bartenderTips ?? 0);
+  const auction = Number(input.silentAuction ?? 0);
+  const manual = Math.round((tips + auction) * 100) / 100;
   const { rows: existing } = await pool.query<QueryResultRow>(
     input.businessId != null && input.locationId != null
       ? `SELECT id FROM settlements
@@ -190,6 +195,9 @@ async function upsertSnapshotRow(input: {
     b.platformFeePercent / 100,
     b.achDebitAmount,
     input.snapshotTime,
+    tips,
+    auction,
+    manual,
   ];
 
   if (existing.length > 0) {
@@ -208,11 +216,14 @@ async function upsertSnapshotRow(input: {
          platform_fee_percent = $11,
          ach_debit_amount = $12,
          snapshot_created_at = $13,
+         bartender_tips = $14,
+         silent_auction = $15,
+         manual_donations = $16,
          snapshot_status = 'SNAPSHOT_CREATED',
          ach_status = 'pending',
          locked_at = COALESCE(locked_at, $13),
          report_generated_at = $13
-       WHERE id = $14`,
+       WHERE id = $17`,
       [...values, existing[0].id],
     );
     return;
@@ -225,14 +236,16 @@ async function upsertSnapshotRow(input: {
        forkup_fee, net_nonprofit_amount, payment_status,
        giveback_amount, stripe_donations, stripe_amount_charged,
        stripe_fee, stripe_net, platform_fee_percent, ach_debit_amount,
-       snapshot_created_at, snapshot_status, ach_status, locked_at, report_generated_at
+       snapshot_created_at, snapshot_status, ach_status, locked_at, report_generated_at,
+       bartender_tips, silent_auction, manual_donations
      ) VALUES (
        $1, $2, $3,
        $4, $5, $6,
        $7, $8, 'pending',
        $9, $10, $11,
        $12, $13, $14, $15,
-       $16, 'SNAPSHOT_CREATED', 'pending', $16, $16
+       $16, 'SNAPSHOT_CREATED', 'pending', $16, $16,
+       $17, $18, $19
      )`,
     [
       input.campaignId,
@@ -354,10 +367,31 @@ export async function createSnapshotForCampaign(
   campaignId: number,
   settings = settlementEngineSettings(),
 ): Promise<void> {
+  const { rows: campaignRows } = await pool.query<QueryResultRow>(
+    `SELECT platform_fee_percent, card_fee_percent, card_fee_fixed,
+            bartender_tips, silent_auction
+     FROM campaigns WHERE id = $1`,
+    [campaignId],
+  );
+  const camp = campaignRows[0] ?? {};
+  const feePct =
+    camp.platform_fee_percent != null && Number(camp.platform_fee_percent) > 0
+      ? Number(camp.platform_fee_percent)
+      : settings.platformFeePercent;
+  const cardPct =
+    camp.card_fee_percent != null && Number(camp.card_fee_percent) > 0
+      ? Number(camp.card_fee_percent)
+      : settings.cardFeePercent;
+  const cardFixed =
+    camp.card_fee_fixed != null && Number(camp.card_fee_fixed) >= 0
+      ? Number(camp.card_fee_fixed)
+      : settings.cardFeeFixed;
+  const bartenderTips = Number(camp.bartender_tips ?? 0);
+  const silentAuction = Number(camp.silent_auction ?? 0);
+
   const partners = await loadPartners(campaignId);
   const virtual = await virtualDonationTotals(campaignId);
   const snapshotTime = new Date();
-  const feePct = settings.platformFeePercent;
 
   for (const partner of partners) {
     const { eligibleSales } = await partnerReceiptTotals(
@@ -387,10 +421,10 @@ export async function createSnapshotForCampaign(
     stripeDonations: virtual.amount,
     stripeAmountCharged: virtual.charged,
     stripeDonationCount: virtual.count,
-    cardFeePercent: settings.cardFeePercent,
-    cardFeeFixed: settings.cardFeeFixed,
+    cardFeePercent: cardPct,
+    cardFeeFixed: cardFixed,
   });
-  if (virtual.count > 0 || partners.length === 0) {
+  if (virtual.count > 0 || partners.length === 0 || bartenderTips > 0 || silentAuction > 0) {
     await upsertSnapshotRow({
       campaignId,
       businessId: null,
@@ -398,6 +432,8 @@ export async function createSnapshotForCampaign(
       donationPercentage: 0,
       breakdown: virtualBreakdown,
       snapshotTime,
+      bartenderTips,
+      silentAuction,
     });
   }
 
@@ -406,6 +442,45 @@ export async function createSnapshotForCampaign(
     newStatus: "SNAPSHOT_CREATED",
   });
   console.log(`[settlement-engine] Snapshot created for campaign ${campaignId}`);
+}
+
+const ACH_STATUSES = ["pending", "processing", "paid", "failed"] as const;
+
+export async function updateSettlementAchStatus(input: {
+  campaignId: number;
+  settlementId: number;
+  achStatus: string;
+  performedBy?: string;
+}): Promise<{ achStatus: string }> {
+  const next = input.achStatus.trim().toLowerCase();
+  if (!ACH_STATUSES.includes(next as (typeof ACH_STATUSES)[number])) {
+    throw new Error("ACH status must be pending, processing, paid, or failed");
+  }
+
+  const { rows } = await pool.query<QueryResultRow>(
+    `SELECT id, ach_status FROM settlements WHERE id = $1 AND campaign_id = $2`,
+    [input.settlementId, input.campaignId],
+  );
+  if (rows.length === 0) {
+    throw new Error("Settlement not found");
+  }
+
+  const previous = String(rows[0].ach_status ?? "pending");
+  await pool.query(`UPDATE settlements SET ach_status = $1 WHERE id = $2`, [
+    next,
+    input.settlementId,
+  ]);
+  await audit(
+    input.campaignId,
+    "ACH_STATUS_UPDATED",
+    `ACH status ${previous} → ${next}`,
+    {
+      oldStatus: previous,
+      newStatus: next,
+      settlementId: input.settlementId,
+    },
+  );
+  return { achStatus: next };
 }
 
 type CampaignEmailContext = {

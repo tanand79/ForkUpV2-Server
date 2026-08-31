@@ -12,6 +12,8 @@ import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { resolveAuthUser, bearerToken } from "../lib/auth";
 import { resolveStoredImageUrl } from "../lib/s3";
 import { pool } from "../db/pool";
+import { findDuplicateReceipt } from "../lib/receipt-duplicates";
+import { receiptUploadBlockedReason } from "../lib/receipt-upload-window";
 
 export const receiptsRouter = Router();
 
@@ -144,11 +146,19 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
     }
 
     const { rows: campaigns } = await connection.query<QueryResultRow>(
-      `SELECT id FROM campaigns WHERE slug = $1 AND campaign_status IN ('live', 'ready_to_launch', 'closed')`,
+      `SELECT id, campaign_status, campaign_end_date, settlement_grace_days,
+              settlement_frozen_at, adjustment_window_end
+       FROM campaigns WHERE slug = $1`,
       [req.params.slug],
     );
     if (campaigns.length === 0) {
       res.status(404).json({ error: "Campaign not found or not accepting receipts" });
+      return;
+    }
+    const windowReason = receiptUploadBlockedReason(campaigns[0]);
+    if (windowReason) {
+      const status = windowReason.includes("not found") ? 404 : 400;
+      res.status(status).json({ error: windowReason });
       return;
     }
     const campaignId = Number(campaigns[0].id);
@@ -260,6 +270,29 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
         receiptId,
       ],
     );
+
+    const duplicate = await findDuplicateReceipt(
+      connection,
+      campaignId,
+      locId,
+      {
+        receiptNumber: useMindee ? mindee.receiptNumber : null,
+        dateString: useMindee ? mindee.dateString : null,
+        timeString: useMindee ? mindee.timeString : null,
+        subtotal: subtotal || claimed,
+        total: useMindee && mindee.total > 0 ? mindee.total : null,
+      },
+      receiptId,
+    );
+    if (duplicate) {
+      await connection.query("ROLLBACK");
+      res.status(409).json({
+        error: "This receipt looks like a duplicate of one already uploaded.",
+        reason: duplicate.reason,
+        existingReceiptId: duplicate.receiptId,
+      });
+      return;
+    }
 
     await connection.query("COMMIT");
 

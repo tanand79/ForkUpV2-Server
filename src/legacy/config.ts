@@ -90,7 +90,7 @@ export const config = {
   },
   /**
    * Mindee OCR (Node-native). Empty MINDEE_API_KEY → placeholder / manual path.
-   * MINDEE_MODEL_ID reserved for future v2 enqueue; unused by v1 predict URL.
+   * When MINDEE_MODEL_ID is set (forkup-main / MindeeClientV2), use v2 enqueue+poll.
    */
   mindee: {
     get apiKey(): string {
@@ -103,6 +103,12 @@ export const config = {
       return (
         process.env.MINDEE_API_URL?.trim() ||
         "https://api.mindee.net/v1/products/mindee/expense_receipts/v5/predict"
+      );
+    },
+    get v2EnqueueUrl(): string {
+      return (
+        process.env.MINDEE_V2_ENQUEUE_URL?.trim() ||
+        "https://api-v2.mindee.net/v2/inferences/enqueue"
       );
     },
   },

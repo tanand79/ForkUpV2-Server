@@ -23,6 +23,7 @@ import { config } from "../config";
 import {
   lockCampaignForSettlement,
   runSettlementPipeline,
+  updateSettlementAchStatus,
 } from "../lib/settlement-engine";
 
 export const manageRouter = Router();
@@ -1269,7 +1270,8 @@ manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
     const { rows: campaigns } = await pool.query<QueryResultRow>(
       `SELECT id, campaign_name, campaign_status, campaign_start_date, campaign_end_date,
               settlement_grace_days, settlement_closed_at, settlement_frozen_at,
-              adjustment_window_end
+              adjustment_window_end, platform_fee_percent, card_fee_percent, card_fee_fixed,
+              bartender_tips, silent_auction
        FROM campaigns WHERE slug = $1`,
       [req.params.slug],
     );
@@ -1363,6 +1365,12 @@ manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
         closedAt: campaign.settlement_closed_at ?? null,
         frozenAt: campaign.settlement_frozen_at ?? null,
         adjustmentWindowEnd: campaign.adjustment_window_end ?? null,
+        platformFeePercent:
+          campaign.platform_fee_percent != null ? Number(campaign.platform_fee_percent) : null,
+        cardFeePercent: campaign.card_fee_percent != null ? Number(campaign.card_fee_percent) : null,
+        cardFeeFixed: campaign.card_fee_fixed != null ? Number(campaign.card_fee_fixed) : null,
+        bartenderTips: Number(campaign.bartender_tips ?? 0),
+        silentAuction: Number(campaign.silent_auction ?? 0),
       },
       pipeline: {
         closed: Boolean(campaign.settlement_closed_at),
@@ -1790,6 +1798,89 @@ manageRouter.post("/settlement/run-due", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to run settlement pipeline" });
+  }
+});
+
+manageRouter.patch("/campaigns/:slug/settlement-settings", async (req, res) => {
+  try {
+    const { rows: campaigns } = await pool.query<QueryResultRow>(
+      `SELECT id, settlement_frozen_at FROM campaigns WHERE slug = $1`,
+      [req.params.slug],
+    );
+    if (campaigns.length === 0) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    if (campaigns[0].settlement_frozen_at) {
+      res.status(400).json({ error: "Campaign is frozen. Fee and manual amounts cannot change." });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const toNullableFee = (value: unknown): number | null => {
+      if (value === null || value === "") return null;
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const toMoney = (value: unknown): number => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : 0;
+    };
+
+    await pool.query(
+      `UPDATE campaigns SET
+         platform_fee_percent = $1,
+         card_fee_percent = $2,
+         card_fee_fixed = $3,
+         bartender_tips = $4,
+         silent_auction = $5,
+         updated_at = NOW()
+       WHERE id = $6`,
+      [
+        toNullableFee(body.platformFeePercent),
+        toNullableFee(body.cardFeePercent),
+        toNullableFee(body.cardFeeFixed),
+        toMoney(body.bartenderTips),
+        toMoney(body.silentAuction),
+        campaigns[0].id,
+      ],
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save settlement settings" });
+  }
+});
+
+manageRouter.patch("/campaigns/:slug/settlements/:id/ach-status", async (req, res) => {
+  try {
+    const { rows: campaigns } = await pool.query<QueryResultRow>(
+      "SELECT id FROM campaigns WHERE slug = $1",
+      [req.params.slug],
+    );
+    if (campaigns.length === 0) {
+      res.status(404).json({ error: "Campaign not found" });
+      return;
+    }
+    const body = req.body as { achStatus?: string };
+    const result = await updateSettlementAchStatus({
+      campaignId: Number(campaigns[0].id),
+      settlementId: Number(req.params.id),
+      achStatus: String(body.achStatus ?? ""),
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to update ACH status";
+    if (message.includes("not found")) {
+      res.status(404).json({ error: message });
+      return;
+    }
+    if (message.includes("must be")) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    console.error(err);
+    res.status(500).json({ error: "Failed to update ACH status" });
   }
 });
 

@@ -165,6 +165,12 @@ CREATE TABLE IF NOT EXISTS campaigns (
   settlement_frozen_at TIMESTAMP,
   adjustment_window_end TIMESTAMP,
   settlement_closed_by VARCHAR(100),
+  -- Settlement parity with old engine: NULL fees = platform defaults (15 / 2.9 / 0.30)
+  platform_fee_percent DECIMAL(6,2),
+  card_fee_percent DECIMAL(6,3),
+  card_fee_fixed DECIMAL(10,2),
+  bartender_tips DECIMAL(12,2) NOT NULL DEFAULT 0,
+  silent_auction DECIMAL(12,2) NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_campaigns_nonprofit
