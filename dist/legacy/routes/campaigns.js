@@ -191,15 +191,38 @@ exports.campaignsRouter.get("/:slug/donations", async (req, res) => {
         }
         const campaignId = Number(campaign.id);
         const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
-        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*) AS count FROM donations
-       WHERE campaign_id = $1 AND payment_status = 'completed' AND donation_type = 'virtual'`, [campaignId]);
-        const { rows: donations } = await pool_1.pool.query(`SELECT d.amount, d.notes, d.created_at, s.first_name
-       FROM donations d
-       LEFT JOIN supporters s ON s.id = d.supporter_id
-       WHERE d.campaign_id = $1
-         AND d.payment_status = 'completed'
-         AND d.donation_type = 'virtual'
-       ORDER BY d.created_at DESC
+        const { rows: countRows } = await pool_1.pool.query(`SELECT COUNT(*) AS count FROM (
+         SELECT d.id
+         FROM donations d
+         WHERE d.campaign_id = $1
+           AND d.payment_status = 'completed'
+           AND d.donation_type = 'virtual'
+         UNION ALL
+         SELECT r.id
+         FROM receipts r
+         WHERE r.campaign_id = $1
+           AND r.review_status = 'approved'
+       ) feed_items`, [campaignId]);
+        const { rows: donations } = await pool_1.pool.query(`SELECT amount, notes, created_at, first_name
+       FROM (
+         SELECT d.amount, d.notes, d.created_at, s.first_name
+         FROM donations d
+         LEFT JOIN supporters s ON s.id = d.supporter_id
+         WHERE d.campaign_id = $1
+           AND d.payment_status = 'completed'
+           AND d.donation_type = 'virtual'
+         UNION ALL
+         SELECT
+           COALESCE(r.calculated_donation, 0) AS amount,
+           NULL AS notes,
+           COALESCE(r.approved_at, r.uploaded_at) AS created_at,
+           s.first_name
+         FROM receipts r
+         LEFT JOIN supporters s ON s.id = r.supporter_id
+         WHERE r.campaign_id = $1
+           AND r.review_status = 'approved'
+       ) feed
+       ORDER BY created_at DESC
        LIMIT $2`, [campaignId, limit]);
         res.json({
             totalCount: Number(countRows[0]?.count ?? 0),
@@ -262,28 +285,58 @@ exports.campaignsRouter.get("/:slug/leaderboard", async (req, res) => {
        ORDER BY raised DESC, cp.name ASC
        LIMIT $2`, [campaignId, fundraisersLimit]);
         const { rows: donorCountRows } = await pool_1.pool.query(`SELECT COUNT(*) AS count FROM (
-         SELECT d.supporter_id
+         SELECT supporter_id FROM (
+           SELECT d.supporter_id
+           FROM donations d
+           WHERE d.campaign_id = $1
+             AND d.payment_status = 'completed'
+             AND d.donation_type = 'virtual'
+             AND d.supporter_id IS NOT NULL
+           UNION
+           SELECT r.supporter_id
+           FROM receipts r
+           WHERE r.campaign_id = $1
+             AND r.review_status = 'approved'
+             AND r.supporter_id IS NOT NULL
+         ) all_donor_ids
+       ) donor_groups`, [campaignId]);
+        const { rows: donorRows } = await pool_1.pool.query(`SELECT
+         supporter_id,
+         BOOL_OR(any_anonymous) AS any_anonymous,
+         MAX(first_name) AS first_name,
+         SUM(amount) AS total_amount,
+         SUM(item_count)::int AS donation_count,
+         MAX(occurred_at) AS last_at
+       FROM (
+         SELECT
+           d.supporter_id,
+           (d.notes = 'anonymous') AS any_anonymous,
+           s.first_name,
+           d.amount,
+           1 AS item_count,
+           d.created_at AS occurred_at
          FROM donations d
+         LEFT JOIN supporters s ON s.id = d.supporter_id
          WHERE d.campaign_id = $1
            AND d.payment_status = 'completed'
            AND d.donation_type = 'virtual'
            AND d.supporter_id IS NOT NULL
-         GROUP BY d.supporter_id
-       ) donor_groups`, [campaignId]);
-        const { rows: donorRows } = await pool_1.pool.query(`SELECT
-         d.supporter_id,
-         BOOL_OR(d.notes = 'anonymous') AS any_anonymous,
-         MAX(s.first_name) AS first_name,
-         SUM(d.amount) AS total_amount,
-         COUNT(*)::int AS donation_count
-       FROM donations d
-       LEFT JOIN supporters s ON s.id = d.supporter_id
-       WHERE d.campaign_id = $1
-         AND d.payment_status = 'completed'
-         AND d.donation_type = 'virtual'
-         AND d.supporter_id IS NOT NULL
-       GROUP BY d.supporter_id
-       ORDER BY total_amount DESC, MAX(d.created_at) DESC
+         UNION ALL
+         SELECT
+           r.supporter_id,
+           FALSE AS any_anonymous,
+           s.first_name,
+           COALESCE(r.calculated_donation, 0) AS amount,
+           1 AS item_count,
+           COALESCE(r.approved_at, r.uploaded_at) AS occurred_at
+         FROM receipts r
+         LEFT JOIN supporters s ON s.id = r.supporter_id
+         WHERE r.campaign_id = $1
+           AND r.review_status = 'approved'
+           AND r.supporter_id IS NOT NULL
+       ) combined
+       GROUP BY supporter_id
+       ORDER BY total_amount DESC, last_at DESC
        LIMIT $2`, [campaignId, donorsLimit]);
         res.json({
             fundraisersTotalCount: Number(fundraiserCountRows[0]?.count ?? 0),
