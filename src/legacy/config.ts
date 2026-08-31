@@ -107,6 +107,15 @@ export const config = {
     },
   },
   /**
+   * Settlement engine (Nest equivalent of ForkUpSettlementEngine Worker).
+   * SETTLEMENT_ENGINE_ENABLED=false disables the in-process timer; use
+   * POST /api/manage/settlement/run-due with AUTOMATION_SECRET instead.
+   */
+  get settlementEngineEnabled(): boolean {
+    const v = (process.env.SETTLEMENT_ENGINE_ENABLED ?? "true").trim().toLowerCase();
+    return v !== "false" && v !== "0";
+  },
+  /**
    * ACH AES-256-CBC (Node-native parity with old .NET EncryptionService).
    * Both must be set before POST /api/business/locations/:id/ach can save.
    */

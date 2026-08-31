@@ -23,6 +23,7 @@ const SEED_BUSINESS_SLUGS = ["olive-and-oak", "harbor-coffee", "farm-table"];
 /** Child → parent order for campaign / invite / money tables (all rows). */
 const CAMPAIGN_TABLES = [
   "donations",
+  "settlement_audit_log",
   "settlements",
   "receipts",
   "participation_intents",

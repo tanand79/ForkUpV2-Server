@@ -2,6 +2,7 @@ import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
 import { mountLegacyApi } from "./legacy/mount";
 import { config } from "./legacy/config";
+import { startSettlementWorker } from "./legacy/lib/settlement-worker";
 
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled rejection:", reason);
@@ -16,6 +17,7 @@ async function bootstrap() {
   console.log(
     `ForkUp API (NestJS) on port ${config.port} (${config.nodeEnv}, db: ${config.databaseTarget})`,
   );
+  startSettlementWorker();
 }
 
 bootstrap().catch((err) => {

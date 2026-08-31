@@ -69,6 +69,12 @@ export async function approveReceipt(
   const breakdown = calculateGivebackBreakdown(eligible, giveback);
   const donation = breakdown.donationPool;
 
+  const { rows: freezeRows } = await connection.query<QueryResultRow>(
+    `SELECT settlement_frozen_at FROM campaigns WHERE id = $1`,
+    [receipt.campaign_id],
+  );
+  const settlementFrozen = Boolean(freezeRows[0]?.settlement_frozen_at);
+
   await connection.query(
     `UPDATE receipts SET
       eligible_subtotal = $1,
@@ -91,7 +97,7 @@ export async function approveReceipt(
     [Math.round(donation), receipt.campaign_id],
   );
 
-  if (receipt.business_id && receipt.location_id) {
+  if (receipt.business_id && receipt.location_id && !settlementFrozen) {
     const { rows: existing } = await connection.query<QueryResultRow>(
       `SELECT id FROM settlements
        WHERE campaign_id = $1 AND business_id = $2 AND location_id = $3`,

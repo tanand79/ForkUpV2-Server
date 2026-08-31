@@ -20,6 +20,10 @@ import { buildCampaignVisibility } from "../lib/campaign-visibility";
 import type { CampaignStatus, MethodType } from "../types/campaign";
 import { participantsRouter } from "./participants";
 import { config } from "../config";
+import {
+  lockCampaignForSettlement,
+  runSettlementPipeline,
+} from "../lib/settlement-engine";
 
 export const manageRouter = Router();
 
@@ -1263,7 +1267,9 @@ manageRouter.post("/automation/run-due", async (req, res) => {
 manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
   try {
     const { rows: campaigns } = await pool.query<QueryResultRow>(
-      `SELECT id, campaign_name, campaign_status, campaign_start_date, campaign_end_date
+      `SELECT id, campaign_name, campaign_status, campaign_start_date, campaign_end_date,
+              settlement_grace_days, settlement_closed_at, settlement_frozen_at,
+              adjustment_window_end
        FROM campaigns WHERE slug = $1`,
       [req.params.slug],
     );
@@ -1295,13 +1301,22 @@ manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
 
     const businessReports = settlements.map((s) => ({
       id: s.id,
-      businessName: s.business_name ?? "Campaign total",
-      locationName: s.location_name ?? "—",
+      businessName: s.business_name ?? (s.business_id == null ? "Online donations" : "Campaign total"),
+      locationName: s.location_name ?? (s.business_id == null ? "Virtual" : "—"),
       eligibleSales: Number(s.eligible_sales),
       donationPercentage: Number(s.donation_percentage),
       donationPool: Number(s.donation_pool),
+      givebackAmount: Number(s.giveback_amount ?? 0),
       forkupFee: Number(s.forkup_fee),
       netNonprofitAmount: Number(s.net_nonprofit_amount),
+      stripeDonations: Number(s.stripe_donations ?? 0),
+      stripeFee: Number(s.stripe_fee ?? 0),
+      stripeNet: Number(s.stripe_net ?? 0),
+      achDebitAmount: Number(s.ach_debit_amount ?? s.forkup_fee ?? 0),
+      achStatus: s.ach_status ?? "pending",
+      snapshotStatus: s.snapshot_status ?? "pending",
+      pdfBusinessPath: s.pdf_business_path ?? null,
+      pdfAchPath: s.pdf_ach_path ?? null,
       paymentStatus: s.payment_status,
       lockedAt: s.locked_at,
     }));
@@ -1319,9 +1334,23 @@ manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
     const { rows: donationRows } = await pool.query<QueryResultRow>(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
        FROM donations
-       WHERE campaign_id = $1 AND donation_type = 'virtual'`,
+       WHERE campaign_id = $1 AND donation_type = 'virtual'
+         AND payment_status = 'completed'`,
       [campaign.id],
     );
+
+    const { rows: auditRows } = await pool.query<QueryResultRow>(
+      `SELECT action, details, created_at
+       FROM settlement_audit_log
+       WHERE campaign_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [campaign.id],
+    );
+
+    const nonprofitPdf =
+      settlements.find((s) => s.pdf_nonprofit_path)?.pdf_nonprofit_path ?? null;
+    const internalPdf =
+      settlements.find((s) => s.pdf_internal_path)?.pdf_internal_path ?? null;
 
     res.json({
       campaign: {
@@ -1330,7 +1359,26 @@ manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
         startDate: toDateOnlyString(campaign.campaign_start_date),
         endDate: toDateOnlyString(campaign.campaign_end_date),
         isLocked: campaign.campaign_status === "settlement",
+        graceDays: Number(campaign.settlement_grace_days ?? 7),
+        closedAt: campaign.settlement_closed_at ?? null,
+        frozenAt: campaign.settlement_frozen_at ?? null,
+        adjustmentWindowEnd: campaign.adjustment_window_end ?? null,
       },
+      pipeline: {
+        closed: Boolean(campaign.settlement_closed_at),
+        frozen: Boolean(campaign.settlement_frozen_at),
+        snapshot: settlements.some((s) => s.snapshot_created_at),
+        statementsSent: auditRows.some((a) => a.action === "SETTLEMENT_EMAIL_SENT"),
+      },
+      statements: {
+        nonprofitPdf,
+        internalPdf,
+      },
+      auditLog: auditRows.map((a) => ({
+        action: a.action,
+        details: a.details,
+        at: a.created_at,
+      })),
       receiptStats: {
         total: Number(receiptStats[0]?.total_receipts ?? 0),
         approved: Number(receiptStats[0]?.approved_receipts ?? 0),
@@ -1695,11 +1743,8 @@ async function sendSettlementEmails(campaignId: number): Promise<void> {
 }
 
 manageRouter.post("/campaigns/:slug/lock", async (req, res) => {
-  const connection = await pool.connect();
   try {
-    await connection.query("BEGIN");
-
-    const { rows: campaigns } = await connection.query<QueryResultRow>(
+    const { rows: campaigns } = await pool.query<QueryResultRow>(
       "SELECT id, campaign_status FROM campaigns WHERE slug = $1",
       [req.params.slug],
     );
@@ -1709,32 +1754,42 @@ manageRouter.post("/campaigns/:slug/lock", async (req, res) => {
     }
 
     const campaignId = Number(campaigns[0].id);
-    if (campaigns[0].campaign_status === "settlement") {
-      res.status(400).json({ error: "Campaign is already locked for settlement" });
-      return;
-    }
-
-    await connection.query(
-      `UPDATE campaigns SET campaign_status = 'settlement', updated_at = NOW() WHERE id = $1`,
-      [campaignId],
-    );
-
-    await connection.query(
-      `UPDATE settlements SET locked_at = NOW(), report_generated_at = NOW() WHERE campaign_id = $1`,
-      [campaignId],
-    );
-
-    await connection.query("COMMIT");
-
-    await sendSettlementEmails(campaignId);
-
+    await lockCampaignForSettlement(campaignId);
     res.json({ success: true, status: "settlement" });
   } catch (err) {
-    await connection.query("ROLLBACK");
+    const message = err instanceof Error ? err.message : "Failed to lock campaign";
+    if (message.includes("already locked")) {
+      res.status(400).json({ error: message });
+      return;
+    }
     console.error(err);
     res.status(500).json({ error: "Failed to lock campaign" });
-  } finally {
-    connection.release();
+  }
+});
+
+/**
+ * Settlement engine sweep (same pipeline as the in-process worker).
+ * Gated by x-automation-secret matching AUTOMATION_SECRET.
+ */
+manageRouter.post("/settlement/run-due", async (req, res) => {
+  try {
+    const secret = config.automationSecret;
+    if (!secret) {
+      res.status(503).json({
+        error: "Automation is not configured. Set AUTOMATION_SECRET to enable this endpoint.",
+      });
+      return;
+    }
+    const provided = String(req.header("x-automation-secret") ?? "");
+    if (provided !== secret) {
+      res.status(401).json({ error: "Invalid or missing automation secret." });
+      return;
+    }
+    const result = await runSettlementPipeline();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to run settlement pipeline" });
   }
 });
 

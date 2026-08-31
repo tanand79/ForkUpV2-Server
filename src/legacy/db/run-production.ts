@@ -56,6 +56,8 @@ async function run() {
       "./migrate-business-invite-status-fields"
     );
     await migrateBusinessInviteStatusFields({ closePool: false });
+    const { migrateSettlementEngine } = await import("./migrate-settlement-engine");
+    await migrateSettlementEngine({ closePool: false });
   }
 
   if (resolved === "foundation" || resolved === "setup") {

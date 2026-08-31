@@ -21,6 +21,7 @@ const LOCAL_RESET_TABLES = [
   "email_log",
   "automation_runs",
   "payouts",
+  "settlement_audit_log",
   "password_reset_tokens",
   "auth_sessions",
   "organization_users",
