@@ -4,6 +4,7 @@ const core_1 = require("@nestjs/core");
 const app_module_1 = require("./app.module");
 const mount_1 = require("./legacy/mount");
 const config_1 = require("./legacy/config");
+const settlement_worker_1 = require("./legacy/lib/settlement-worker");
 process.on("unhandledRejection", (reason) => {
     console.error("Unhandled rejection:", reason);
 });
@@ -13,6 +14,7 @@ async function bootstrap() {
     (0, mount_1.mountLegacyApi)(expressApp);
     await app.listen(config_1.config.port, "0.0.0.0");
     console.log(`ForkUp API (NestJS) on port ${config_1.config.port} (${config_1.config.nodeEnv}, db: ${config_1.config.databaseTarget})`);
+    (0, settlement_worker_1.startSettlementWorker)();
 }
 bootstrap().catch((err) => {
     console.error("Server failed to start:", err);

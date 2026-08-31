@@ -9,3 +9,33 @@ export interface GivebackFinancialBreakdown {
 export declare function calculateDonationPool(eligibleSubtotal: number, givebackPercentage: number): number;
 export declare function calculatePlatformFee(donationPool: number, platformFeePercent?: number): number;
 export declare function calculateGivebackBreakdown(eligibleSales: number, givebackPercentage: number, platformFeePercent?: number): GivebackFinancialBreakdown;
+export declare const DEFAULT_CARD_FEE_PERCENT = 2.9;
+export declare const DEFAULT_CARD_FEE_FIXED = 0.3;
+export declare function roundMoney(value: number): number;
+export declare function calculateCardProcessingFee(amountCharged: number, donationCount: number, percent?: number, fixedFee?: number): number;
+export interface SettlementSnapshotBreakdown {
+    eligibleSales: number;
+    givebackPercentage: number;
+    grossGiveback: number;
+    platformFeePercent: number;
+    forkupFee: number;
+    netFromGiveback: number;
+    stripeDonations: number;
+    stripeAmountCharged: number;
+    stripeDonationCount: number;
+    stripeFee: number;
+    stripeNet: number;
+    donationPool: number;
+    netNonprofitAmount: number;
+    achDebitAmount: number;
+}
+export declare function calculateSettlementSnapshot(input: {
+    eligibleSales: number;
+    givebackPercentage: number;
+    platformFeePercent?: number;
+    stripeDonations?: number;
+    stripeAmountCharged?: number;
+    stripeDonationCount?: number;
+    cardFeePercent?: number;
+    cardFeeFixed?: number;
+}): SettlementSnapshotBreakdown;

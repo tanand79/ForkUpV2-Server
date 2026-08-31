@@ -13,6 +13,7 @@ const business_email_templates_1 = require("../lib/business-email-templates");
 const campaign_visibility_1 = require("../lib/campaign-visibility");
 const participants_1 = require("./participants");
 const config_1 = require("../config");
+const settlement_engine_1 = require("../lib/settlement-engine");
 exports.manageRouter = (0, express_1.Router)();
 exports.manageRouter.use("/campaigns/:slug/participants", participants_1.participantsRouter);
 const PARTNER_STATUS_PRIORITY = {
@@ -972,7 +973,10 @@ exports.manageRouter.post("/automation/run-due", async (req, res) => {
 });
 exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
     try {
-        const { rows: campaigns } = await pool_1.pool.query(`SELECT id, campaign_name, campaign_status, campaign_start_date, campaign_end_date
+        const { rows: campaigns } = await pool_1.pool.query(`SELECT id, campaign_name, campaign_status, campaign_start_date, campaign_end_date,
+              settlement_grace_days, settlement_closed_at, settlement_frozen_at,
+              adjustment_window_end, platform_fee_percent, card_fee_percent, card_fee_fixed,
+              bartender_tips, silent_auction
        FROM campaigns WHERE slug = $1`, [req.params.slug]);
         if (campaigns.length === 0) {
             res.status(404).json({ error: "Campaign not found" });
@@ -992,13 +996,22 @@ exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
        FROM receipts WHERE campaign_id = $1`, [campaign.id]);
         const businessReports = settlements.map((s) => ({
             id: s.id,
-            businessName: s.business_name ?? "Campaign total",
-            locationName: s.location_name ?? "—",
+            businessName: s.business_name ?? (s.business_id == null ? "Online donations" : "Campaign total"),
+            locationName: s.location_name ?? (s.business_id == null ? "Virtual" : "—"),
             eligibleSales: Number(s.eligible_sales),
             donationPercentage: Number(s.donation_percentage),
             donationPool: Number(s.donation_pool),
+            givebackAmount: Number(s.giveback_amount ?? 0),
             forkupFee: Number(s.forkup_fee),
             netNonprofitAmount: Number(s.net_nonprofit_amount),
+            stripeDonations: Number(s.stripe_donations ?? 0),
+            stripeFee: Number(s.stripe_fee ?? 0),
+            stripeNet: Number(s.stripe_net ?? 0),
+            achDebitAmount: Number(s.ach_debit_amount ?? s.forkup_fee ?? 0),
+            achStatus: s.ach_status ?? "pending",
+            snapshotStatus: s.snapshot_status ?? "pending",
+            pdfBusinessPath: s.pdf_business_path ?? null,
+            pdfAchPath: s.pdf_ach_path ?? null,
             paymentStatus: s.payment_status,
             lockedAt: s.locked_at,
         }));
@@ -1010,7 +1023,14 @@ exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
         }), { eligibleSales: 0, donationPool: 0, forkupFee: 0, netNonprofitAmount: 0 });
         const { rows: donationRows } = await pool_1.pool.query(`SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
        FROM donations
-       WHERE campaign_id = $1 AND donation_type = 'virtual'`, [campaign.id]);
+       WHERE campaign_id = $1 AND donation_type = 'virtual'
+         AND payment_status = 'completed'`, [campaign.id]);
+        const { rows: auditRows } = await pool_1.pool.query(`SELECT action, details, created_at
+       FROM settlement_audit_log
+       WHERE campaign_id = $1
+       ORDER BY created_at ASC, id ASC`, [campaign.id]);
+        const nonprofitPdf = settlements.find((s) => s.pdf_nonprofit_path)?.pdf_nonprofit_path ?? null;
+        const internalPdf = settlements.find((s) => s.pdf_internal_path)?.pdf_internal_path ?? null;
         res.json({
             campaign: {
                 name: campaign.campaign_name,
@@ -1018,7 +1038,31 @@ exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
                 startDate: (0, date_only_1.toDateOnlyString)(campaign.campaign_start_date),
                 endDate: (0, date_only_1.toDateOnlyString)(campaign.campaign_end_date),
                 isLocked: campaign.campaign_status === "settlement",
+                graceDays: Number(campaign.settlement_grace_days ?? 7),
+                closedAt: campaign.settlement_closed_at ?? null,
+                frozenAt: campaign.settlement_frozen_at ?? null,
+                adjustmentWindowEnd: campaign.adjustment_window_end ?? null,
+                platformFeePercent: campaign.platform_fee_percent != null ? Number(campaign.platform_fee_percent) : null,
+                cardFeePercent: campaign.card_fee_percent != null ? Number(campaign.card_fee_percent) : null,
+                cardFeeFixed: campaign.card_fee_fixed != null ? Number(campaign.card_fee_fixed) : null,
+                bartenderTips: Number(campaign.bartender_tips ?? 0),
+                silentAuction: Number(campaign.silent_auction ?? 0),
             },
+            pipeline: {
+                closed: Boolean(campaign.settlement_closed_at),
+                frozen: Boolean(campaign.settlement_frozen_at),
+                snapshot: settlements.some((s) => s.snapshot_created_at),
+                statementsSent: auditRows.some((a) => a.action === "SETTLEMENT_EMAIL_SENT"),
+            },
+            statements: {
+                nonprofitPdf,
+                internalPdf,
+            },
+            auditLog: auditRows.map((a) => ({
+                action: a.action,
+                details: a.details,
+                at: a.created_at,
+            })),
             receiptStats: {
                 total: Number(receiptStats[0]?.total_receipts ?? 0),
                 approved: Number(receiptStats[0]?.approved_receipts ?? 0),
@@ -1317,32 +1361,119 @@ async function sendSettlementEmails(campaignId) {
     }
 }
 exports.manageRouter.post("/campaigns/:slug/lock", async (req, res) => {
-    const connection = await pool_1.pool.connect();
     try {
-        await connection.query("BEGIN");
-        const { rows: campaigns } = await connection.query("SELECT id, campaign_status FROM campaigns WHERE slug = $1", [req.params.slug]);
+        const { rows: campaigns } = await pool_1.pool.query("SELECT id, campaign_status FROM campaigns WHERE slug = $1", [req.params.slug]);
         if (campaigns.length === 0) {
             res.status(404).json({ error: "Campaign not found" });
             return;
         }
         const campaignId = Number(campaigns[0].id);
-        if (campaigns[0].campaign_status === "settlement") {
-            res.status(400).json({ error: "Campaign is already locked for settlement" });
-            return;
-        }
-        await connection.query(`UPDATE campaigns SET campaign_status = 'settlement', updated_at = NOW() WHERE id = $1`, [campaignId]);
-        await connection.query(`UPDATE settlements SET locked_at = NOW(), report_generated_at = NOW() WHERE campaign_id = $1`, [campaignId]);
-        await connection.query("COMMIT");
-        await sendSettlementEmails(campaignId);
+        await (0, settlement_engine_1.lockCampaignForSettlement)(campaignId);
         res.json({ success: true, status: "settlement" });
     }
     catch (err) {
-        await connection.query("ROLLBACK");
+        const message = err instanceof Error ? err.message : "Failed to lock campaign";
+        if (message.includes("already locked")) {
+            res.status(400).json({ error: message });
+            return;
+        }
         console.error(err);
         res.status(500).json({ error: "Failed to lock campaign" });
     }
-    finally {
-        connection.release();
+});
+exports.manageRouter.post("/settlement/run-due", async (req, res) => {
+    try {
+        const secret = config_1.config.automationSecret;
+        if (!secret) {
+            res.status(503).json({
+                error: "Automation is not configured. Set AUTOMATION_SECRET to enable this endpoint.",
+            });
+            return;
+        }
+        const provided = String(req.header("x-automation-secret") ?? "");
+        if (provided !== secret) {
+            res.status(401).json({ error: "Invalid or missing automation secret." });
+            return;
+        }
+        const result = await (0, settlement_engine_1.runSettlementPipeline)();
+        res.json({ success: true, ...result });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to run settlement pipeline" });
+    }
+});
+exports.manageRouter.patch("/campaigns/:slug/settlement-settings", async (req, res) => {
+    try {
+        const { rows: campaigns } = await pool_1.pool.query(`SELECT id, settlement_frozen_at FROM campaigns WHERE slug = $1`, [req.params.slug]);
+        if (campaigns.length === 0) {
+            res.status(404).json({ error: "Campaign not found" });
+            return;
+        }
+        if (campaigns[0].settlement_frozen_at) {
+            res.status(400).json({ error: "Campaign is frozen. Fee and manual amounts cannot change." });
+            return;
+        }
+        const body = req.body;
+        const toNullableFee = (value) => {
+            if (value === null || value === "")
+                return null;
+            const n = Number(value);
+            return Number.isFinite(n) && n >= 0 ? n : null;
+        };
+        const toMoney = (value) => {
+            const n = Number(value);
+            return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : 0;
+        };
+        await pool_1.pool.query(`UPDATE campaigns SET
+         platform_fee_percent = $1,
+         card_fee_percent = $2,
+         card_fee_fixed = $3,
+         bartender_tips = $4,
+         silent_auction = $5,
+         updated_at = NOW()
+       WHERE id = $6`, [
+            toNullableFee(body.platformFeePercent),
+            toNullableFee(body.cardFeePercent),
+            toNullableFee(body.cardFeeFixed),
+            toMoney(body.bartenderTips),
+            toMoney(body.silentAuction),
+            campaigns[0].id,
+        ]);
+        res.json({ success: true });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to save settlement settings" });
+    }
+});
+exports.manageRouter.patch("/campaigns/:slug/settlements/:id/ach-status", async (req, res) => {
+    try {
+        const { rows: campaigns } = await pool_1.pool.query("SELECT id FROM campaigns WHERE slug = $1", [req.params.slug]);
+        if (campaigns.length === 0) {
+            res.status(404).json({ error: "Campaign not found" });
+            return;
+        }
+        const body = req.body;
+        const result = await (0, settlement_engine_1.updateSettlementAchStatus)({
+            campaignId: Number(campaigns[0].id),
+            settlementId: Number(req.params.id),
+            achStatus: String(body.achStatus ?? ""),
+        });
+        res.json({ success: true, ...result });
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to update ACH status";
+        if (message.includes("not found")) {
+            res.status(404).json({ error: message });
+            return;
+        }
+        if (message.includes("must be")) {
+            res.status(400).json({ error: message });
+            return;
+        }
+        console.error(err);
+        res.status(500).json({ error: "Failed to update ACH status" });
     }
 });
 const PAYOUT_TYPES = ["business_to_forkup", "forkup_to_nonprofit", "adjustment"];

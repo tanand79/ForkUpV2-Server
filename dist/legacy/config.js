@@ -86,6 +86,14 @@ exports.config = {
             return (process.env.MINDEE_API_URL?.trim() ||
                 "https://api.mindee.net/v1/products/mindee/expense_receipts/v5/predict");
         },
+        get v2EnqueueUrl() {
+            return (process.env.MINDEE_V2_ENQUEUE_URL?.trim() ||
+                "https://api-v2.mindee.net/v2/inferences/enqueue");
+        },
+    },
+    get settlementEngineEnabled() {
+        const v = (process.env.SETTLEMENT_ENGINE_ENABLED ?? "true").trim().toLowerCase();
+        return v !== "false" && v !== "0";
     },
     achEncryption: {
         get key() {

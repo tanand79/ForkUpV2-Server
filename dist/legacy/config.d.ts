@@ -15,7 +15,9 @@ export declare const config: {
         readonly apiKey: string;
         readonly modelId: string;
         readonly apiUrl: string;
+        readonly v2EnqueueUrl: string;
     };
+    readonly settlementEngineEnabled: boolean;
     achEncryption: {
         readonly key: string;
         readonly iv: string;

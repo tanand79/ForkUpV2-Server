@@ -13,7 +13,10 @@ import { resolveAuthUser, bearerToken } from "../lib/auth";
 import { resolveStoredImageUrl } from "../lib/s3";
 import { pool } from "../db/pool";
 import { findDuplicateReceipt } from "../lib/receipt-duplicates";
-import { receiptUploadBlockedReason } from "../lib/receipt-upload-window";
+import {
+  receiptUploadBlockedReason,
+  type ReceiptWindowCampaign,
+} from "../lib/receipt-upload-window";
 
 export const receiptsRouter = Router();
 
@@ -145,7 +148,9 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
       return;
     }
 
-    const { rows: campaigns } = await connection.query<QueryResultRow>(
+    const { rows: campaigns } = await connection.query<
+      QueryResultRow & ReceiptWindowCampaign & { id: number }
+    >(
       `SELECT id, campaign_status, campaign_end_date, settlement_grace_days,
               settlement_frozen_at, adjustment_window_end
        FROM campaigns WHERE slug = $1`,

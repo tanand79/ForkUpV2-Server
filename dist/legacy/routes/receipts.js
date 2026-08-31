@@ -9,6 +9,8 @@ const mailer_1 = require("../lib/mailer");
 const auth_1 = require("../lib/auth");
 const s3_1 = require("../lib/s3");
 const pool_1 = require("../db/pool");
+const receipt_duplicates_1 = require("../lib/receipt-duplicates");
+const receipt_upload_window_1 = require("../lib/receipt-upload-window");
 exports.receiptsRouter = (0, express_1.Router)();
 async function notifySupporterOfReceiptReview(receiptId, action) {
     const { rows } = await pool_1.pool.query(`SELECT s.email AS supporter_email, s.first_name AS supporter_name,
@@ -96,9 +98,17 @@ exports.receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
             res.status(400).json({ error: "Business, location, and method are required" });
             return;
         }
-        const { rows: campaigns } = await connection.query(`SELECT id FROM campaigns WHERE slug = $1 AND campaign_status IN ('live', 'ready_to_launch', 'closed')`, [req.params.slug]);
+        const { rows: campaigns } = await connection.query(`SELECT id, campaign_status, campaign_end_date, settlement_grace_days,
+              settlement_frozen_at, adjustment_window_end
+       FROM campaigns WHERE slug = $1`, [req.params.slug]);
         if (campaigns.length === 0) {
             res.status(404).json({ error: "Campaign not found or not accepting receipts" });
+            return;
+        }
+        const windowReason = (0, receipt_upload_window_1.receiptUploadBlockedReason)(campaigns[0]);
+        if (windowReason) {
+            const status = windowReason.includes("not found") ? 404 : 400;
+            res.status(status).json({ error: windowReason });
             return;
         }
         const campaignId = Number(campaigns[0].id);
@@ -185,6 +195,22 @@ exports.receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
             useMindee ? mindee.isManualSubtotal : claimed == null,
             receiptId,
         ]);
+        const duplicate = await (0, receipt_duplicates_1.findDuplicateReceipt)(connection, campaignId, locId, {
+            receiptNumber: useMindee ? mindee.receiptNumber : null,
+            dateString: useMindee ? mindee.dateString : null,
+            timeString: useMindee ? mindee.timeString : null,
+            subtotal: subtotal || claimed,
+            total: useMindee && mindee.total > 0 ? mindee.total : null,
+        }, receiptId);
+        if (duplicate) {
+            await connection.query("ROLLBACK");
+            res.status(409).json({
+                error: "This receipt looks like a duplicate of one already uploaded.",
+                reason: duplicate.reason,
+                existingReceiptId: duplicate.receiptId,
+            });
+            return;
+        }
         await connection.query("COMMIT");
         res.status(201).json({
             id: receiptId,

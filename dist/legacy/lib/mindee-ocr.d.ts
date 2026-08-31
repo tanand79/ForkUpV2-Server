@@ -11,6 +11,7 @@ export interface MindeeOcrResult {
     receiptDate: Date | null;
     total: number;
     tax: number;
+    tip: number;
     totalLineItems: number;
     subtotal: number;
     eligibleSubtotal: number;
@@ -18,7 +19,8 @@ export interface MindeeOcrResult {
     message: string;
     isManualSubtotal: boolean;
 }
-export declare function normalizeSubtotal(subtotal: number, total: number, tax: number, totalLineItems: number): number;
+export declare function normalizeSubtotal(subtotal: number, total: number, tax: number, totalLineItems: number, tip?: number): number;
+export declare function sumLineItems(lineItems: unknown): number;
 export declare function extractReceiptWithMindee(input: {
     imageBase64: string;
     mimeType: string;
