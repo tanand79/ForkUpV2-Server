@@ -71,6 +71,10 @@ export async function migrateSuperadmin(options: DbTaskOptions = {}) {
 
     const defaults: [string, string][] = [
       ["ai_model_id", process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0"],
+      [
+        "receipt_ai_model_id",
+        process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0",
+      ],
       ["platform_fee_percent", "15"],
       ["email_provider", "ses"],
       ["smtp_host", ""],

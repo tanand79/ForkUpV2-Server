@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { aiChat, aiProviderName } from "../lib/ai-chat";
 
 export const improveStoryRouter = Router();
@@ -53,6 +54,8 @@ improveStoryRouter.post("/improve-story", async (req, res) => {
       user: story,
       maxTokens: 2048,
       temperature: 0.4,
+      modelId: typeof req.body?.modelId === "string" ? req.body.modelId : undefined,
+      userId: (await resolveAuthUser(bearerToken(req)))?.id ?? null,
     });
 
     res.json({ improved, provider: aiProviderName() });

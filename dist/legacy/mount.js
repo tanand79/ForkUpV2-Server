@@ -21,6 +21,7 @@ const generate_organization_draft_1 = require("./routes/generate-organization-dr
 const receipts_1 = require("./routes/receipts");
 const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
+const ai_1 = require("./routes/ai");
 const profiles_1 = require("./routes/profiles");
 const us_nonprofit_suggest_1 = require("./routes/us-nonprofit-suggest");
 const library_1 = require("./routes/library");
@@ -81,6 +82,7 @@ function mountLegacyApi(app) {
     app.use("/api/profiles", profiles_1.profilesRouter);
     app.use("/api/library", library_1.libraryRouter);
     app.use("/api/auth", auth_1.authRouter);
+    app.use("/api/ai", ai_1.aiRouter);
     app.use("/api/superadmin", superadmin_1.superadminRouter);
     app.use("/api/business", business_1.businessRouter);
     app.use("/api/business", location_ach_1.locationAchRouter);

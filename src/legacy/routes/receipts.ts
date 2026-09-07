@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { PoolClient, QueryResultRow } from "pg";
 import { processReceiptOcr } from "../lib/ocr";
-import { extractReceiptWithMindee } from "../lib/mindee-ocr";
+import { extractReceiptOcr } from "../lib/receipt-ocr-engine";
 import {
   approveReceipt,
   calculateDonation,
@@ -125,6 +125,7 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
       imageBase64,
       imageMimeType,
       claimedSubtotal,
+      receiptModelId,
     } = req.body as Record<string, unknown>;
 
     if (!firstName || typeof firstName !== "string") {
@@ -213,20 +214,26 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
     );
     const receiptId = receiptResult[0].id;
 
-    // Prefer Mindee when configured; otherwise keep placeholder OCR behavior.
-    const mindee = await extractReceiptWithMindee({
+    const authUser = await resolveAuthUser(bearerToken(req));
+    const modelFromBody =
+      typeof receiptModelId === "string" && receiptModelId.trim() ? receiptModelId.trim() : null;
+
+    // Prefer Bedrock vision OCR; fall back to Mindee only when AWS is not configured.
+    const ocr = await extractReceiptOcr({
       imageBase64,
       mimeType: mime,
       claimedSubtotal: claimed,
+      bedrockModelId: modelFromBody,
+      userId: authUser?.id ?? null,
     });
     const placeholder = processReceiptOcr(claimed);
-    const useMindee = Boolean(mindee.ocrProvider);
-    const ocrStatus = useMindee ? mindee.ocrStatus : placeholder.status;
-    const eligibleSubtotal = useMindee
-      ? mindee.eligibleSubtotal
+    const useOcr = Boolean(ocr.ocrProvider);
+    const ocrStatus = useOcr ? ocr.ocrStatus : placeholder.status;
+    const eligibleSubtotal = useOcr
+      ? ocr.eligibleSubtotal
       : placeholder.eligibleSubtotal;
-    const subtotal = useMindee ? mindee.subtotal : placeholder.subtotal;
-    const message = useMindee ? mindee.message : placeholder.notes;
+    const subtotal = useOcr ? ocr.subtotal : placeholder.subtotal;
+    const message = useOcr ? ocr.message : placeholder.notes;
     const donation =
       eligibleSubtotal > 0 ? calculateDonation(eligibleSubtotal, giveback) : null;
 
@@ -258,20 +265,20 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
         eligibleSubtotal || null,
         giveback,
         donation,
-        useMindee ? mindee.ocrProvider : null,
-        useMindee ? mindee.ocrProcessedAt : null,
-        useMindee ? mindee.ocrExtractStatus : "pending",
-        useMindee ? mindee.merchantName : null,
-        useMindee ? mindee.receiptNumber : null,
-        useMindee ? mindee.dateString : null,
-        useMindee ? mindee.timeString : null,
-        useMindee ? mindee.receiptDate : null,
-        useMindee && mindee.total > 0 ? mindee.total : null,
-        useMindee && mindee.tax > 0 ? mindee.tax : null,
-        useMindee && mindee.totalLineItems > 0 ? mindee.totalLineItems : null,
-        useMindee && mindee.extractedJson ? JSON.stringify(mindee.extractedJson) : null,
-        useMindee ? mindee.message : placeholder.notes,
-        useMindee ? mindee.isManualSubtotal : claimed == null,
+        useOcr ? ocr.ocrProvider : null,
+        useOcr ? ocr.ocrProcessedAt : null,
+        useOcr ? ocr.ocrExtractStatus : "pending",
+        useOcr ? ocr.merchantName : null,
+        useOcr ? ocr.receiptNumber : null,
+        useOcr ? ocr.dateString : null,
+        useOcr ? ocr.timeString : null,
+        useOcr ? ocr.receiptDate : null,
+        useOcr && ocr.total > 0 ? ocr.total : null,
+        useOcr && ocr.tax > 0 ? ocr.tax : null,
+        useOcr && ocr.totalLineItems > 0 ? ocr.totalLineItems : null,
+        useOcr && ocr.extractedJson ? JSON.stringify(ocr.extractedJson) : null,
+        useOcr ? ocr.message : placeholder.notes,
+        useOcr ? ocr.isManualSubtotal : claimed == null,
         receiptId,
       ],
     );
@@ -281,11 +288,11 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
       campaignId,
       locId,
       {
-        receiptNumber: useMindee ? mindee.receiptNumber : null,
-        dateString: useMindee ? mindee.dateString : null,
-        timeString: useMindee ? mindee.timeString : null,
+        receiptNumber: useOcr ? ocr.receiptNumber : null,
+        dateString: useOcr ? ocr.dateString : null,
+        timeString: useOcr ? ocr.timeString : null,
         subtotal: subtotal || claimed,
-        total: useMindee && mindee.total > 0 ? mindee.total : null,
+        total: useOcr && ocr.total > 0 ? ocr.total : null,
       },
       receiptId,
     );
@@ -310,10 +317,10 @@ receiptsRouter.post("/campaigns/:slug/receipts", async (req, res) => {
       donationPercentage: giveback,
       imageUrl: await resolveStoredImageUrl(imageUrl),
       message,
-      ocrExtractStatus: useMindee ? mindee.ocrExtractStatus : "pending",
-      ocrProvider: useMindee ? mindee.ocrProvider : null,
-      merchantName: useMindee ? mindee.merchantName : null,
-      isManualSubtotal: useMindee ? mindee.isManualSubtotal : claimed == null,
+      ocrExtractStatus: useOcr ? ocr.ocrExtractStatus : "pending",
+      ocrProvider: useOcr ? ocr.ocrProvider : null,
+      merchantName: useOcr ? ocr.merchantName : null,
+      isManualSubtotal: useOcr ? ocr.isManualSubtotal : claimed == null,
     });
   } catch (err) {
     await connection.query("ROLLBACK");

@@ -1,10 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.aiProviderName = aiProviderName;
+exports.resolveReceiptBedrockModelId = resolveReceiptBedrockModelId;
+exports.aiChatWithImages = aiChatWithImages;
 exports.aiChat = aiChat;
 exports.parseAiJson = parseAiJson;
 const client_bedrock_runtime_1 = require("@aws-sdk/client-bedrock-runtime");
-const platform_settings_1 = require("./platform-settings");
+const user_ai_settings_1 = require("./user-ai-settings");
 function bedrockConfigured() {
     return Boolean(process.env.AWS_ACCESS_KEY_ID?.trim() &&
         process.env.AWS_SECRET_ACCESS_KEY?.trim() &&
@@ -24,15 +26,34 @@ function bedrockModelId() {
     return (process.env.BEDROCK_MODEL_ID?.trim() ||
         "amazon.nova-lite-v1:0");
 }
-async function resolveBedrockModelId() {
-    try {
-        const fromDb = await (0, platform_settings_1.getPlatformSetting)("ai_model_id");
-        if (fromDb?.trim())
-            return fromDb.trim();
-    }
-    catch {
-    }
-    return bedrockModelId();
+function bedrockReceiptModelId() {
+    return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+}
+function mediaTypeToBedrockFormat(mediaType) {
+    const m = mediaType.toLowerCase();
+    if (m.includes("png"))
+        return "png";
+    if (m.includes("webp"))
+        return "webp";
+    if (m.includes("gif"))
+        return "gif";
+    return "jpeg";
+}
+async function resolveBedrockModelId(modelOverride, userId) {
+    return (0, user_ai_settings_1.resolveUserBedrockModelId)({
+        requestModelId: modelOverride,
+        userId,
+        platformSettingKey: "ai_model_id",
+        envDefault: bedrockModelId(),
+    });
+}
+async function resolveReceiptBedrockModelId(modelOverride, userId) {
+    return (0, user_ai_settings_1.resolveUserBedrockModelId)({
+        requestModelId: modelOverride,
+        userId,
+        platformSettingKey: "receipt_ai_model_id",
+        envDefault: bedrockReceiptModelId(),
+    });
 }
 async function chatViaBedrock(options) {
     const region = process.env.AWS_REGION?.trim() || "us-east-1";
@@ -47,7 +68,7 @@ async function chatViaBedrock(options) {
         ? `${options.system}\nReturn ONLY valid JSON. No markdown fences or commentary.`
         : options.system;
     const command = new client_bedrock_runtime_1.ConverseCommand({
-        modelId: await resolveBedrockModelId(),
+        modelId: await resolveBedrockModelId(options.modelId, options.userId),
         system: [{ text: systemText }],
         messages: [
             {
@@ -102,6 +123,53 @@ async function chatViaLovable(options) {
     if (!content)
         throw new Error("AI returned an empty response.");
     return content;
+}
+async function chatViaBedrockMultimodal(options) {
+    const region = process.env.AWS_REGION?.trim() || "us-east-1";
+    const client = new client_bedrock_runtime_1.BedrockRuntimeClient({
+        region,
+        credentials: {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID.trim(),
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY.trim(),
+        },
+    });
+    const systemText = options.json
+        ? `${options.system}\nReturn ONLY valid JSON. No markdown fences or commentary.`
+        : options.system;
+    const content = [
+        { text: options.user },
+        ...options.images.map((img) => ({
+            image: {
+                format: mediaTypeToBedrockFormat(img.mediaType),
+                source: { bytes: img.bytes },
+            },
+        })),
+    ];
+    const command = new client_bedrock_runtime_1.ConverseCommand({
+        modelId: await resolveReceiptBedrockModelId(options.modelId, options.userId),
+        system: [{ text: systemText }],
+        messages: [{ role: "user", content }],
+        inferenceConfig: {
+            maxTokens: options.maxTokens ?? 2048,
+            temperature: options.temperature ?? 0.1,
+        },
+    });
+    const response = await client.send(command);
+    const parts = response.output?.message?.content ?? [];
+    const text = parts
+        .map((p) => ("text" in p && typeof p.text === "string" ? p.text : ""))
+        .join("")
+        .trim();
+    if (!text) {
+        throw new Error("Bedrock returned an empty response.");
+    }
+    return text;
+}
+async function aiChatWithImages(options) {
+    if (!bedrockConfigured()) {
+        throw new Error("Vision OCR requires AWS Bedrock credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION).");
+    }
+    return chatViaBedrockMultimodal(options);
 }
 async function aiChat(options) {
     if (bedrockConfigured()) {

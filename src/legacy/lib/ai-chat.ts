@@ -2,7 +2,7 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
 } from "@aws-sdk/client-bedrock-runtime";
-import { getPlatformSetting } from "./platform-settings";
+import { resolveUserBedrockModelId } from "./user-ai-settings";
 
 /**
  * Shared AI chat helper for ForkUp Server.
@@ -22,6 +22,16 @@ export type AiChatOptions = {
   json?: boolean;
   maxTokens?: number;
   temperature?: number;
+  /** Optional model override (user picker / request body). */
+  modelId?: string;
+  /** Optional signed-in user for per-user model preference. */
+  userId?: number | null;
+};
+
+/** Image part for multimodal Bedrock Converse (receipt vision OCR). */
+export type AiImagePart = {
+  bytes: Buffer;
+  mediaType: string;
 };
 
 function bedrockConfigured(): boolean {
@@ -51,15 +61,45 @@ function bedrockModelId(): string {
   );
 }
 
-/** Prefer Super Admin–selected model from platform_settings when available. */
-async function resolveBedrockModelId(): Promise<string> {
-  try {
-    const fromDb = await getPlatformSetting("ai_model_id");
-    if (fromDb?.trim()) return fromDb.trim();
-  } catch {
-    /* fall through to env default */
-  }
-  return bedrockModelId();
+function bedrockReceiptModelId(): string {
+  return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+}
+
+function mediaTypeToBedrockFormat(mediaType: string): "jpeg" | "png" | "webp" | "gif" {
+  const m = mediaType.toLowerCase();
+  if (m.includes("png")) return "png";
+  if (m.includes("webp")) return "webp";
+  if (m.includes("gif")) return "gif";
+  return "jpeg";
+}
+
+/** Prefer user-selected model, then platform default, then env. */
+async function resolveBedrockModelId(
+  modelOverride?: string | null,
+  userId?: number | null,
+): Promise<string> {
+  return resolveUserBedrockModelId({
+    requestModelId: modelOverride,
+    userId,
+    platformSettingKey: "ai_model_id",
+    envDefault: bedrockModelId(),
+  });
+}
+
+/**
+ * Purpose: Resolve Bedrock model for receipt/check vision OCR.
+ * Priority: request > user preference > platform receipt setting > env.
+ */
+export async function resolveReceiptBedrockModelId(
+  modelOverride?: string | null,
+  userId?: number | null,
+): Promise<string> {
+  return resolveUserBedrockModelId({
+    requestModelId: modelOverride,
+    userId,
+    platformSettingKey: "receipt_ai_model_id",
+    envDefault: bedrockReceiptModelId(),
+  });
 }
 
 async function chatViaBedrock(options: AiChatOptions): Promise<string> {
@@ -77,7 +117,7 @@ async function chatViaBedrock(options: AiChatOptions): Promise<string> {
     : options.system;
 
   const command = new ConverseCommand({
-    modelId: await resolveBedrockModelId(),
+    modelId: await resolveBedrockModelId(options.modelId, options.userId),
     system: [{ text: systemText }],
     messages: [
       {
@@ -136,6 +176,69 @@ async function chatViaLovable(options: AiChatOptions): Promise<string> {
   const content = json.choices?.[0]?.message?.content?.trim() ?? "";
   if (!content) throw new Error("AI returned an empty response.");
   return content;
+}
+
+async function chatViaBedrockMultimodal(
+  options: AiChatOptions & { images: AiImagePart[] },
+): Promise<string> {
+  const region = process.env.AWS_REGION?.trim() || "us-east-1";
+  const client = new BedrockRuntimeClient({
+    region,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!.trim(),
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!.trim(),
+    },
+  });
+
+  const systemText = options.json
+    ? `${options.system}\nReturn ONLY valid JSON. No markdown fences or commentary.`
+    : options.system;
+
+  const content = [
+    { text: options.user },
+    ...options.images.map((img) => ({
+      image: {
+        format: mediaTypeToBedrockFormat(img.mediaType),
+        source: { bytes: img.bytes },
+      },
+    })),
+  ];
+
+  const command = new ConverseCommand({
+    modelId: await resolveReceiptBedrockModelId(options.modelId, options.userId),
+    system: [{ text: systemText }],
+    messages: [{ role: "user", content }],
+    inferenceConfig: {
+      maxTokens: options.maxTokens ?? 2048,
+      temperature: options.temperature ?? 0.1,
+    },
+  });
+
+  const response = await client.send(command);
+  const parts = response.output?.message?.content ?? [];
+  const text = parts
+    .map((p) => ("text" in p && typeof p.text === "string" ? p.text : ""))
+    .join("")
+    .trim();
+
+  if (!text) {
+    throw new Error("Bedrock returned an empty response.");
+  }
+  return text;
+}
+
+/**
+ * Multimodal chat via Bedrock vision (receipt/check OCR). Requires AWS credentials.
+ */
+export async function aiChatWithImages(
+  options: AiChatOptions & { images: AiImagePart[] },
+): Promise<string> {
+  if (!bedrockConfigured()) {
+    throw new Error(
+      "Vision OCR requires AWS Bedrock credentials (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION).",
+    );
+  }
+  return chatViaBedrockMultimodal(options);
 }
 
 /**

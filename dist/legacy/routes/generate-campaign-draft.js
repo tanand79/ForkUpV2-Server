@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateCampaignDraftRouter = void 0;
 const express_1 = require("express");
 const organization_library_1 = require("../lib/organization-library");
+const auth_1 = require("../lib/auth");
 const ai_chat_1 = require("../lib/ai-chat");
 exports.generateCampaignDraftRouter = (0, express_1.Router)();
 function parseSuggestedGoal(value) {
@@ -93,6 +94,8 @@ exports.generateCampaignDraftRouter.post("/generate-campaign-draft", async (req,
             json: true,
             maxTokens: 2048,
             temperature: 0.4,
+            modelId: typeof body.modelId === "string" ? body.modelId : undefined,
+            userId: (await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req)))?.id ?? null,
         });
         let draft = {};
         try {

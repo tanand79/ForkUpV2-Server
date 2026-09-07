@@ -6,6 +6,7 @@ import {
   pickPromotionChannels,
   type LibraryOrgType,
 } from "../lib/organization-library";
+import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { aiChat, aiProviderName, parseAiJson } from "../lib/ai-chat";
 
 export const generateCampaignDraftRouter = Router();
@@ -55,6 +56,7 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       organizationType?: string;
       organizationId?: number;
       website?: string;
+      modelId?: string;
     };
 
     const purpose = typeof body.purpose === "string" ? body.purpose.trim() : "";
@@ -137,6 +139,8 @@ generateCampaignDraftRouter.post("/generate-campaign-draft", async (req, res) =>
       json: true,
       maxTokens: 2048,
       temperature: 0.4,
+      modelId: typeof body.modelId === "string" ? body.modelId : undefined,
+      userId: (await resolveAuthUser(bearerToken(req)))?.id ?? null,
     });
 
     let draft: {

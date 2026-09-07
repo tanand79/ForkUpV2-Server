@@ -15,6 +15,7 @@ import { generateOrganizationDraftRouter } from "./routes/generate-organization-
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
+import { aiRouter } from "./routes/ai";
 import { profilesRouter } from "./routes/profiles";
 import { usNonprofitSuggestRouter } from "./routes/us-nonprofit-suggest";
 import { libraryRouter } from "./routes/library";
@@ -87,6 +88,7 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/profiles", profilesRouter);
   app.use("/api/library", libraryRouter);
   app.use("/api/auth", authRouter);
+  app.use("/api/ai", aiRouter);
   app.use("/api/superadmin", superadminRouter);
   app.use("/api/business", businessRouter);
   app.use("/api/business", locationAchRouter);

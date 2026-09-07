@@ -20,6 +20,7 @@
  * GET/PUT /api/superadmin/settings/ai
  *   GET response: {
  *     selectedModelId,
+ *     selectedReceiptModelId,
  *     pricingSource: "aws" | "fallback" | "mixed",
  *     pricingFetchedAt: ISO string,
  *     models: [{ id, label, vendor, tier, blurb, inputPer1M, outputPer1M,
@@ -82,67 +83,39 @@ import {
 } from "../lib/platform-settings";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { getBedrockLivePricing } from "../lib/bedrock-pricing";
+import { BEDROCK_MODEL_CATALOG, isAllowedBedrockModel } from "../lib/bedrock-model-catalog";
 import { toDateOnlyString } from "../lib/date-only";
 import { promoteCampaignAfterForkupApproval } from "../lib/campaign-go-live-from-review";
 
 export const superadminRouter = Router();
 
-const AI_MODELS = [
-  {
-    id: "amazon.nova-micro-v1:0",
-    label: "Nova Micro",
-    vendor: "Amazon",
-    tier: "Lite",
-    blurb: "Fastest & lowest cost",
-    inputPer1M: 0.035,
-    outputPer1M: 0.14,
-  },
-  {
-    id: "amazon.nova-lite-v1:0",
-    label: "Nova Lite",
-    vendor: "Amazon",
-    tier: "Balanced",
-    blurb: "Fast & balanced",
-    inputPer1M: 0.06,
-    outputPer1M: 0.24,
-  },
-  {
-    id: "amazon.nova-pro-v1:0",
-    label: "Nova Pro",
-    vendor: "Amazon",
-    tier: "Pro",
-    blurb: "Deeper reasoning on Bedrock",
-    inputPer1M: 0.8,
-    outputPer1M: 3.2,
-  },
-  {
-    id: "anthropic.claude-haiku-4-5-20251001-v1:0",
-    label: "Claude Haiku 4.5",
-    vendor: "Anthropic",
-    tier: "Lite",
-    blurb: "Fast Claude responses",
-    inputPer1M: 1.0,
-    outputPer1M: 5.0,
-  },
-  {
-    id: "anthropic.claude-sonnet-4-5-20250929-v1:0",
-    label: "Claude Sonnet 4.5",
-    vendor: "Anthropic",
-    tier: "Balanced",
-    blurb: "Balanced Claude reasoning",
-    inputPer1M: 3.0,
-    outputPer1M: 15.0,
-  },
-  {
-    id: "anthropic.claude-sonnet-4-6",
-    label: "Claude Sonnet 4.6",
-    vendor: "Anthropic",
-    tier: "Pro",
-    blurb: "Best draft quality",
-    inputPer1M: 3.0,
-    outputPer1M: 15.0,
-  },
-] as const;
+const AI_MODELS = BEDROCK_MODEL_CATALOG;
+
+/** Typical receipt vision OCR: ~2k input tokens, ~500 output tokens. */
+const RECEIPT_OCR_INPUT_TOKENS = 2_000;
+const RECEIPT_OCR_OUTPUT_TOKENS = 500;
+
+function mapAiModelsWithPricing(
+  pricing: Awaited<ReturnType<typeof getBedrockLivePricing>>,
+) {
+  const rateById = new Map(pricing.rates.map((r) => [r.modelId, r]));
+  return AI_MODELS.map((m) => {
+    const rate = rateById.get(m.id);
+    const inputPer1M = rate?.inputPer1M ?? m.inputPer1M;
+    const outputPer1M = rate?.outputPer1M ?? m.outputPer1M;
+    return {
+      ...m,
+      inputPer1M,
+      outputPer1M,
+      pricingSource: rate?.source ?? "fallback",
+      estimatedRunCost:
+        (inputPer1M * 10_000 + outputPer1M * 3_500) / 1_000_000,
+      estimatedReceiptRunCost:
+        (inputPer1M * RECEIPT_OCR_INPUT_TOKENS + outputPer1M * RECEIPT_OCR_OUTPUT_TOKENS) /
+        1_000_000,
+    };
+  });
+}
 
 function adminUserJson(user: AuthUser) {
   return {
@@ -410,29 +383,21 @@ superadminRouter.post("/change-password", async (req, res) => {
 
 superadminRouter.get("/settings/ai", async (_req, res) => {
   try {
-    const settings = await getPlatformSettings(["ai_model_id"]);
+    const settings = await getPlatformSettings(["ai_model_id", "receipt_ai_model_id"]);
     const selected =
       settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+    const selectedReceipt =
+      settings.receipt_ai_model_id ||
+      process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
+      "amazon.nova-lite-v1:0";
     // Live AWS Price List rates when credentials allow; else hardcoded fallbacks.
     const pricing = await getBedrockLivePricing(AI_MODELS);
-    const rateById = new Map(pricing.rates.map((r) => [r.modelId, r]));
     res.json({
       selectedModelId: selected,
+      selectedReceiptModelId: selectedReceipt,
       pricingSource: pricing.pricingSource,
       pricingFetchedAt: pricing.pricingFetchedAt,
-      models: AI_MODELS.map((m) => {
-        const rate = rateById.get(m.id);
-        const inputPer1M = rate?.inputPer1M ?? m.inputPer1M;
-        const outputPer1M = rate?.outputPer1M ?? m.outputPer1M;
-        return {
-          ...m,
-          inputPer1M,
-          outputPer1M,
-          pricingSource: rate?.source ?? "fallback",
-          estimatedRunCost:
-            (inputPer1M * 10_000 + outputPer1M * 3_500) / 1_000_000,
-        };
-      }),
+      models: mapAiModelsWithPricing(pricing),
     });
   } catch (err) {
     console.error(err);
@@ -444,12 +409,38 @@ superadminRouter.put("/settings/ai", async (req, res) => {
   try {
     const user = (req as typeof req & { platformAdmin: AuthUser }).platformAdmin;
     const modelId = typeof req.body?.modelId === "string" ? req.body.modelId.trim() : "";
-    if (!AI_MODELS.some((m) => m.id === modelId)) {
-      res.status(400).json({ error: "Unknown AI model" });
+    const receiptModelId =
+      typeof req.body?.receiptModelId === "string" ? req.body.receiptModelId.trim() : "";
+    const updates: Record<string, string> = {};
+    if (modelId) {
+      if (!isAllowedBedrockModel(modelId)) {
+        res.status(400).json({ error: "Unknown AI model" });
+        return;
+      }
+      updates.ai_model_id = modelId;
+    }
+    if (receiptModelId) {
+      if (!isAllowedBedrockModel(receiptModelId)) {
+        res.status(400).json({ error: "Unknown receipt AI model" });
+        return;
+      }
+      updates.receipt_ai_model_id = receiptModelId;
+    }
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: "modelId or receiptModelId is required" });
       return;
     }
-    await setPlatformSettings({ ai_model_id: modelId }, user.id);
-    res.json({ success: true, selectedModelId: modelId });
+    await setPlatformSettings(updates, user.id);
+    const settings = await getPlatformSettings(["ai_model_id", "receipt_ai_model_id"]);
+    res.json({
+      success: true,
+      selectedModelId:
+        settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0",
+      selectedReceiptModelId:
+        settings.receipt_ai_model_id ||
+        process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
+        "amazon.nova-lite-v1:0",
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to save AI settings" });

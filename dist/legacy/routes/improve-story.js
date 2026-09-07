@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.improveStoryRouter = void 0;
 const express_1 = require("express");
+const auth_1 = require("../lib/auth");
 const ai_chat_1 = require("../lib/ai-chat");
 exports.improveStoryRouter = (0, express_1.Router)();
 exports.improveStoryRouter.post("/improve-story", async (req, res) => {
@@ -43,6 +44,8 @@ exports.improveStoryRouter.post("/improve-story", async (req, res) => {
             user: story,
             maxTokens: 2048,
             temperature: 0.4,
+            modelId: typeof req.body?.modelId === "string" ? req.body.modelId : undefined,
+            userId: (await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req)))?.id ?? null,
         });
         res.json({ improved, provider: (0, ai_chat_1.aiProviderName)() });
     }
