@@ -40,6 +40,7 @@
     "db:backfill-geo-coordinates": "tsx src/legacy/db/backfill-geo-coordinates.ts",
     "db:superadmin": "tsx src/legacy/db/migrate-superadmin.ts",
     "db:user-ai-settings": "tsx src/legacy/db/migrate-user-ai-settings.ts",
+    "db:user-ai-settings:production": "tsx src/legacy/db/run-user-ai-settings-production.ts",
     "automation:run": "node scripts/trigger-automation.mjs",
     "db:setup": "npm run db:migrate && npm run db:foundation && npm run db:superadmin && npm run db:settlement-engine && npm run db:settlement-parity && npm run db:seed",
     "db:reset": "tsx src/legacy/db/reset-local.ts",

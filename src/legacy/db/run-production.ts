@@ -60,6 +60,8 @@ async function run() {
     await migrateSettlementEngine({ closePool: false });
     const { migrateSettlementParity } = await import("./migrate-settlement-parity");
     await migrateSettlementParity({ closePool: false });
+    const { migrateUserAiSettings } = await import("./migrate-user-ai-settings");
+    await migrateUserAiSettings({ closePool: false });
   }
 
   if (resolved === "foundation" || resolved === "setup") {

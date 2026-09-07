@@ -40,6 +40,7 @@
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",
     "src/legacy/db/run-production.ts",
+    "src/legacy/db/run-user-ai-settings-production.ts",
     "src/legacy/db/migrate-settlement-engine.ts",
     "src/legacy/db/migrate-settlement-parity.ts",
     "src/legacy/db/reset-local.ts",
