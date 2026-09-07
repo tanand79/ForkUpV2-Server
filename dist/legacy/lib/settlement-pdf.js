@@ -6,10 +6,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SETTLEMENT_PDF_DIR = void 0;
 exports.ensureSettlementPdfDir = ensureSettlementPdfDir;
 exports.buildSimplePdf = buildSimplePdf;
+exports.settlementLetterheadLines = settlementLetterheadLines;
 exports.writeSettlementPdf = writeSettlementPdf;
 exports.moneyLine = moneyLine;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const money_format_1 = require("./money-format");
 exports.SETTLEMENT_PDF_DIR = path_1.default.join(process.cwd(), "uploads", "settlements");
 function ensureSettlementPdfDir(campaignId) {
     const dir = path_1.default.join(exports.SETTLEMENT_PDF_DIR, String(campaignId));
@@ -95,13 +97,31 @@ function buildSimplePdf(title, lines) {
     body += `trailer << /Size ${maxObj + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`;
     return Buffer.from(body, "utf8");
 }
+function settlementLetterheadLines(docTitle) {
+    return [
+        "======================================================================",
+        "                              FORKUP",
+        "                   Community Fundraising Platform",
+        "-----------------------------------------------------------------------",
+        docTitle,
+        "",
+    ];
+}
 function writeSettlementPdf(campaignId, filename, title, lines) {
     const dir = ensureSettlementPdfDir(campaignId);
     const full = path_1.default.join(dir, filename);
-    fs_1.default.writeFileSync(full, buildSimplePdf(title, lines));
+    const body = [
+        ...settlementLetterheadLines(title),
+        ...lines,
+        "",
+        "----------------------------------------------------------------------",
+        "Questions? Contact your ForkUp campaign coordinator or support@forkup.org",
+        "This statement is confidential. Do not distribute without authorization.",
+    ];
+    fs_1.default.writeFileSync(full, buildSimplePdf(title, body));
     return `/uploads/settlements/${campaignId}/${filename}`;
 }
 function moneyLine(label, amount) {
-    return `${label}: $${Number(amount || 0).toFixed(2)}`;
+    return `${label}: ${(0, money_format_1.formatMoneyUSD)(amount)}`;
 }
 //# sourceMappingURL=settlement-pdf.js.map

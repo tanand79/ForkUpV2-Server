@@ -3,8 +3,15 @@ import { pool } from "../db/pool";
 import {
   DEFAULT_PLATFORM_FEE_PERCENT,
   calculateSettlementSnapshot,
+  normalizeCardFeePercent,
+  normalizePlatformFeePercent,
 } from "./financial-calculations";
 import { sendEmail, resolveFrontendBaseUrl } from "./mailer";
+import { formatMoneyUSD } from "./money-format";
+import {
+  ensureSettlementAchApproval,
+  settlementAchApprovalUrl,
+} from "./settlement-ach-approval";
 import { moneyLine, writeSettlementPdf } from "./settlement-pdf";
 
 export type SettlementEngineSettings = {
@@ -72,7 +79,7 @@ async function hasAudit(campaignId: number, action: string): Promise<boolean> {
 }
 
 function money(value: unknown): string {
-  return `$${Number(value ?? 0).toFixed(2)}`;
+  return formatMoneyUSD(value);
 }
 
 type PartnerRow = {
@@ -374,14 +381,14 @@ export async function createSnapshotForCampaign(
     [campaignId],
   );
   const camp = campaignRows[0] ?? {};
-  const feePct =
-    camp.platform_fee_percent != null && Number(camp.platform_fee_percent) > 0
-      ? Number(camp.platform_fee_percent)
-      : settings.platformFeePercent;
-  const cardPct =
-    camp.card_fee_percent != null && Number(camp.card_fee_percent) > 0
-      ? Number(camp.card_fee_percent)
-      : settings.cardFeePercent;
+  const feePct = normalizePlatformFeePercent(
+    camp.platform_fee_percent != null ? Number(camp.platform_fee_percent) : null,
+    settings.platformFeePercent,
+  );
+  const cardPct = normalizeCardFeePercent(
+    camp.card_fee_percent != null ? Number(camp.card_fee_percent) : null,
+    settings.cardFeePercent,
+  );
   const cardFixed =
     camp.card_fee_fixed != null && Number(camp.card_fee_fixed) >= 0
       ? Number(camp.card_fee_fixed)
@@ -824,7 +831,7 @@ async function generateAndEmailForCampaign(campaignId: number): Promise<void> {
          pdf_nonprofit_path = $2,
          pdf_internal_path = $3,
          pdf_ach_path = $4,
-         ach_status = 'processing',
+         ach_status = 'pending',
          snapshot_status = 'STATEMENTS_SENT'
        WHERE id = $5`,
       [bizPdf, nonprofitPdf, internalPdf, achPdf, s.id],
@@ -836,6 +843,16 @@ async function generateAndEmailForCampaign(campaignId: number): Promise<void> {
       partner?.contact_email?.trim() ||
       "";
     if (!to) continue;
+
+    const debitAmount = Number(s.ach_debit_amount ?? s.forkup_fee ?? 0);
+    const approvalToken = await ensureSettlementAchApproval({
+      settlementId: Number(s.id),
+      campaignId,
+      approvalType: "business_debit",
+      amount: debitAmount,
+    });
+    const approvalUrl = settlementAchApprovalUrl(approvalToken, resolveFrontendBaseUrl());
+
     await sendEmail({
       to,
       name: String(s.business_name ?? partner?.business_name ?? ""),
@@ -847,6 +864,7 @@ async function generateAndEmailForCampaign(campaignId: number): Promise<void> {
         `Giveback: ${money(s.giveback_amount ?? s.donation_pool)}\n` +
         `ForkUp fee (ACH debit): ${money(s.forkup_fee)}\n` +
         `Net to ${ctx.organization_name}: ${money(s.net_nonprofit_amount)}\n\n` +
+        `Approve ACH debit (${money(debitAmount)}): ${approvalUrl}\n\n` +
         `Business statement: ${apiBase}${bizPdf}\n` +
         `ACH form: ${apiBase}${achPdf}\n` +
         `Report: ${reportUrl}\n\n— ForkUp`,
@@ -869,6 +887,20 @@ async function generateAndEmailForCampaign(campaignId: number): Promise<void> {
   );
 
   if (ctx.nonprofit_email?.includes("@")) {
+    const onlineRow = settlements.find((s) => s.business_id == null);
+    let onlineApprovalLine = "";
+    if (onlineRow && totals.stripeNet > 0) {
+      const payoutToken = await ensureSettlementAchApproval({
+        settlementId: Number(onlineRow.id),
+        campaignId,
+        approvalType: "nonprofit_payout",
+        amount: totals.stripeNet,
+      });
+      const payoutUrl = settlementAchApprovalUrl(payoutToken, resolveFrontendBaseUrl());
+      onlineApprovalLine =
+        `\nApprove online donation payout (${money(totals.stripeNet)}): ${payoutUrl}\n`;
+    }
+
     await sendEmail({
       to: ctx.nonprofit_email,
       name: ctx.organization_name,
@@ -878,8 +910,9 @@ async function generateAndEmailForCampaign(campaignId: number): Promise<void> {
         `Settlement for "${ctx.campaign_name}" is ready.\n\n` +
         `Expected from businesses (net): ${money(totals.net - totals.stripeNet)}\n` +
         `Online donations (net after card fees): ${money(totals.stripeNet)}\n` +
-        `Total net: ${money(totals.net)}\n\n` +
-        `Donation statement: ${apiBase}${nonprofitPdf}\n` +
+        `Total net: ${money(totals.net)}\n` +
+        onlineApprovalLine +
+        `\nDonation statement: ${apiBase}${nonprofitPdf}\n` +
         `Report: ${reportUrl}\n\n— ForkUp`,
       emailType: "settlement_nonprofit",
       campaignId,

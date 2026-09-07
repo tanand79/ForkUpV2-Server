@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { formatMoneyUSD } from "./money-format";
 
 export const SETTLEMENT_PDF_DIR = path.join(process.cwd(), "uploads", "settlements");
 
@@ -98,6 +99,21 @@ export function buildSimplePdf(title: string, lines: string[]): Buffer {
   return Buffer.from(body, "utf8");
 }
 
+/**
+ * Letterhead block prepended to every settlement PDF for a professional look.
+ * Inputs: document title. Outputs: text lines for the PDF body.
+ */
+export function settlementLetterheadLines(docTitle: string): string[] {
+  return [
+    "======================================================================",
+    "                              FORKUP",
+    "                   Community Fundraising Platform",
+    "-----------------------------------------------------------------------",
+    docTitle,
+    "",
+  ];
+}
+
 export function writeSettlementPdf(
   campaignId: number,
   filename: string,
@@ -106,10 +122,18 @@ export function writeSettlementPdf(
 ): string {
   const dir = ensureSettlementPdfDir(campaignId);
   const full = path.join(dir, filename);
-  fs.writeFileSync(full, buildSimplePdf(title, lines));
+  const body = [
+    ...settlementLetterheadLines(title),
+    ...lines,
+    "",
+    "----------------------------------------------------------------------",
+    "Questions? Contact your ForkUp campaign coordinator or support@forkup.org",
+    "This statement is confidential. Do not distribute without authorization.",
+  ];
+  fs.writeFileSync(full, buildSimplePdf(title, body));
   return `/uploads/settlements/${campaignId}/${filename}`;
 }
 
 export function moneyLine(label: string, amount: number): string {
-  return `${label}: $${Number(amount || 0).toFixed(2)}`;
+  return `${label}: ${formatMoneyUSD(amount)}`;
 }

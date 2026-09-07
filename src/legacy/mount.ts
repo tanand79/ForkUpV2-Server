@@ -12,12 +12,15 @@ import { improveStoryRouter } from "./routes/improve-story";
 import { generateCampaignDraftRouter } from "./routes/generate-campaign-draft";
 import { suggestCampaignGoalRouter } from "./routes/suggest-campaign-goal";
 import { generateOrganizationDraftRouter } from "./routes/generate-organization-draft";
+import { generateBusinessDraftRouter } from "./routes/generate-business-draft";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
 import { aiRouter } from "./routes/ai";
-import { profilesRouter } from "./routes/profiles";
+import { nonprofitAchRouter } from "./routes/nonprofit-ach";
+import { settlementAchApprovalRouter } from "./routes/settlement-ach-approval";
 import { usNonprofitSuggestRouter } from "./routes/us-nonprofit-suggest";
+import { profilesRouter } from "./routes/profiles";
 import { libraryRouter } from "./routes/library";
 import { superadminRouter } from "./routes/superadmin";
 import { campaignAiRouter } from "./routes/campaign-ai";
@@ -85,6 +88,7 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/builder", builderRouter);
   // Mount before profilesRouter so /nonprofits/us-suggest is not captured by /nonprofits/:slug.
   app.use("/api/profiles", usNonprofitSuggestRouter);
+  app.use("/api/profiles", nonprofitAchRouter);
   app.use("/api/profiles", profilesRouter);
   app.use("/api/library", libraryRouter);
   app.use("/api/auth", authRouter);
@@ -98,9 +102,11 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", generateCampaignDraftRouter);
   app.use("/api", suggestCampaignGoalRouter);
   app.use("/api", generateOrganizationDraftRouter);
+  app.use("/api", generateBusinessDraftRouter);
   app.use("/api/campaign-ai", campaignAiRouter);
   app.use("/api/ai-campaign-flow", aiCampaignFlowRouter);
   app.use("/api/fundraiser", fundraiserRouter);
   app.use("/api/support", supportRouter);
   app.use("/api/manage", manageRouter);
+  app.use("/api", settlementAchApprovalRouter);
 }

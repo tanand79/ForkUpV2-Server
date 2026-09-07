@@ -18,12 +18,15 @@ const improve_story_1 = require("./routes/improve-story");
 const generate_campaign_draft_1 = require("./routes/generate-campaign-draft");
 const suggest_campaign_goal_1 = require("./routes/suggest-campaign-goal");
 const generate_organization_draft_1 = require("./routes/generate-organization-draft");
+const generate_business_draft_1 = require("./routes/generate-business-draft");
 const receipts_1 = require("./routes/receipts");
 const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
 const ai_1 = require("./routes/ai");
-const profiles_1 = require("./routes/profiles");
+const nonprofit_ach_1 = require("./routes/nonprofit-ach");
+const settlement_ach_approval_1 = require("./routes/settlement-ach-approval");
 const us_nonprofit_suggest_1 = require("./routes/us-nonprofit-suggest");
+const profiles_1 = require("./routes/profiles");
 const library_1 = require("./routes/library");
 const superadmin_1 = require("./routes/superadmin");
 const campaign_ai_1 = require("./routes/campaign-ai");
@@ -79,6 +82,7 @@ function mountLegacyApi(app) {
     app.use("/api/campaign-images", campaign_images_1.campaignImagesRouter);
     app.use("/api/builder", builder_1.builderRouter);
     app.use("/api/profiles", us_nonprofit_suggest_1.usNonprofitSuggestRouter);
+    app.use("/api/profiles", nonprofit_ach_1.nonprofitAchRouter);
     app.use("/api/profiles", profiles_1.profilesRouter);
     app.use("/api/library", library_1.libraryRouter);
     app.use("/api/auth", auth_1.authRouter);
@@ -92,10 +96,12 @@ function mountLegacyApi(app) {
     app.use("/api", generate_campaign_draft_1.generateCampaignDraftRouter);
     app.use("/api", suggest_campaign_goal_1.suggestCampaignGoalRouter);
     app.use("/api", generate_organization_draft_1.generateOrganizationDraftRouter);
+    app.use("/api", generate_business_draft_1.generateBusinessDraftRouter);
     app.use("/api/campaign-ai", campaign_ai_1.campaignAiRouter);
     app.use("/api/ai-campaign-flow", ai_campaign_flow_1.aiCampaignFlowRouter);
     app.use("/api/fundraiser", fundraiser_1.fundraiserRouter);
     app.use("/api/support", support_1.supportRouter);
     app.use("/api/manage", manage_1.manageRouter);
+    app.use("/api", settlement_ach_approval_1.settlementAchApprovalRouter);
 }
 //# sourceMappingURL=mount.js.map

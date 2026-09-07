@@ -14,6 +14,7 @@ const campaign_visibility_1 = require("../lib/campaign-visibility");
 const participants_1 = require("./participants");
 const config_1 = require("../config");
 const settlement_engine_1 = require("../lib/settlement-engine");
+const financial_calculations_1 = require("../lib/financial-calculations");
 exports.manageRouter = (0, express_1.Router)();
 exports.manageRouter.use("/campaigns/:slug/participants", participants_1.participantsRouter);
 const PARTNER_STATUS_PRIORITY = {
@@ -1029,8 +1030,81 @@ exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
        FROM settlement_audit_log
        WHERE campaign_id = $1
        ORDER BY created_at ASC, id ASC`, [campaign.id]);
+        const { rows: achApprovalRows } = await pool_1.pool.query(`SELECT a.id, a.settlement_id, a.approval_type, a.amount, a.status,
+              a.approved_at, a.approved_by_name, a.approval_token,
+              b.business_name, bl.location_name
+       FROM settlement_ach_approvals a
+       JOIN settlements s ON s.id = a.settlement_id
+       LEFT JOIN businesses b ON b.id = s.business_id
+       LEFT JOIN business_locations bl ON bl.id = s.location_id
+       WHERE a.campaign_id = $1
+       ORDER BY a.created_at ASC`, [campaign.id]);
         const nonprofitPdf = settlements.find((s) => s.pdf_nonprofit_path)?.pdf_nonprofit_path ?? null;
         const internalPdf = settlements.find((s) => s.pdf_internal_path)?.pdf_internal_path ?? null;
+        const platformPct = (0, financial_calculations_1.normalizePlatformFeePercent)(campaign.platform_fee_percent != null ? Number(campaign.platform_fee_percent) : null);
+        const cardPct = (0, financial_calculations_1.normalizeCardFeePercent)(campaign.card_fee_percent != null ? Number(campaign.card_fee_percent) : null);
+        const cardFixed = campaign.card_fee_fixed != null && Number(campaign.card_fee_fixed) >= 0
+            ? Number(campaign.card_fee_fixed)
+            : 0.3;
+        const businessRows = businessReports.filter((r) => r.businessName !== "Online donations");
+        const onlineRow = businessReports.find((r) => r.businessName === "Online donations");
+        const businessEligible = businessRows.reduce((sum, r) => sum + r.eligibleSales, 0);
+        const businessGrossGiveback = businessRows.reduce((sum, r) => sum + Number(r.givebackAmount ?? r.donationPool), 0);
+        const businessForkupFee = businessRows.reduce((sum, r) => sum + r.forkupFee, 0);
+        const businessNet = businessRows.reduce((sum, r) => sum + r.netNonprofitAmount, 0);
+        const achDebitTotal = businessRows.reduce((sum, r) => sum + Number(r.achDebitAmount ?? r.forkupFee), 0);
+        const achOutstanding = businessRows
+            .filter((r) => (r.achStatus ?? "pending") !== "paid")
+            .reduce((sum, r) => sum + Number(r.achDebitAmount ?? r.forkupFee), 0);
+        const onlineGross = onlineRow
+            ? Number(onlineRow.stripeDonations ?? 0)
+            : Number(donationRows[0]?.total ?? 0);
+        const onlineCardFee = onlineRow ? Number(onlineRow.stripeFee ?? 0) : 0;
+        const onlineNet = onlineRow ? Number(onlineRow.stripeNet ?? 0) : 0;
+        const onlineCount = Number(donationRows[0]?.cnt ?? 0);
+        const weightedGivebackPct = businessEligible > 0
+            ? Math.round((businessGrossGiveback / businessEligible) * 10000) / 100
+            : 0;
+        const { lines: calculationLines } = (0, financial_calculations_1.buildSettlementCalculationLines)({
+            eligibleSales: businessEligible,
+            givebackPercentage: weightedGivebackPct,
+            platformFeePercent: platformPct,
+            stripeDonations: onlineGross,
+            stripeAmountCharged: onlineGross,
+            stripeDonationCount: onlineCount,
+            cardFeePercent: cardPct,
+            cardFeeFixed: cardFixed,
+        });
+        const calculationReview = {
+            platformFeePercent: platformPct,
+            cardFeePercent: cardPct,
+            cardFeeFixed: cardFixed,
+            business: {
+                eligibleSales: businessEligible,
+                grossGiveback: businessGrossGiveback,
+                forkupFee: businessForkupFee,
+                netFromGiveback: businessNet,
+                achDebitTotal,
+                amountOwedByBusiness: achOutstanding,
+            },
+            online: onlineGross > 0
+                ? {
+                    donationsGross: onlineGross,
+                    cardProcessingFee: onlineCardFee,
+                    netAfterFees: onlineNet,
+                    amountOwedToNonprofit: onlineNet,
+                    donationCount: onlineCount,
+                }
+                : null,
+            totals: {
+                donationPool: totals.donationPool,
+                forkupFee: totals.forkupFee,
+                netToNonprofit: totals.netNonprofitAmount,
+                outstandingBusinessAch: achOutstanding,
+                outstandingNonprofitPayout: onlineNet,
+            },
+            lines: calculationLines,
+        };
         res.json({
             campaign: {
                 name: campaign.campaign_name,
@@ -1074,6 +1148,18 @@ exports.manageRouter.get("/campaigns/:slug/settlement", async (req, res) => {
                 count: Number(donationRows[0]?.cnt ?? 0),
                 total: Number(donationRows[0]?.total ?? 0),
             },
+            achApprovals: achApprovalRows.map((a) => ({
+                id: Number(a.id),
+                settlementId: Number(a.settlement_id),
+                approvalType: a.approval_type,
+                amount: Number(a.amount ?? 0),
+                status: a.status,
+                approvedAt: a.approved_at ?? null,
+                approvedByName: a.approved_by_name ?? null,
+                businessName: a.business_name ?? null,
+                locationName: a.location_name ?? null,
+            })),
+            calculationReview,
         });
     }
     catch (err) {

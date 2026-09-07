@@ -12,6 +12,8 @@ exports.campaignHasFrozenSnapshot = campaignHasFrozenSnapshot;
 const pool_1 = require("../db/pool");
 const financial_calculations_1 = require("./financial-calculations");
 const mailer_1 = require("./mailer");
+const money_format_1 = require("./money-format");
+const settlement_ach_approval_1 = require("./settlement-ach-approval");
 const settlement_pdf_1 = require("./settlement-pdf");
 function settlementEngineSettings() {
     const envFlag = (process.env.SETTLEMENT_ENGINE_ENABLED ?? "true").trim().toLowerCase();
@@ -43,7 +45,7 @@ async function hasAudit(campaignId, action) {
     return rows.length > 0;
 }
 function money(value) {
-    return `$${Number(value ?? 0).toFixed(2)}`;
+    return (0, money_format_1.formatMoneyUSD)(value);
 }
 async function loadPartners(campaignId) {
     const { rows } = await pool_1.pool.query(`SELECT cbl.business_id, cbl.location_id, cbl.giveback_percentage,
@@ -244,12 +246,8 @@ async function createSnapshotForCampaign(campaignId, settings = settlementEngine
             bartender_tips, silent_auction
      FROM campaigns WHERE id = $1`, [campaignId]);
     const camp = campaignRows[0] ?? {};
-    const feePct = camp.platform_fee_percent != null && Number(camp.platform_fee_percent) > 0
-        ? Number(camp.platform_fee_percent)
-        : settings.platformFeePercent;
-    const cardPct = camp.card_fee_percent != null && Number(camp.card_fee_percent) > 0
-        ? Number(camp.card_fee_percent)
-        : settings.cardFeePercent;
+    const feePct = (0, financial_calculations_1.normalizePlatformFeePercent)(camp.platform_fee_percent != null ? Number(camp.platform_fee_percent) : null, settings.platformFeePercent);
+    const cardPct = (0, financial_calculations_1.normalizeCardFeePercent)(camp.card_fee_percent != null ? Number(camp.card_fee_percent) : null, settings.cardFeePercent);
     const cardFixed = camp.card_fee_fixed != null && Number(camp.card_fee_fixed) >= 0
         ? Number(camp.card_fee_fixed)
         : settings.cardFeeFixed;
@@ -595,7 +593,7 @@ async function generateAndEmailForCampaign(campaignId) {
          pdf_nonprofit_path = $2,
          pdf_internal_path = $3,
          pdf_ach_path = $4,
-         ach_status = 'processing',
+         ach_status = 'pending',
          snapshot_status = 'STATEMENTS_SENT'
        WHERE id = $5`, [bizPdf, nonprofitPdf, internalPdf, achPdf, s.id]);
         const to = partner?.settlement_contact_email?.trim() ||
@@ -604,6 +602,14 @@ async function generateAndEmailForCampaign(campaignId) {
             "";
         if (!to)
             continue;
+        const debitAmount = Number(s.ach_debit_amount ?? s.forkup_fee ?? 0);
+        const approvalToken = await (0, settlement_ach_approval_1.ensureSettlementAchApproval)({
+            settlementId: Number(s.id),
+            campaignId,
+            approvalType: "business_debit",
+            amount: debitAmount,
+        });
+        const approvalUrl = (0, settlement_ach_approval_1.settlementAchApprovalUrl)(approvalToken, (0, mailer_1.resolveFrontendBaseUrl)());
         await (0, mailer_1.sendEmail)({
             to,
             name: String(s.business_name ?? partner?.business_name ?? ""),
@@ -614,6 +620,7 @@ async function generateAndEmailForCampaign(campaignId) {
                 `Giveback: ${money(s.giveback_amount ?? s.donation_pool)}\n` +
                 `ForkUp fee (ACH debit): ${money(s.forkup_fee)}\n` +
                 `Net to ${ctx.organization_name}: ${money(s.net_nonprofit_amount)}\n\n` +
+                `Approve ACH debit (${money(debitAmount)}): ${approvalUrl}\n\n` +
                 `Business statement: ${apiBase}${bizPdf}\n` +
                 `ACH form: ${apiBase}${achPdf}\n` +
                 `Report: ${reportUrl}\n\n— ForkUp`,
@@ -631,6 +638,19 @@ async function generateAndEmailForCampaign(campaignId) {
        snapshot_status = 'STATEMENTS_SENT'
      WHERE campaign_id = $3 AND business_id IS NULL`, [nonprofitPdf, internalPdf, campaignId]);
     if (ctx.nonprofit_email?.includes("@")) {
+        const onlineRow = settlements.find((s) => s.business_id == null);
+        let onlineApprovalLine = "";
+        if (onlineRow && totals.stripeNet > 0) {
+            const payoutToken = await (0, settlement_ach_approval_1.ensureSettlementAchApproval)({
+                settlementId: Number(onlineRow.id),
+                campaignId,
+                approvalType: "nonprofit_payout",
+                amount: totals.stripeNet,
+            });
+            const payoutUrl = (0, settlement_ach_approval_1.settlementAchApprovalUrl)(payoutToken, (0, mailer_1.resolveFrontendBaseUrl)());
+            onlineApprovalLine =
+                `\nApprove online donation payout (${money(totals.stripeNet)}): ${payoutUrl}\n`;
+        }
         await (0, mailer_1.sendEmail)({
             to: ctx.nonprofit_email,
             name: ctx.organization_name,
@@ -639,8 +659,9 @@ async function generateAndEmailForCampaign(campaignId) {
                 `Settlement for "${ctx.campaign_name}" is ready.\n\n` +
                 `Expected from businesses (net): ${money(totals.net - totals.stripeNet)}\n` +
                 `Online donations (net after card fees): ${money(totals.stripeNet)}\n` +
-                `Total net: ${money(totals.net)}\n\n` +
-                `Donation statement: ${apiBase}${nonprofitPdf}\n` +
+                `Total net: ${money(totals.net)}\n` +
+                onlineApprovalLine +
+                `\nDonation statement: ${apiBase}${nonprofitPdf}\n` +
                 `Report: ${reportUrl}\n\n— ForkUp`,
             emailType: "settlement_nonprofit",
             campaignId,

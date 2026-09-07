@@ -49,6 +49,8 @@ export interface CampaignListItem {
     nonprofitVerified: boolean;
     image: string;
     dateRange: string;
+    startDate?: string | null;
+    endDate?: string | null;
     raised: number;
     goal: number;
     supportersGoing: number;

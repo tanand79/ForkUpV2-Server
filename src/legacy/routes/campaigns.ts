@@ -2,6 +2,12 @@ import { Router } from "express";
 import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
 import { toDateOnlyString } from "../lib/date-only";
+import {
+  nearbyKeepDecision,
+  parseLatLng,
+  parseRadiusMiles,
+  type LatLng,
+} from "../lib/geo-distance";
 import { resolveStoredImageUrl } from "../lib/s3";
 import type {
   CampaignDetail,
@@ -17,6 +23,7 @@ export const campaignsRouter = Router();
 
 type CampaignRow = QueryResultRow & {
   id: number;
+  nonprofit_id: number;
   slug: string;
   campaign_name: string;
   campaign_story: string;
@@ -135,7 +142,56 @@ async function mapListItem(
     topEvent: Boolean(row.top_event),
     campaignStatus: row.campaign_status,
     participatingLocationCount: locationCount,
+    startDate: toDateOnlyString(row.campaign_start_date),
+    endDate: toDateOnlyString(row.campaign_end_date),
   };
+}
+
+/**
+ * Whether a live campaign should appear for a nearby homepage/directory filter.
+ * Keeps campaigns with any accepted location within radius, else nonprofit coords.
+ */
+async function campaignIsWithinRadius(
+  campaignId: number,
+  nonprofitId: number,
+  origin: LatLng,
+  radiusMiles: number,
+): Promise<boolean> {
+  const { rows: locRows } = await pool.query<QueryResultRow>(
+    `SELECT bl.latitude, bl.longitude
+     FROM campaign_business_locations cbl
+     JOIN business_locations bl ON bl.id = cbl.location_id
+     WHERE cbl.campaign_id = $1
+       AND cbl.acceptance_status IN ('accepted', 'live', 'completed')
+       AND bl.latitude IS NOT NULL
+       AND bl.longitude IS NOT NULL`,
+    [campaignId],
+  );
+
+  for (const row of locRows) {
+    const nearby = nearbyKeepDecision(
+      origin,
+      row.latitude as number,
+      row.longitude as number,
+      radiusMiles,
+      { requireCoordinates: true },
+    );
+    if (nearby.keep) return true;
+  }
+
+  const { rows: nonprofitRows } = await pool.query<QueryResultRow>(
+    `SELECT latitude, longitude FROM nonprofits WHERE id = $1`,
+    [nonprofitId],
+  );
+  const nonprofit = nonprofitRows[0];
+  const nonprofitNearby = nearbyKeepDecision(
+    origin,
+    nonprofit?.latitude as number | null | undefined,
+    nonprofit?.longitude as number | null | undefined,
+    radiusMiles,
+    { requireCoordinates: locRows.length > 0 },
+  );
+  return nonprofitNearby.keep;
 }
 
 async function fetchMethods(campaignId: number): Promise<CampaignMethod[]> {
@@ -229,6 +285,8 @@ async function fetchCampaignBySlug(slug: string, options?: { publicOnly?: boolea
 campaignsRouter.get("/", async (req, res) => {
   try {
     const status = req.query.status as string | undefined;
+    const origin = parseLatLng(req.query.lat, req.query.lng);
+    const radiusMiles = parseRadiusMiles(req.query.radiusMiles, 25);
 
     // Promote campaigns whose start date has arrived before listing public campaigns.
     await pool.query(
@@ -238,22 +296,47 @@ campaignsRouter.get("/", async (req, res) => {
          AND campaign_start_date <= CURRENT_DATE`,
     );
 
-    const whereClause = status
-      ? "WHERE c.campaign_status = $1"
-      : "WHERE c.campaign_status = 'live'";
-    const params = status ? [status] : [];
+    const whereClause = status === "past"
+      ? `WHERE (
+           c.campaign_status IN ('closed', 'settlement')
+           OR (
+             c.campaign_status = 'live'
+             AND c.campaign_end_date IS NOT NULL
+             AND c.campaign_end_date < CURRENT_DATE
+           )
+         )`
+      : status
+        ? "WHERE c.campaign_status = $1"
+        : `WHERE c.campaign_status = 'live'
+             AND (c.campaign_end_date IS NULL OR c.campaign_end_date >= CURRENT_DATE)`;
+    const params = status && status !== "past" ? [status] : [];
+
+    const orderClause =
+      status === "past"
+        ? "ORDER BY c.campaign_end_date DESC NULLS LAST, c.updated_at DESC"
+        : "ORDER BY c.top_event DESC, c.raised DESC";
 
     const { rows: campaigns } = await pool.query<CampaignRow>(
       `SELECT c.*, n.organization_name, n.verification_status
        FROM campaigns c
        JOIN nonprofits n ON n.id = c.nonprofit_id
        ${whereClause}
-       ORDER BY c.top_event DESC, c.raised DESC`,
+       ${orderClause}`,
       params,
     );
 
+    let filtered = campaigns;
+    if (origin) {
+      const keepFlags = await Promise.all(
+        campaigns.map((campaign) =>
+          campaignIsWithinRadius(campaign.id, campaign.nonprofit_id, origin, radiusMiles),
+        ),
+      );
+      filtered = campaigns.filter((_, i) => keepFlags[i]);
+    }
+
     const results = await Promise.all(
-      campaigns.map(async (campaign) => {
+      filtered.map(async (campaign) => {
         const locationCount = await fetchLocationCount(campaign.id);
         return mapListItem(campaign, locationCount);
       }),

@@ -26,6 +26,8 @@
     "db:payouts": "tsx src/legacy/db/migrate-payouts.ts",
     "db:settlement-engine": "tsx src/legacy/db/migrate-settlement-engine.ts",
     "db:settlement-parity": "tsx src/legacy/db/migrate-settlement-parity.ts",
+    "db:settlement-ach-flow": "tsx src/legacy/db/migrate-settlement-ach-flow.ts",
+    "db:settlement-ach-flow:production": "tsx src/legacy/db/run-settlement-ach-flow-production.ts",
     "db:automation": "tsx src/legacy/db/migrate-automation.ts",
     "db:campaign-timing": "tsx src/legacy/db/migrate-campaign-timing.ts",
     "db:timeline-bands": "tsx src/legacy/db/migrate-timeline-bands.ts",

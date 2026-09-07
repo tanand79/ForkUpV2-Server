@@ -4,6 +4,7 @@ exports.campaignsRouter = void 0;
 const express_1 = require("express");
 const pool_1 = require("../db/pool");
 const date_only_1 = require("../lib/date-only");
+const geo_distance_1 = require("../lib/geo-distance");
 const s3_1 = require("../lib/s3");
 exports.campaignsRouter = (0, express_1.Router)();
 function toDateInput(value) {
@@ -78,7 +79,27 @@ async function mapListItem(row, locationCount) {
         topEvent: Boolean(row.top_event),
         campaignStatus: row.campaign_status,
         participatingLocationCount: locationCount,
+        startDate: (0, date_only_1.toDateOnlyString)(row.campaign_start_date),
+        endDate: (0, date_only_1.toDateOnlyString)(row.campaign_end_date),
     };
+}
+async function campaignIsWithinRadius(campaignId, nonprofitId, origin, radiusMiles) {
+    const { rows: locRows } = await pool_1.pool.query(`SELECT bl.latitude, bl.longitude
+     FROM campaign_business_locations cbl
+     JOIN business_locations bl ON bl.id = cbl.location_id
+     WHERE cbl.campaign_id = $1
+       AND cbl.acceptance_status IN ('accepted', 'live', 'completed')
+       AND bl.latitude IS NOT NULL
+       AND bl.longitude IS NOT NULL`, [campaignId]);
+    for (const row of locRows) {
+        const nearby = (0, geo_distance_1.nearbyKeepDecision)(origin, row.latitude, row.longitude, radiusMiles, { requireCoordinates: true });
+        if (nearby.keep)
+            return true;
+    }
+    const { rows: nonprofitRows } = await pool_1.pool.query(`SELECT latitude, longitude FROM nonprofits WHERE id = $1`, [nonprofitId]);
+    const nonprofit = nonprofitRows[0];
+    const nonprofitNearby = (0, geo_distance_1.nearbyKeepDecision)(origin, nonprofit?.latitude, nonprofit?.longitude, radiusMiles, { requireCoordinates: locRows.length > 0 });
+    return nonprofitNearby.keep;
 }
 async function fetchMethods(campaignId) {
     const { rows: rows } = await pool_1.pool.query(`SELECT id, method_type, method_name, method_status, requires_business_acceptance
@@ -152,20 +173,40 @@ async function fetchCampaignBySlug(slug, options) {
 exports.campaignsRouter.get("/", async (req, res) => {
     try {
         const status = req.query.status;
+        const origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
+        const radiusMiles = (0, geo_distance_1.parseRadiusMiles)(req.query.radiusMiles, 25);
         await pool_1.pool.query(`UPDATE campaigns SET campaign_status = 'live', updated_at = NOW()
        WHERE campaign_status = 'ready_to_launch'
          AND campaign_start_date IS NOT NULL
          AND campaign_start_date <= CURRENT_DATE`);
-        const whereClause = status
-            ? "WHERE c.campaign_status = $1"
-            : "WHERE c.campaign_status = 'live'";
-        const params = status ? [status] : [];
+        const whereClause = status === "past"
+            ? `WHERE (
+           c.campaign_status IN ('closed', 'settlement')
+           OR (
+             c.campaign_status = 'live'
+             AND c.campaign_end_date IS NOT NULL
+             AND c.campaign_end_date < CURRENT_DATE
+           )
+         )`
+            : status
+                ? "WHERE c.campaign_status = $1"
+                : `WHERE c.campaign_status = 'live'
+             AND (c.campaign_end_date IS NULL OR c.campaign_end_date >= CURRENT_DATE)`;
+        const params = status && status !== "past" ? [status] : [];
+        const orderClause = status === "past"
+            ? "ORDER BY c.campaign_end_date DESC NULLS LAST, c.updated_at DESC"
+            : "ORDER BY c.top_event DESC, c.raised DESC";
         const { rows: campaigns } = await pool_1.pool.query(`SELECT c.*, n.organization_name, n.verification_status
        FROM campaigns c
        JOIN nonprofits n ON n.id = c.nonprofit_id
        ${whereClause}
-       ORDER BY c.top_event DESC, c.raised DESC`, params);
-        const results = await Promise.all(campaigns.map(async (campaign) => {
+       ${orderClause}`, params);
+        let filtered = campaigns;
+        if (origin) {
+            const keepFlags = await Promise.all(campaigns.map((campaign) => campaignIsWithinRadius(campaign.id, campaign.nonprofit_id, origin, radiusMiles)));
+            filtered = campaigns.filter((_, i) => keepFlags[i]);
+        }
+        const results = await Promise.all(filtered.map(async (campaign) => {
             const locationCount = await fetchLocationCount(campaign.id);
             return mapListItem(campaign, locationCount);
         }));
