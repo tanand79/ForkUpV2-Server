@@ -8,7 +8,7 @@
  */
 
 /** Default product radius for nonprofit nearby filters. */
-export const DEFAULT_NEARBY_RADIUS_MILES = 8;
+export const DEFAULT_NEARBY_RADIUS_MILES = 50;
 
 export type LatLng = { latitude: number; longitude: number };
 
