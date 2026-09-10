@@ -27,6 +27,54 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) && email.length <= 254;
 }
 
+/**
+ * Sends verification email for a pending signup (no users row yet).
+ * Inputs: email, fullName, token, code.
+ * Outputs: void (errors propagate to caller).
+ */
+async function sendPendingSignupEmail(
+  email: string,
+  fullName: string | null,
+  token: string,
+  code: string,
+): Promise<void> {
+  const base = resolveFrontendBaseUrl();
+  const verifyUrl = `${base}/?step=auth-verify-email&token=${encodeURIComponent(token)}`;
+  await sendEmail({
+    to: email,
+    name: fullName,
+    subject: "Verify your ForkUp email",
+    body:
+      `Welcome to ForkUp! Verify your email using this link (valid 1 hour):\n\n${verifyUrl}\n\n` +
+      `Or enter this code on the verification page: ${code}\n\n` +
+      `If you did not create an account, you can ignore this email.`,
+    emailType: "user_email_verification",
+    stakeholderRole: "supporter",
+    relatedToken: token,
+  });
+}
+
+/**
+ * Legacy path: verification tokens for users already created before pending_signups.
+ * Inputs: userId, email, optional display name.
+ * Outputs: void (errors propagate to caller).
+ */
+async function createAndSendEmailVerification(
+  userId: number,
+  email: string,
+  fullName: string | null,
+): Promise<void> {
+  const token = crypto.randomBytes(32).toString("hex");
+  const code = String(crypto.randomInt(100000, 1000000));
+  const expires = new Date(Date.now() + 60 * 60 * 1000);
+  await pool.query(
+    `INSERT INTO email_verification_tokens (user_id, token, code, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [userId, token, code, expires],
+  );
+  await sendPendingSignupEmail(email, fullName, token, code);
+}
+
 authRouter.get("/check-email", async (req, res) => {
   try {
     const email = normalizeEmail(typeof req.query.email === "string" ? req.query.email : "");
@@ -43,14 +91,20 @@ authRouter.get("/check-email", async (req, res) => {
       "SELECT id FROM users WHERE email = $1",
       [email],
     );
+    const { rows: pending } = await pool.query<QueryResultRow>(
+      `SELECT id FROM pending_signups
+       WHERE LOWER(email) = $1 AND used_at IS NULL AND expires_at > NOW()
+       LIMIT 1`,
+      [email],
+    );
 
+    const taken = existing.length > 0 || pending.length > 0;
     res.json({
       valid: true,
-      available: existing.length === 0,
-      message:
-        existing.length > 0
-          ? "An account with this email already exists. Please sign in instead."
-          : "Email is available",
+      available: !taken,
+      message: taken
+        ? "An account with this email already exists. Please sign in instead."
+        : "Email is available",
     });
   } catch (err) {
     console.error(err);
@@ -113,8 +167,7 @@ authRouter.post("/register", async (req, res) => {
       return;
     }
 
-    // Guard before creating the user so a rejected org link cannot orphan a row.
-    // New accounts use a non-matching userId so only unclaimed / memberless orgs pass.
+    // Guard before staging signup so a rejected org link never creates a pending row.
     if (organizationType && organizationId) {
       const preLink = await assertUserMayLinkOrganization(pool, {
         userId: -1,
@@ -127,32 +180,56 @@ authRouter.post("/register", async (req, res) => {
       }
     }
 
-    const passwordHash = await hashPassword(password);
-    const { rows: userResult } = await pool.query<{ id: number }>(
-      "INSERT INTO users (email, password_hash, full_name) VALUES ($1, $2, $3) RETURNING id",
-      [normalizedEmail, passwordHash, fullName?.trim() ?? null],
-    );
-    const userId = userResult[0].id;
+    const orgRole =
+      organizationType && organizationId
+        ? ["owner", "admin", "manager", "viewer"].includes(role ?? "")
+          ? role
+          : "admin"
+        : null;
 
-    if (organizationType && organizationId) {
-      const orgRole = ["owner", "admin", "manager", "viewer"].includes(role ?? "")
-        ? role
-        : "admin";
-      await pool.query(
-        `INSERT INTO organization_users (organization_type, organization_id, user_id, role)
-         VALUES ($1, $2, $3, $4)`,
-        [organizationType, organizationId, userId, orgRole],
-      );
+    const passwordHash = await hashPassword(password);
+    const token = crypto.randomBytes(32).toString("hex");
+    const code = String(crypto.randomInt(100000, 1000000));
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    const name = fullName?.trim() ?? null;
+
+    // Replace any unused pending signup for this email (abandoned attempts).
+    await pool.query(
+      `DELETE FROM pending_signups WHERE LOWER(email) = $1 AND used_at IS NULL`,
+      [normalizedEmail],
+    );
+
+    await pool.query(
+      `INSERT INTO pending_signups (
+         email, password_hash, full_name,
+         organization_type, organization_id, organization_role,
+         token, code, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        normalizedEmail,
+        passwordHash,
+        name,
+        organizationType && organizationId ? organizationType : null,
+        organizationType && organizationId ? Number(organizationId) : null,
+        orgRole,
+        token,
+        code,
+        expires,
+      ],
+    );
+
+    try {
+      await sendPendingSignupEmail(normalizedEmail, name, token, code);
+    } catch (mailErr) {
+      console.error("Signup verification email failed:", mailErr);
     }
 
-    const token = generateSessionToken();
-    await pool.query(
-      "INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [userId, token, sessionExpiry()],
-    );
-
-    const user = await resolveAuthUser(token);
-    res.status(201).json({ token, user });
+    // No users row and no session until /verify-email succeeds.
+    res.status(201).json({
+      pendingVerification: true,
+      email: normalizedEmail,
+      message: "Check your email for a verification link and 6-digit code.",
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Registration failed" });
@@ -428,5 +505,236 @@ authRouter.post("/reset-password", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to reset password" });
+  }
+});
+
+/**
+ * POST /api/auth/verify-email
+ * body: { token: string } OR { email: string, code: string }
+ * response (pending signup): { success, emailVerified, token, user }
+ * response (legacy user token): { success, emailVerified }
+ *
+ * Prefer pending_signups (creates users row only after verify). Falls back to
+ * email_verification_tokens for accounts created before pending_signups.
+ */
+authRouter.post("/verify-email", async (req, res) => {
+  try {
+    const token =
+      typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    const normalizedEmail = normalizeEmail(
+      typeof req.body?.email === "string" ? req.body.email : "",
+    );
+    const code =
+      typeof req.body?.code === "string" ? req.body.code.trim() : "";
+
+    let pending: QueryResultRow | undefined;
+    if (token) {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT *
+         FROM pending_signups
+         WHERE token = $1
+         LIMIT 1`,
+        [token],
+      );
+      pending = rows[0];
+    } else if (isValidEmail(normalizedEmail) && /^\d{6}$/.test(code)) {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT *
+         FROM pending_signups
+         WHERE LOWER(email) = $1
+           AND code = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [normalizedEmail, code],
+      );
+      pending = rows[0];
+    } else {
+      res.status(400).json({
+        error: "Provide a verification token, or email plus 6-digit code",
+      });
+      return;
+    }
+
+    if (pending) {
+      if (pending.used_at || new Date(pending.expires_at) < new Date()) {
+        res.status(400).json({ error: "Invalid or expired verification code" });
+        return;
+      }
+
+      const { rows: clash } = await pool.query<QueryResultRow>(
+        `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+        [pending.email],
+      );
+      if (clash.length > 0) {
+        await pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
+          pending.id,
+        ]);
+        res.status(409).json({ error: "An account with this email already exists" });
+        return;
+      }
+
+      const { rows: userResult } = await pool.query<{ id: number }>(
+        `INSERT INTO users (email, password_hash, full_name, email_verified_at)
+         VALUES ($1, $2, $3, NOW())
+         RETURNING id`,
+        [pending.email, pending.password_hash, pending.full_name],
+      );
+      const userId = userResult[0].id;
+
+      if (pending.organization_type && pending.organization_id) {
+        const orgRole = ["owner", "admin", "manager", "viewer"].includes(
+          String(pending.organization_role ?? ""),
+        )
+          ? pending.organization_role
+          : "admin";
+        await pool.query(
+          `INSERT INTO organization_users (organization_type, organization_id, user_id, role)
+           VALUES ($1, $2, $3, $4)`,
+          [pending.organization_type, pending.organization_id, userId, orgRole],
+        );
+      }
+
+      await pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
+        pending.id,
+      ]);
+
+      const sessionToken = generateSessionToken();
+      await pool.query(
+        `INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)`,
+        [userId, sessionToken, sessionExpiry()],
+      );
+      const user = await resolveAuthUser(sessionToken);
+      res.json({
+        success: true,
+        emailVerified: true,
+        token: sessionToken,
+        user,
+      });
+      return;
+    }
+
+    // Legacy fallback: user already exists + email_verification_tokens.
+    let legacy: QueryResultRow | undefined;
+    if (token) {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT id, user_id, expires_at, used_at
+         FROM email_verification_tokens
+         WHERE token = $1
+         LIMIT 1`,
+        [token],
+      );
+      legacy = rows[0];
+    } else if (isValidEmail(normalizedEmail) && /^\d{6}$/.test(code)) {
+      const { rows } = await pool.query<QueryResultRow>(
+        `SELECT evt.id, evt.user_id, evt.expires_at, evt.used_at
+         FROM email_verification_tokens evt
+         INNER JOIN users u ON u.id = evt.user_id
+         WHERE u.email = $1
+           AND evt.code = $2
+         ORDER BY evt.created_at DESC
+         LIMIT 1`,
+        [normalizedEmail, code],
+      );
+      legacy = rows[0];
+    }
+
+    if (!legacy) {
+      res.status(400).json({ error: "Invalid or expired verification code" });
+      return;
+    }
+    if (legacy.used_at || new Date(legacy.expires_at) < new Date()) {
+      res.status(400).json({ error: "Invalid or expired verification code" });
+      return;
+    }
+
+    await pool.query(
+      `UPDATE users
+       SET email_verified_at = COALESCE(email_verified_at, NOW()), updated_at = NOW()
+       WHERE id = $1`,
+      [legacy.user_id],
+    );
+    await pool.query(
+      `UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`,
+      [legacy.id],
+    );
+
+    res.json({ success: true, emailVerified: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to verify email" });
+  }
+});
+
+/**
+ * POST /api/auth/resend-verification
+ * body: { email: string }
+ * response: { success: boolean, message: string }
+ *
+ * Resends for active pending_signups, or legacy unverified users.
+ */
+authRouter.post("/resend-verification", async (req, res) => {
+  try {
+    const normalizedEmail = normalizeEmail(
+      typeof req.body?.email === "string" ? req.body.email : "",
+    );
+    const generic = {
+      success: true,
+      message:
+        "If an unverified account matches, a verification link and code have been sent.",
+    };
+    if (!isValidEmail(normalizedEmail)) {
+      res.json(generic);
+      return;
+    }
+
+    const { rows: pendingRows } = await pool.query<QueryResultRow>(
+      `SELECT id, email, full_name
+       FROM pending_signups
+       WHERE LOWER(email) = $1 AND used_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [normalizedEmail],
+    );
+    if (pendingRows.length > 0) {
+      const token = crypto.randomBytes(32).toString("hex");
+      const code = String(crypto.randomInt(100000, 1000000));
+      const expires = new Date(Date.now() + 60 * 60 * 1000);
+      await pool.query(
+        `UPDATE pending_signups
+         SET token = $1, code = $2, expires_at = $3
+         WHERE id = $4`,
+        [token, code, expires, pendingRows[0].id],
+      );
+      await sendPendingSignupEmail(
+        String(pendingRows[0].email),
+        pendingRows[0].full_name ?? null,
+        token,
+        code,
+      );
+      res.json(generic);
+      return;
+    }
+
+    const { rows } = await pool.query<QueryResultRow>(
+      `SELECT id, email, full_name, email_verified_at
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [normalizedEmail],
+    );
+    if (rows.length === 0 || rows[0].email_verified_at != null) {
+      res.json(generic);
+      return;
+    }
+
+    await createAndSendEmailVerification(
+      Number(rows[0].id),
+      String(rows[0].email),
+      rows[0].full_name ?? null,
+    );
+    res.json(generic);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Unable to resend verification email" });
   }
 });

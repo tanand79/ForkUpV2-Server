@@ -18,6 +18,26 @@ function normalizeEmail(raw) {
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) && email.length <= 254;
 }
+async function createAndSendEmailVerification(userId, email, fullName) {
+    const token = crypto_1.default.randomBytes(32).toString("hex");
+    const code = String(crypto_1.default.randomInt(100000, 1000000));
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    await pool_1.pool.query(`INSERT INTO email_verification_tokens (user_id, token, code, expires_at)
+     VALUES ($1, $2, $3, $4)`, [userId, token, code, expires]);
+    const base = (0, mailer_1.resolveFrontendBaseUrl)();
+    const verifyUrl = `${base}/?step=auth-verify-email&token=${encodeURIComponent(token)}`;
+    await (0, mailer_1.sendEmail)({
+        to: email,
+        name: fullName,
+        subject: "Verify your ForkUp email",
+        body: `Welcome to ForkUp! Verify your email using this link (valid 1 hour):\n\n${verifyUrl}\n\n` +
+            `Or enter this code on the verification page: ${code}\n\n` +
+            `If you did not create an account, you can ignore this email.`,
+        emailType: "user_email_verification",
+        stakeholderRole: "supporter",
+        relatedToken: token,
+    });
+}
 exports.authRouter.get("/check-email", async (req, res) => {
     try {
         const email = normalizeEmail(typeof req.query.email === "string" ? req.query.email : "");
@@ -97,6 +117,12 @@ exports.authRouter.post("/register", async (req, res) => {
         const passwordHash = await (0, auth_1.hashPassword)(password);
         const { rows: userResult } = await pool_1.pool.query("INSERT INTO users (email, password_hash, full_name) VALUES ($1, $2, $3) RETURNING id", [normalizedEmail, passwordHash, fullName?.trim() ?? null]);
         const userId = userResult[0].id;
+        try {
+            await createAndSendEmailVerification(userId, normalizedEmail, fullName?.trim() ?? null);
+        }
+        catch (mailErr) {
+            console.error("Signup verification email failed:", mailErr);
+        }
         if (organizationType && organizationId) {
             const orgRole = ["owner", "admin", "manager", "viewer"].includes(role ?? "")
                 ? role
@@ -309,6 +335,81 @@ exports.authRouter.post("/reset-password", async (req, res) => {
     catch (err) {
         console.error(err);
         res.status(500).json({ error: "Failed to reset password" });
+    }
+});
+exports.authRouter.post("/verify-email", async (req, res) => {
+    try {
+        const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+        const normalizedEmail = normalizeEmail(typeof req.body?.email === "string" ? req.body.email : "");
+        const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+        let row;
+        if (token) {
+            const { rows } = await pool_1.pool.query(`SELECT id, user_id, expires_at, used_at
+         FROM email_verification_tokens
+         WHERE token = $1
+         LIMIT 1`, [token]);
+            row = rows[0];
+        }
+        else if (isValidEmail(normalizedEmail) && /^\d{6}$/.test(code)) {
+            const { rows } = await pool_1.pool.query(`SELECT evt.id, evt.user_id, evt.expires_at, evt.used_at
+         FROM email_verification_tokens evt
+         INNER JOIN users u ON u.id = evt.user_id
+         WHERE u.email = $1
+           AND evt.code = $2
+         ORDER BY evt.created_at DESC
+         LIMIT 1`, [normalizedEmail, code]);
+            row = rows[0];
+        }
+        else {
+            res.status(400).json({
+                error: "Provide a verification token, or email plus 6-digit code",
+            });
+            return;
+        }
+        if (!row) {
+            res.status(400).json({ error: "Invalid or expired verification code" });
+            return;
+        }
+        if (row.used_at || new Date(row.expires_at) < new Date()) {
+            res.status(400).json({ error: "Invalid or expired verification code" });
+            return;
+        }
+        await pool_1.pool.query(`UPDATE users
+       SET email_verified_at = COALESCE(email_verified_at, NOW()), updated_at = NOW()
+       WHERE id = $1`, [row.user_id]);
+        await pool_1.pool.query(`UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`, [row.id]);
+        res.json({ success: true, emailVerified: true });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to verify email" });
+    }
+});
+exports.authRouter.post("/resend-verification", async (req, res) => {
+    try {
+        const normalizedEmail = normalizeEmail(typeof req.body?.email === "string" ? req.body.email : "");
+        const generic = {
+            success: true,
+            message: "If an unverified account matches, a verification link and code have been sent.",
+        };
+        if (!isValidEmail(normalizedEmail)) {
+            res.json(generic);
+            return;
+        }
+        const { rows } = await pool_1.pool.query(`SELECT id, email, full_name, email_verified_at
+       FROM users
+       WHERE email = $1
+       LIMIT 1`, [normalizedEmail]);
+        if (rows.length === 0 || rows[0].email_verified_at != null) {
+            res.json(generic);
+            return;
+        }
+        await createAndSendEmailVerification(Number(rows[0].id), String(rows[0].email), rows[0].full_name ?? null);
+        res.json(generic);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Unable to resend verification email" });
     }
 });
 //# sourceMappingURL=auth.js.map

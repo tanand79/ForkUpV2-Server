@@ -37,6 +37,8 @@
     "src/legacy/db/migrate-location-ach.ts",
     "src/legacy/db/migrate-geo-coordinates.ts",
     "src/legacy/db/migrate-password-reset-code.ts",
+    "src/legacy/db/migrate-email-verification.ts",
+    "src/legacy/db/migrate-pending-signups.ts",
     "src/legacy/db/backfill-geo-coordinates.ts",
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",

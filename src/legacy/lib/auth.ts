@@ -39,6 +39,8 @@ export type AuthUser = {
   fullName: string | null;
   username: string | null;
   isPlatformAdmin: boolean;
+  /** True when users.email_verified_at is set (existing accounts backfilled). */
+  emailVerified: boolean;
   organizations: {
     organizationType: "nonprofit" | "business";
     organizationId: number;
@@ -51,6 +53,7 @@ export async function resolveAuthUser(token: string | undefined): Promise<AuthUs
 
   const { rows: sessions } = await pool.query<QueryResultRow>(
     `SELECT s.user_id, s.expires_at, u.email, u.full_name, u.username,
+            u.email_verified_at,
             COALESCE(u.is_platform_admin, FALSE) AS is_platform_admin
      FROM auth_sessions s
      JOIN users u ON u.id = s.user_id
@@ -75,6 +78,7 @@ export async function resolveAuthUser(token: string | undefined): Promise<AuthUs
     fullName: row.full_name,
     username: row.username ?? null,
     isPlatformAdmin: Boolean(row.is_platform_admin),
+    emailVerified: row.email_verified_at != null,
     organizations: orgs.map((o) => ({
       organizationType: o.organization_type,
       organizationId: Number(o.organization_id),

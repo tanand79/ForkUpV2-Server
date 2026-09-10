@@ -9,6 +9,7 @@ export type AuthUser = {
     fullName: string | null;
     username: string | null;
     isPlatformAdmin: boolean;
+    emailVerified: boolean;
     organizations: {
         organizationType: "nonprofit" | "business";
         organizationId: number;
