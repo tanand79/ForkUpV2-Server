@@ -1161,6 +1161,81 @@ exports.superadminRouter.get("/users", async (req, res) => {
         res.status(500).json({ error: "Failed to load users" });
     }
 });
+exports.superadminRouter.delete("/users/:id", async (req, res) => {
+    const connection = await pool_1.pool.connect();
+    try {
+        const admin = req.platformAdmin;
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id) || id <= 0) {
+            res.status(400).json({ error: "Invalid user id" });
+            return;
+        }
+        if (admin.id === id) {
+            res.status(400).json({ error: "Cannot delete your own superadmin account" });
+            return;
+        }
+        await connection.query("BEGIN");
+        const { rows } = await connection.query(`SELECT id, email, COALESCE(is_platform_admin, FALSE) AS is_platform_admin
+       FROM users
+       WHERE id = $1
+       FOR UPDATE`, [id]);
+        if (rows.length === 0) {
+            await connection.query("ROLLBACK");
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+        const target = rows[0];
+        if (Boolean(target.is_platform_admin)) {
+            await connection.query("ROLLBACK");
+            res.status(403).json({ error: "Cannot delete a platform superadmin account" });
+            return;
+        }
+        const email = String(target.email);
+        await connection.query(`UPDATE nonprofits
+       SET claimed_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE claimed_by_user_id = $1`, [id]);
+        await connection.query(`UPDATE nonprofits
+       SET contact_email = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE contact_email ILIKE $1`, [email]);
+        await connection.query(`UPDATE businesses
+       SET claimed_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE claimed_by_user_id = $1`, [id]);
+        await connection.query(`UPDATE businesses
+       SET contact_email = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE contact_email ILIKE $1`, [email]);
+        await connection.query(`UPDATE campaigns
+       SET created_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE created_by_user_id = $1`, [id]);
+        await connection.query(`UPDATE organization_ai_analysis_sessions
+       SET created_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE created_by_user_id = $1`, [id]);
+        await connection.query(`UPDATE organization_access_requests
+       SET requested_by_user_id = NULL,
+           reviewed_by_user_id = CASE
+             WHEN reviewed_by_user_id = $1 THEN NULL
+             ELSE reviewed_by_user_id
+           END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE requested_by_user_id = $1 OR reviewed_by_user_id = $1`, [id]);
+        await connection.query(`DELETE FROM organization_access_requests
+       WHERE requester_email ILIKE $1`, [email]);
+        await connection.query(`DELETE FROM email_log
+       WHERE recipient_email ILIKE $1`, [email]);
+        await connection.query(`DELETE FROM supporters
+       WHERE email ILIKE $1`, [email]);
+        await connection.query(`DELETE FROM users WHERE id = $1`, [id]);
+        await connection.query("COMMIT");
+        res.json({ success: true, id, email });
+    }
+    catch (err) {
+        await connection.query("ROLLBACK");
+        console.error(err);
+        res.status(500).json({ error: "Failed to delete user" });
+    }
+    finally {
+        connection.release();
+    }
+});
 exports.superadminRouter.get("/roles", async (_req, res) => {
     try {
         const [platform, orgRoles, fundraiser] = await Promise.all([

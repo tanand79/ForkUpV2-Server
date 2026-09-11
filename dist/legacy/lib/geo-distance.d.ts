@@ -1,4 +1,4 @@
-export declare const DEFAULT_NEARBY_RADIUS_MILES = 8;
+export declare const DEFAULT_NEARBY_RADIUS_MILES = 50;
 export type LatLng = {
     latitude: number;
     longitude: number;

@@ -184,12 +184,13 @@ async function campaignIsWithinRadius(
     [nonprofitId],
   );
   const nonprofit = nonprofitRows[0];
+  // Nearby list: never keep campaigns with no usable coords (avoids NYC showing for Dallas, etc.).
   const nonprofitNearby = nearbyKeepDecision(
     origin,
     nonprofit?.latitude as number | null | undefined,
     nonprofit?.longitude as number | null | undefined,
     radiusMiles,
-    { requireCoordinates: locRows.length > 0 },
+    { requireCoordinates: true },
   );
   return nonprofitNearby.keep;
 }

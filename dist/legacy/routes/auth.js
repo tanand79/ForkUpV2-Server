@@ -18,12 +18,7 @@ function normalizeEmail(raw) {
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) && email.length <= 254;
 }
-async function createAndSendEmailVerification(userId, email, fullName) {
-    const token = crypto_1.default.randomBytes(32).toString("hex");
-    const code = String(crypto_1.default.randomInt(100000, 1000000));
-    const expires = new Date(Date.now() + 60 * 60 * 1000);
-    await pool_1.pool.query(`INSERT INTO email_verification_tokens (user_id, token, code, expires_at)
-     VALUES ($1, $2, $3, $4)`, [userId, token, code, expires]);
+async function sendPendingSignupEmail(email, fullName, token, code) {
     const base = (0, mailer_1.resolveFrontendBaseUrl)();
     const verifyUrl = `${base}/?step=auth-verify-email&token=${encodeURIComponent(token)}`;
     await (0, mailer_1.sendEmail)({
@@ -38,6 +33,14 @@ async function createAndSendEmailVerification(userId, email, fullName) {
         relatedToken: token,
     });
 }
+async function createAndSendEmailVerification(userId, email, fullName) {
+    const token = crypto_1.default.randomBytes(32).toString("hex");
+    const code = String(crypto_1.default.randomInt(100000, 1000000));
+    const expires = new Date(Date.now() + 60 * 60 * 1000);
+    await pool_1.pool.query(`INSERT INTO email_verification_tokens (user_id, token, code, expires_at)
+     VALUES ($1, $2, $3, $4)`, [userId, token, code, expires]);
+    await sendPendingSignupEmail(email, fullName, token, code);
+}
 exports.authRouter.get("/check-email", async (req, res) => {
     try {
         const email = normalizeEmail(typeof req.query.email === "string" ? req.query.email : "");
@@ -50,10 +53,14 @@ exports.authRouter.get("/check-email", async (req, res) => {
             return;
         }
         const { rows: existing } = await pool_1.pool.query("SELECT id FROM users WHERE email = $1", [email]);
+        const { rows: pending } = await pool_1.pool.query(`SELECT id FROM pending_signups
+       WHERE LOWER(email) = $1 AND used_at IS NULL AND expires_at > NOW()
+       LIMIT 1`, [email]);
+        const taken = existing.length > 0 || pending.length > 0;
         res.json({
             valid: true,
-            available: existing.length === 0,
-            message: existing.length > 0
+            available: !taken,
+            message: taken
                 ? "An account with this email already exists. Please sign in instead."
                 : "Email is available",
         });
@@ -114,26 +121,43 @@ exports.authRouter.post("/register", async (req, res) => {
                 return;
             }
         }
+        const orgRole = organizationType && organizationId
+            ? ["owner", "admin", "manager", "viewer"].includes(role ?? "")
+                ? role
+                : "admin"
+            : null;
         const passwordHash = await (0, auth_1.hashPassword)(password);
-        const { rows: userResult } = await pool_1.pool.query("INSERT INTO users (email, password_hash, full_name) VALUES ($1, $2, $3) RETURNING id", [normalizedEmail, passwordHash, fullName?.trim() ?? null]);
-        const userId = userResult[0].id;
+        const token = crypto_1.default.randomBytes(32).toString("hex");
+        const code = String(crypto_1.default.randomInt(100000, 1000000));
+        const expires = new Date(Date.now() + 60 * 60 * 1000);
+        const name = fullName?.trim() ?? null;
+        await pool_1.pool.query(`DELETE FROM pending_signups WHERE LOWER(email) = $1 AND used_at IS NULL`, [normalizedEmail]);
+        await pool_1.pool.query(`INSERT INTO pending_signups (
+         email, password_hash, full_name,
+         organization_type, organization_id, organization_role,
+         token, code, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+            normalizedEmail,
+            passwordHash,
+            name,
+            organizationType && organizationId ? organizationType : null,
+            organizationType && organizationId ? Number(organizationId) : null,
+            orgRole,
+            token,
+            code,
+            expires,
+        ]);
         try {
-            await createAndSendEmailVerification(userId, normalizedEmail, fullName?.trim() ?? null);
+            await sendPendingSignupEmail(normalizedEmail, name, token, code);
         }
         catch (mailErr) {
             console.error("Signup verification email failed:", mailErr);
         }
-        if (organizationType && organizationId) {
-            const orgRole = ["owner", "admin", "manager", "viewer"].includes(role ?? "")
-                ? role
-                : "admin";
-            await pool_1.pool.query(`INSERT INTO organization_users (organization_type, organization_id, user_id, role)
-         VALUES ($1, $2, $3, $4)`, [organizationType, organizationId, userId, orgRole]);
-        }
-        const token = (0, auth_1.generateSessionToken)();
-        await pool_1.pool.query("INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)", [userId, token, (0, auth_1.sessionExpiry)()]);
-        const user = await (0, auth_1.resolveAuthUser)(token);
-        res.status(201).json({ token, user });
+        res.status(201).json({
+            pendingVerification: true,
+            email: normalizedEmail,
+            message: "Check your email for a verification link and 6-digit code.",
+        });
     }
     catch (err) {
         console.error(err);
@@ -342,13 +366,74 @@ exports.authRouter.post("/verify-email", async (req, res) => {
         const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
         const normalizedEmail = normalizeEmail(typeof req.body?.email === "string" ? req.body.email : "");
         const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
-        let row;
+        let pending;
+        if (token) {
+            const { rows } = await pool_1.pool.query(`SELECT *
+         FROM pending_signups
+         WHERE token = $1
+         LIMIT 1`, [token]);
+            pending = rows[0];
+        }
+        else if (isValidEmail(normalizedEmail) && /^\d{6}$/.test(code)) {
+            const { rows } = await pool_1.pool.query(`SELECT *
+         FROM pending_signups
+         WHERE LOWER(email) = $1
+           AND code = $2
+         ORDER BY created_at DESC
+         LIMIT 1`, [normalizedEmail, code]);
+            pending = rows[0];
+        }
+        else {
+            res.status(400).json({
+                error: "Provide a verification token, or email plus 6-digit code",
+            });
+            return;
+        }
+        if (pending) {
+            if (pending.used_at || new Date(pending.expires_at) < new Date()) {
+                res.status(400).json({ error: "Invalid or expired verification code" });
+                return;
+            }
+            const { rows: clash } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [pending.email]);
+            if (clash.length > 0) {
+                await pool_1.pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
+                    pending.id,
+                ]);
+                res.status(409).json({ error: "An account with this email already exists" });
+                return;
+            }
+            const { rows: userResult } = await pool_1.pool.query(`INSERT INTO users (email, password_hash, full_name, email_verified_at)
+         VALUES ($1, $2, $3, NOW())
+         RETURNING id`, [pending.email, pending.password_hash, pending.full_name]);
+            const userId = userResult[0].id;
+            if (pending.organization_type && pending.organization_id) {
+                const orgRole = ["owner", "admin", "manager", "viewer"].includes(String(pending.organization_role ?? ""))
+                    ? pending.organization_role
+                    : "admin";
+                await pool_1.pool.query(`INSERT INTO organization_users (organization_type, organization_id, user_id, role)
+           VALUES ($1, $2, $3, $4)`, [pending.organization_type, pending.organization_id, userId, orgRole]);
+            }
+            await pool_1.pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
+                pending.id,
+            ]);
+            const sessionToken = (0, auth_1.generateSessionToken)();
+            await pool_1.pool.query(`INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)`, [userId, sessionToken, (0, auth_1.sessionExpiry)()]);
+            const user = await (0, auth_1.resolveAuthUser)(sessionToken);
+            res.json({
+                success: true,
+                emailVerified: true,
+                token: sessionToken,
+                user,
+            });
+            return;
+        }
+        let legacy;
         if (token) {
             const { rows } = await pool_1.pool.query(`SELECT id, user_id, expires_at, used_at
          FROM email_verification_tokens
          WHERE token = $1
          LIMIT 1`, [token]);
-            row = rows[0];
+            legacy = rows[0];
         }
         else if (isValidEmail(normalizedEmail) && /^\d{6}$/.test(code)) {
             const { rows } = await pool_1.pool.query(`SELECT evt.id, evt.user_id, evt.expires_at, evt.used_at
@@ -358,26 +443,20 @@ exports.authRouter.post("/verify-email", async (req, res) => {
            AND evt.code = $2
          ORDER BY evt.created_at DESC
          LIMIT 1`, [normalizedEmail, code]);
-            row = rows[0];
+            legacy = rows[0];
         }
-        else {
-            res.status(400).json({
-                error: "Provide a verification token, or email plus 6-digit code",
-            });
-            return;
-        }
-        if (!row) {
+        if (!legacy) {
             res.status(400).json({ error: "Invalid or expired verification code" });
             return;
         }
-        if (row.used_at || new Date(row.expires_at) < new Date()) {
+        if (legacy.used_at || new Date(legacy.expires_at) < new Date()) {
             res.status(400).json({ error: "Invalid or expired verification code" });
             return;
         }
         await pool_1.pool.query(`UPDATE users
        SET email_verified_at = COALESCE(email_verified_at, NOW()), updated_at = NOW()
-       WHERE id = $1`, [row.user_id]);
-        await pool_1.pool.query(`UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`, [row.id]);
+       WHERE id = $1`, [legacy.user_id]);
+        await pool_1.pool.query(`UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`, [legacy.id]);
         res.json({ success: true, emailVerified: true });
     }
     catch (err) {
@@ -393,6 +472,22 @@ exports.authRouter.post("/resend-verification", async (req, res) => {
             message: "If an unverified account matches, a verification link and code have been sent.",
         };
         if (!isValidEmail(normalizedEmail)) {
+            res.json(generic);
+            return;
+        }
+        const { rows: pendingRows } = await pool_1.pool.query(`SELECT id, email, full_name
+       FROM pending_signups
+       WHERE LOWER(email) = $1 AND used_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`, [normalizedEmail]);
+        if (pendingRows.length > 0) {
+            const token = crypto_1.default.randomBytes(32).toString("hex");
+            const code = String(crypto_1.default.randomInt(100000, 1000000));
+            const expires = new Date(Date.now() + 60 * 60 * 1000);
+            await pool_1.pool.query(`UPDATE pending_signups
+         SET token = $1, code = $2, expires_at = $3
+         WHERE id = $4`, [token, code, expires, pendingRows[0].id]);
+            await sendPendingSignupEmail(String(pendingRows[0].email), pendingRows[0].full_name ?? null, token, code);
             res.json(generic);
             return;
         }

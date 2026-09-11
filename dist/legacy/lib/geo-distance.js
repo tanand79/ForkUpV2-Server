@@ -10,7 +10,7 @@ exports.geocodeUsZip = geocodeUsZip;
 exports.resolveUsZip = resolveUsZip;
 exports.geocodeUsCityState = geocodeUsCityState;
 exports.reverseGeocodeUs = reverseGeocodeUs;
-exports.DEFAULT_NEARBY_RADIUS_MILES = 8;
+exports.DEFAULT_NEARBY_RADIUS_MILES = 50;
 function parseLatLng(latRaw, lngRaw) {
     const latitude = typeof latRaw === "number"
         ? latRaw

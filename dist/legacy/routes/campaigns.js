@@ -98,7 +98,7 @@ async function campaignIsWithinRadius(campaignId, nonprofitId, origin, radiusMil
     }
     const { rows: nonprofitRows } = await pool_1.pool.query(`SELECT latitude, longitude FROM nonprofits WHERE id = $1`, [nonprofitId]);
     const nonprofit = nonprofitRows[0];
-    const nonprofitNearby = (0, geo_distance_1.nearbyKeepDecision)(origin, nonprofit?.latitude, nonprofit?.longitude, radiusMiles, { requireCoordinates: locRows.length > 0 });
+    const nonprofitNearby = (0, geo_distance_1.nearbyKeepDecision)(origin, nonprofit?.latitude, nonprofit?.longitude, radiusMiles, { requireCoordinates: true });
     return nonprofitNearby.keep;
 }
 async function fetchMethods(campaignId) {
