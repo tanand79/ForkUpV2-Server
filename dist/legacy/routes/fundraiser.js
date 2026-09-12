@@ -42,14 +42,19 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
     const connection = await pool_1.pool.connect();
     try {
         const authUser = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
-        if (!authUser) {
-            res.status(401).json({ error: "Sign in required to invite a nonprofit" });
-            return;
-        }
         const body = req.body;
         const nonprofitId = Number(body.nonprofitId);
         const campaignName = body.campaignName?.trim() ?? "";
         const campaignStory = body.campaignStory?.trim() ?? "";
+        const guestEmail = typeof body.fundraiserEmail === "string"
+            ? body.fundraiserEmail.trim().toLowerCase()
+            : "";
+        if (!authUser && !guestEmail.includes("@")) {
+            res.status(401).json({
+                error: "Sign in or provide fundraiserEmail to invite a nonprofit",
+            });
+            return;
+        }
         if (!nonprofitId) {
             res.status(400).json({ error: "nonprofitId is required" });
             return;
@@ -58,18 +63,27 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             res.status(400).json({ error: "campaignName and campaignStory are required" });
             return;
         }
-        if (await userIsNonprofitMember(authUser.id, nonprofitId)) {
+        if (authUser && (await userIsNonprofitMember(authUser.id, nonprofitId))) {
             res.status(400).json({
                 error: "You already belong to this nonprofit. Create the campaign from your nonprofit dashboard instead.",
             });
             return;
         }
-        const { rows: npRows } = await connection.query("SELECT id, organization_name, contact_email, contact_name FROM nonprofits WHERE id = $1", [nonprofitId]);
+        const { rows: npRows } = await connection.query("SELECT id, organization_name, contact_email, contact_name, claim_status FROM nonprofits WHERE id = $1", [nonprofitId]);
         if (npRows.length === 0) {
             res.status(404).json({ error: "Nonprofit not found" });
             return;
         }
         const nonprofit = npRows[0];
+        const nonprofitEmail = typeof nonprofit.contact_email === "string"
+            ? nonprofit.contact_email.trim()
+            : "";
+        if (!nonprofitEmail.includes("@")) {
+            res.status(400).json({
+                error: "This nonprofit has no contact email on file. ForkUp must update the profile before invites can be sent.",
+            });
+            return;
+        }
         const methods = normalizeInviteMethods(body.methods);
         let coverImage = (typeof body.coverImage === "string" && body.coverImage.trim()) ||
             "/placeholder-cover.jpg";
@@ -120,8 +134,10 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             ? "needs_forkup_review"
             : timingEval.status;
         const needsForkupReview = wantsForkupReview;
-        const fundraiserName = authUser.fullName?.trim() || authUser.email;
-        const fundraiserEmail = authUser.email;
+        const fundraiserEmail = authUser?.email?.trim().toLowerCase() || guestEmail;
+        const fundraiserName = (typeof body.fundraiserName === "string" && body.fundraiserName.trim()) ||
+            authUser?.fullName?.trim() ||
+            fundraiserEmail;
         await connection.query("BEGIN");
         const slug = await (0, slug_1.uniqueCampaignSlug)(campaignName, async (s) => {
             const { rows } = await connection.query("SELECT id FROM campaigns WHERE slug = $1", [s]);
@@ -146,7 +162,7 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             endDate,
             eventDate,
             coverImage,
-            authUser.id,
+            authUser?.id ?? null,
             businessTimingStatus,
             forkupReviewStatus,
             needsForkupReview,
@@ -164,16 +180,18 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
                 methods_1.METHOD_REQUIRES_BUSINESS[methodType] ? methodTimingStatus : "ok",
             ]);
         }
-        await connection.query(`INSERT INTO campaign_fundraisers (campaign_id, user_id, status)
-       VALUES ($1, $2, 'pending')
-       ON CONFLICT (campaign_id, user_id) DO UPDATE SET status = 'pending'`, [campaignId, authUser.id]);
+        if (authUser) {
+            await connection.query(`INSERT INTO campaign_fundraisers (campaign_id, user_id, status)
+         VALUES ($1, $2, 'pending')
+         ON CONFLICT (campaign_id, user_id) DO UPDATE SET status = 'pending'`, [campaignId, authUser.id]);
+        }
         const token = (0, invitations_1.generateInvitationToken)();
         await connection.query(`INSERT INTO fundraiser_campaign_invitations (
         token, fundraiser_user_id, fundraiser_name, fundraiser_email,
         nonprofit_id, campaign_id, message
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
             token,
-            authUser.id,
+            authUser?.id ?? null,
             fundraiserName,
             fundraiserEmail,
             nonprofitId,
@@ -182,39 +200,39 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
         ]);
         await connection.query("COMMIT");
         const acceptPath = `/?step=fundraiser-invite-accept&token=${token}`;
-        const nonprofitEmail = typeof nonprofit.contact_email === "string"
-            ? nonprofit.contact_email.trim()
-            : "";
-        if (nonprofitEmail) {
-            const acceptUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}${acceptPath}`;
-            await (0, mailer_1.sendEmail)({
-                to: nonprofitEmail,
-                name: typeof nonprofit.contact_name === "string"
-                    ? nonprofit.contact_name
-                    : null,
-                subject: `${fundraiserName} proposed a ForkUp campaign for ${nonprofit.organization_name}`,
-                body: `Hi ${nonprofit.organization_name},\n\n` +
-                    `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
-                    `"${campaignName}"\n\n` +
-                    (body.message?.trim()
-                        ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
-                        : "") +
-                    `Review and respond here:\n${acceptUrl}\n\n` +
-                    `— ForkUp`,
-                emailType: "fundraiser_campaign_invitation",
-                campaignId,
-                stakeholderRole: "nonprofit",
-                relatedToken: token,
-                platformSender: true,
-                fromName: fundraiserName,
-                replyTo: fundraiserEmail.includes("@") ? fundraiserEmail : null,
-            });
-        }
+        const acceptUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}${acceptPath}`;
+        await (0, mailer_1.sendEmail)({
+            to: nonprofitEmail,
+            name: typeof nonprofit.contact_name === "string"
+                ? nonprofit.contact_name
+                : null,
+            subject: `${fundraiserName} proposed a ForkUp campaign for ${nonprofit.organization_name}`,
+            body: `Hi ${nonprofit.organization_name},\n\n` +
+                `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
+                `"${campaignName}"\n\n` +
+                (body.message?.trim()
+                    ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
+                    : "") +
+                `Review and respond here:\n${acceptUrl}\n\n` +
+                `— ForkUp`,
+            emailType: "fundraiser_campaign_invitation",
+            campaignId,
+            stakeholderRole: "nonprofit",
+            relatedToken: token,
+            platformSender: true,
+            fromName: fundraiserName,
+            replyTo: fundraiserEmail.includes("@") ? fundraiserEmail : null,
+        });
+        const at = nonprofitEmail.indexOf("@");
+        const nonprofitEmailHint = at > 0 ? `***@${nonprofitEmail.slice(at + 1)}` : "on file";
         res.status(201).json({
             token,
             acceptPath,
             campaignSlug: slug,
             campaignName,
+            nonprofitEmailed: true,
+            nonprofitEmailHint,
+            fundraiserEmail,
         });
     }
     catch (err) {

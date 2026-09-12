@@ -18,6 +18,9 @@ function normalizeEmail(raw) {
 function isValidEmail(email) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) && email.length <= 254;
 }
+const PRODUCT_USER_SQL = `COALESCE(is_platform_admin, FALSE) = FALSE`;
+const PRODUCT_USER_U_SQL = `COALESCE(u.is_platform_admin, FALSE) = FALSE`;
+const STAFF_USER_SQL = `COALESCE(is_platform_admin, FALSE) = TRUE`;
 async function sendPendingSignupEmail(email, fullName, token, code) {
     const base = (0, mailer_1.resolveFrontendBaseUrl)();
     const verifyUrl = `${base}/?step=auth-verify-email&token=${encodeURIComponent(token)}`;
@@ -52,7 +55,7 @@ exports.authRouter.get("/check-email", async (req, res) => {
             res.json({ available: false, valid: false, message: "Enter a valid email address" });
             return;
         }
-        const { rows: existing } = await pool_1.pool.query("SELECT id FROM users WHERE email = $1", [email]);
+        const { rows: existing } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL}`, [email]);
         const { rows: pending } = await pool_1.pool.query(`SELECT id FROM pending_signups
        WHERE LOWER(email) = $1 AND used_at IS NULL AND expires_at > NOW()
        LIMIT 1`, [email]);
@@ -105,7 +108,7 @@ exports.authRouter.post("/register", async (req, res) => {
             res.status(400).json({ error: "Password must be at least 8 characters" });
             return;
         }
-        const { rows: existing } = await pool_1.pool.query("SELECT id FROM users WHERE email = $1", [normalizedEmail]);
+        const { rows: existing } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL}`, [normalizedEmail]);
         if (existing.length > 0) {
             res.status(409).json({ error: "An account with this email already exists" });
             return;
@@ -172,18 +175,27 @@ exports.authRouter.post("/login", async (req, res) => {
             res.status(400).json({ error: "Enter a valid email and password" });
             return;
         }
-        const { rows: rows } = await pool_1.pool.query("SELECT id, password_hash FROM users WHERE email = $1", [normalizedEmail]);
-        if (rows.length === 0) {
+        const { rows: productRows } = await pool_1.pool.query(`SELECT id, password_hash FROM users
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
+       LIMIT 1`, [normalizedEmail]);
+        if (productRows.length === 0) {
+            const { rows: staffRows } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 AND ${STAFF_USER_SQL} LIMIT 1`, [normalizedEmail]);
+            if (staffRows.length > 0) {
+                res.status(403).json({
+                    error: "This email is a staff account. Use the staff / superadmin sign-in instead.",
+                });
+                return;
+            }
             res.status(401).json({ error: "Invalid email or password" });
             return;
         }
-        const valid = await (0, auth_1.verifyPassword)(password, String(rows[0].password_hash ?? ""));
+        const valid = await (0, auth_1.verifyPassword)(password, String(productRows[0].password_hash ?? ""));
         if (!valid) {
             res.status(401).json({ error: "Invalid email or password" });
             return;
         }
         const token = (0, auth_1.generateSessionToken)();
-        await pool_1.pool.query("INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)", [rows[0].id, token, (0, auth_1.sessionExpiry)()]);
+        await pool_1.pool.query("INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)", [productRows[0].id, token, (0, auth_1.sessionExpiry)()]);
         const user = await (0, auth_1.resolveAuthUser)(token);
         res.json({ token, user });
     }
@@ -266,7 +278,9 @@ exports.authRouter.post("/forgot-password", async (req, res) => {
             res.json(generic);
             return;
         }
-        const { rows } = await pool_1.pool.query(`SELECT id, email, full_name FROM users WHERE email = $1 LIMIT 1`, [normalizedEmail]);
+        const { rows } = await pool_1.pool.query(`SELECT id, email, full_name FROM users
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
+       LIMIT 1`, [normalizedEmail]);
         if (rows.length === 0) {
             res.json(generic);
             return;
@@ -308,6 +322,7 @@ exports.authRouter.post("/verify-reset-code", async (req, res) => {
        FROM password_reset_tokens prt
        INNER JOIN users u ON u.id = prt.user_id
        WHERE u.email = $1
+         AND ${PRODUCT_USER_U_SQL}
          AND prt.code = $2
        ORDER BY prt.created_at DESC
        LIMIT 1`, [normalizedEmail, code]);
@@ -394,7 +409,7 @@ exports.authRouter.post("/verify-email", async (req, res) => {
                 res.status(400).json({ error: "Invalid or expired verification code" });
                 return;
             }
-            const { rows: clash } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [pending.email]);
+            const { rows: clash } = await pool_1.pool.query(`SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL} LIMIT 1`, [pending.email]);
             if (clash.length > 0) {
                 await pool_1.pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
                     pending.id,
@@ -402,8 +417,8 @@ exports.authRouter.post("/verify-email", async (req, res) => {
                 res.status(409).json({ error: "An account with this email already exists" });
                 return;
             }
-            const { rows: userResult } = await pool_1.pool.query(`INSERT INTO users (email, password_hash, full_name, email_verified_at)
-         VALUES ($1, $2, $3, NOW())
+            const { rows: userResult } = await pool_1.pool.query(`INSERT INTO users (email, password_hash, full_name, email_verified_at, is_platform_admin)
+         VALUES ($1, $2, $3, NOW(), FALSE)
          RETURNING id`, [pending.email, pending.password_hash, pending.full_name]);
             const userId = userResult[0].id;
             if (pending.organization_type && pending.organization_id) {
@@ -440,6 +455,7 @@ exports.authRouter.post("/verify-email", async (req, res) => {
          FROM email_verification_tokens evt
          INNER JOIN users u ON u.id = evt.user_id
          WHERE u.email = $1
+           AND ${PRODUCT_USER_U_SQL}
            AND evt.code = $2
          ORDER BY evt.created_at DESC
          LIMIT 1`, [normalizedEmail, code]);
@@ -493,7 +509,7 @@ exports.authRouter.post("/resend-verification", async (req, res) => {
         }
         const { rows } = await pool_1.pool.query(`SELECT id, email, full_name, email_verified_at
        FROM users
-       WHERE email = $1
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
        LIMIT 1`, [normalizedEmail]);
         if (rows.length === 0 || rows[0].email_verified_at != null) {
             res.json(generic);

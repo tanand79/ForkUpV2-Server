@@ -27,6 +27,13 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) && email.length <= 254;
 }
 
+/** Product accounts only (Pass 2 staff/product email split). */
+const PRODUCT_USER_SQL = `COALESCE(is_platform_admin, FALSE) = FALSE`;
+const PRODUCT_USER_U_SQL = `COALESCE(u.is_platform_admin, FALSE) = FALSE`;
+
+/** Staff / platform-admin accounts only. */
+const STAFF_USER_SQL = `COALESCE(is_platform_admin, FALSE) = TRUE`;
+
 /**
  * Sends verification email for a pending signup (no users row yet).
  * Inputs: email, fullName, token, code.
@@ -88,7 +95,7 @@ authRouter.get("/check-email", async (req, res) => {
     }
 
     const { rows: existing } = await pool.query<QueryResultRow>(
-      "SELECT id FROM users WHERE email = $1",
+      `SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL}`,
       [email],
     );
     const { rows: pending } = await pool.query<QueryResultRow>(
@@ -159,7 +166,7 @@ authRouter.post("/register", async (req, res) => {
     }
 
     const { rows: existing } = await pool.query<QueryResultRow>(
-      "SELECT id FROM users WHERE email = $1",
+      `SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL}`,
       [normalizedEmail],
     );
     if (existing.length > 0) {
@@ -245,16 +252,33 @@ authRouter.post("/login", async (req, res) => {
       return;
     }
 
-    const { rows: rows } = await pool.query<QueryResultRow>(
-      "SELECT id, password_hash FROM users WHERE email = $1",
+    // Product login only — staff must use /api/superadmin/login.
+    const { rows: productRows } = await pool.query<QueryResultRow>(
+      `SELECT id, password_hash FROM users
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
+       LIMIT 1`,
       [normalizedEmail],
     );
-    if (rows.length === 0) {
+    if (productRows.length === 0) {
+      const { rows: staffRows } = await pool.query<QueryResultRow>(
+        `SELECT id FROM users WHERE email = $1 AND ${STAFF_USER_SQL} LIMIT 1`,
+        [normalizedEmail],
+      );
+      if (staffRows.length > 0) {
+        res.status(403).json({
+          error:
+            "This email is a staff account. Use the staff / superadmin sign-in instead.",
+        });
+        return;
+      }
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
 
-    const valid = await verifyPassword(password, String(rows[0].password_hash ?? ""));
+    const valid = await verifyPassword(
+      password,
+      String(productRows[0].password_hash ?? ""),
+    );
     if (!valid) {
       res.status(401).json({ error: "Invalid email or password" });
       return;
@@ -263,7 +287,7 @@ authRouter.post("/login", async (req, res) => {
     const token = generateSessionToken();
     await pool.query(
       "INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [rows[0].id, token, sessionExpiry()],
+      [productRows[0].id, token, sessionExpiry()],
     );
 
     const user = await resolveAuthUser(token);
@@ -375,7 +399,9 @@ authRouter.post("/forgot-password", async (req, res) => {
     }
 
     const { rows } = await pool.query<QueryResultRow>(
-      `SELECT id, email, full_name FROM users WHERE email = $1 LIMIT 1`,
+      `SELECT id, email, full_name FROM users
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
+       LIMIT 1`,
       [normalizedEmail],
     );
     if (rows.length === 0) {
@@ -439,6 +465,7 @@ authRouter.post("/verify-reset-code", async (req, res) => {
        FROM password_reset_tokens prt
        INNER JOIN users u ON u.id = prt.user_id
        WHERE u.email = $1
+         AND ${PRODUCT_USER_U_SQL}
          AND prt.code = $2
        ORDER BY prt.created_at DESC
        LIMIT 1`,
@@ -562,7 +589,7 @@ authRouter.post("/verify-email", async (req, res) => {
       }
 
       const { rows: clash } = await pool.query<QueryResultRow>(
-        `SELECT id FROM users WHERE email = $1 LIMIT 1`,
+        `SELECT id FROM users WHERE email = $1 AND ${PRODUCT_USER_SQL} LIMIT 1`,
         [pending.email],
       );
       if (clash.length > 0) {
@@ -574,8 +601,8 @@ authRouter.post("/verify-email", async (req, res) => {
       }
 
       const { rows: userResult } = await pool.query<{ id: number }>(
-        `INSERT INTO users (email, password_hash, full_name, email_verified_at)
-         VALUES ($1, $2, $3, NOW())
+        `INSERT INTO users (email, password_hash, full_name, email_verified_at, is_platform_admin)
+         VALUES ($1, $2, $3, NOW(), FALSE)
          RETURNING id`,
         [pending.email, pending.password_hash, pending.full_name],
       );
@@ -630,6 +657,7 @@ authRouter.post("/verify-email", async (req, res) => {
          FROM email_verification_tokens evt
          INNER JOIN users u ON u.id = evt.user_id
          WHERE u.email = $1
+           AND ${PRODUCT_USER_U_SQL}
            AND evt.code = $2
          ORDER BY evt.created_at DESC
          LIMIT 1`,
@@ -718,7 +746,7 @@ authRouter.post("/resend-verification", async (req, res) => {
     const { rows } = await pool.query<QueryResultRow>(
       `SELECT id, email, full_name, email_verified_at
        FROM users
-       WHERE email = $1
+       WHERE email = $1 AND ${PRODUCT_USER_SQL}
        LIMIT 1`,
       [normalizedEmail],
     );

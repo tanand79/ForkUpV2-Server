@@ -12,6 +12,7 @@ import { addCalendarDays, subtractCalendarDays, toDateOnlyString } from "../lib/
 import { bearerToken, resolveAuthUser } from "../lib/auth";
 import { resolveStoredImageUrl } from "../lib/s3";
 import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
+import { issueGuestCampaignClaim } from "../lib/guest-campaign-claim";
 import {
   fetchApprovedLibraryItems,
   pickLaunchSnippet,
@@ -85,6 +86,8 @@ type CreateCampaignBody = {
     mission?: string;
     causeCategory?: string;
   };
+  /** Additive: prefer attaching to this nonprofit id when provided. */
+  nonprofitId?: number;
   campaignName: string;
   campaignStory: string;
   campaignGoal: number;
@@ -117,6 +120,13 @@ type CreateCampaignBody = {
   }[];
   termsAccepted: boolean;
   launch?: boolean;
+  /**
+   * Pass 2: launch without signup. Requires guestEmail. Does not claim the NPO
+   * as owned — sends email claim link instead.
+   */
+  guestLaunch?: boolean;
+  /** Mandatory when guestLaunch — tracking + claim email. */
+  guestEmail?: string;
   existingSlug?: string;
   /** Nonprofit chose CTA: submit short business timeline for ForkUp review. */
   submitForForkupReview?: boolean;
@@ -1413,11 +1423,37 @@ builderRouter.post("/campaigns", async (req, res) => {
   try {
     const body = req.body as CreateCampaignBody;
 
+    const guestLaunch = Boolean(body.guestLaunch);
+    const guestEmailRaw =
+      typeof body.guestEmail === "string" ? body.guestEmail.trim().toLowerCase() : "";
+    if (guestLaunch) {
+      if (!guestEmailRaw.includes("@")) {
+        res.status(400).json({
+          error: "Email is required to launch without an account (for claim / tracking).",
+        });
+        return;
+      }
+      if (!body.launch) {
+        res.status(400).json({ error: "Guest launch requires launch: true" });
+        return;
+      }
+    }
+
     if (!body.nonprofit?.organizationName?.trim()) {
       res.status(400).json({ error: "Organization name is required" });
       return;
     }
-    if (!body.nonprofit.contactEmail?.includes("@")) {
+    // Guest launch may use guestEmail when nonprofit contact email is missing.
+    const effectiveContactEmail = (
+      body.nonprofit.contactEmail?.includes("@")
+        ? body.nonprofit.contactEmail
+        : guestLaunch
+          ? guestEmailRaw
+          : body.nonprofit.contactEmail || ""
+    )
+      .trim()
+      .toLowerCase();
+    if (!effectiveContactEmail.includes("@")) {
       res.status(400).json({ error: "Valid contact email is required" });
       return;
     }
@@ -1529,59 +1565,142 @@ builderRouter.post("/campaigns", async (req, res) => {
 
     await connection.query("BEGIN");
 
-    const email = body.nonprofit.contactEmail.trim().toLowerCase();
+    const email = effectiveContactEmail;
     const orgSlug = body.nonprofit.organizationName
       .toLowerCase()
       .replace(/[^\w]+/g, "-")
       .replace(/^-|-$/g, "");
 
-    const { rows: existingNp } = await connection.query<QueryResultRow>(
-      "SELECT id FROM nonprofits WHERE contact_email = $1 OR slug = $2",
-      [email, orgSlug],
-    );
+    const requestedNonprofitId =
+      typeof body.nonprofitId === "number" && body.nonprofitId > 0
+        ? body.nonprofitId
+        : null;
 
     let nonprofitId: number;
-    if (existingNp.length > 0) {
-      nonprofitId = Number(existingNp[0].id);
-      await connection.query(
-        `UPDATE nonprofits SET
-          organization_name = $1,
-          contact_name = $2,
-          contact_email = $3,
-          mission = COALESCE($4, mission),
-          cause_category = COALESCE($5, cause_category),
-          claim_status = 'claimed',
-          updated_at = NOW()
-         WHERE id = $6`,
-        [
-          body.nonprofit.organizationName.trim(),
-          body.nonprofit.contactName?.trim() ?? body.nonprofit.organizationName.trim(),
-          email,
-          body.nonprofit.mission ?? null,
-          body.nonprofit.causeCategory ?? null,
-          nonprofitId,
-        ],
+    if (requestedNonprofitId) {
+      const { rows: byId } = await connection.query<QueryResultRow>(
+        `SELECT id, claim_status FROM nonprofits WHERE id = $1`,
+        [requestedNonprofitId],
       );
+      if (byId.length === 0) {
+        await connection.query("ROLLBACK");
+        res.status(404).json({ error: "Nonprofit not found" });
+        return;
+      }
+      const claimStatus = String(byId[0].claim_status || "").toLowerCase();
+      if (guestLaunch && claimStatus === "claimed") {
+        await connection.query("ROLLBACK");
+        res.status(403).json({
+          error:
+            "This nonprofit is already claimed. Use Raise for them (fundraiser) or Request access.",
+        });
+        return;
+      }
+      nonprofitId = Number(byId[0].id);
+      if (!guestLaunch) {
+        await connection.query(
+          `UPDATE nonprofits SET
+            organization_name = $1,
+            contact_name = $2,
+            contact_email = $3,
+            mission = COALESCE($4, mission),
+            cause_category = COALESCE($5, cause_category),
+            claim_status = 'claimed',
+            updated_at = NOW()
+           WHERE id = $6`,
+          [
+            body.nonprofit.organizationName.trim(),
+            body.nonprofit.contactName?.trim() ??
+              body.nonprofit.organizationName.trim(),
+            email,
+            body.nonprofit.mission ?? null,
+            body.nonprofit.causeCategory ?? null,
+            nonprofitId,
+          ],
+        );
+      }
     } else {
-      const { rows: npResult } = await connection.query<{ id: number }>(
-        `INSERT INTO nonprofits (
-          organization_name, slug, mission, cause_category,
-          contact_name, contact_email, verification_status, claim_status
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'unclaimed', 'claimed') RETURNING id`,
-        [
-          body.nonprofit.organizationName.trim(),
-          orgSlug,
-          body.nonprofit.mission ?? null,
-          body.nonprofit.causeCategory ?? null,
-          body.nonprofit.contactName?.trim() ?? body.nonprofit.organizationName.trim(),
-          email,
-        ],
+      const { rows: existingNp } = await connection.query<QueryResultRow>(
+        "SELECT id, claim_status FROM nonprofits WHERE contact_email = $1 OR slug = $2",
+        [email, orgSlug],
       );
-      nonprofitId = npResult[0].id;
+
+      if (existingNp.length > 0) {
+        const claimStatus = String(existingNp[0].claim_status || "").toLowerCase();
+        if (guestLaunch && claimStatus === "claimed") {
+          await connection.query("ROLLBACK");
+          res.status(403).json({
+            error:
+              "This nonprofit is already claimed. Use Raise for them (fundraiser) or Request access.",
+          });
+          return;
+        }
+        nonprofitId = Number(existingNp[0].id);
+        if (guestLaunch) {
+          await connection.query(
+            `UPDATE nonprofits SET
+              organization_name = $1,
+              contact_name = COALESCE(NULLIF($2, ''), contact_name),
+              mission = COALESCE($3, mission),
+              cause_category = COALESCE($4, cause_category),
+              updated_at = NOW()
+             WHERE id = $5`,
+            [
+              body.nonprofit.organizationName.trim(),
+              body.nonprofit.contactName?.trim() ?? "",
+              body.nonprofit.mission ?? null,
+              body.nonprofit.causeCategory ?? null,
+              nonprofitId,
+            ],
+          );
+        } else {
+          await connection.query(
+            `UPDATE nonprofits SET
+              organization_name = $1,
+              contact_name = $2,
+              contact_email = $3,
+              mission = COALESCE($4, mission),
+              cause_category = COALESCE($5, cause_category),
+              claim_status = 'claimed',
+              updated_at = NOW()
+             WHERE id = $6`,
+            [
+              body.nonprofit.organizationName.trim(),
+              body.nonprofit.contactName?.trim() ??
+                body.nonprofit.organizationName.trim(),
+              email,
+              body.nonprofit.mission ?? null,
+              body.nonprofit.causeCategory ?? null,
+              nonprofitId,
+            ],
+          );
+        }
+      } else {
+        const { rows: npResult } = await connection.query<{ id: number }>(
+          `INSERT INTO nonprofits (
+            organization_name, slug, mission, cause_category,
+            contact_name, contact_email, verification_status, claim_status
+          ) VALUES ($1, $2, $3, $4, $5, $6, 'unclaimed', $7) RETURNING id`,
+          [
+            body.nonprofit.organizationName.trim(),
+            orgSlug,
+            body.nonprofit.mission ?? null,
+            body.nonprofit.causeCategory ?? null,
+            body.nonprofit.contactName?.trim() ??
+              body.nonprofit.organizationName.trim(),
+            email,
+            guestLaunch ? "unclaimed" : "claimed",
+          ],
+        );
+        nonprofitId = npResult[0].id;
+      }
     }
 
     const authUser = await resolveAuthUser(bearerToken(req));
-    if (authUser) await linkUserToNonprofit(connection, authUser.id, nonprofitId);
+    // Guest launch: do not auto-link ownership (claim email handles that later).
+    if (authUser && !guestLaunch) {
+      await linkUserToNonprofit(connection, authUser.id, nonprofitId);
+    }
 
     const slug = await uniqueCampaignSlug(body.campaignName, async (s) => {
       const { rows: rows } = await connection.query<QueryResultRow>(
@@ -1832,6 +1951,21 @@ builderRouter.post("/campaigns", async (req, res) => {
 
     await connection.query("COMMIT");
 
+    let guestClaimEmailSent = false;
+    if (guestLaunch) {
+      try {
+        const issued = await issueGuestCampaignClaim({
+          campaignId,
+          slug,
+          campaignName: body.campaignName.trim(),
+          guestEmail: guestEmailRaw,
+        });
+        guestClaimEmailSent = issued.emailSent;
+      } catch (claimErr) {
+        console.error("Guest claim email failed after launch:", claimErr);
+      }
+    }
+
     const { rows: inviteRows } = await connection.query<InviteEmailRow>(
       `SELECT it.token, b.business_name, bl.location_name, cbl.acceptance_status, b.contact_email
        FROM campaign_business_locations cbl
@@ -1857,6 +1991,10 @@ builderRouter.post("/campaigns", async (req, res) => {
       businessTimingStatus: timingFields.businessTimingStatus,
       forkupReviewStatus: timingFields.forkupReviewStatus,
       timing: timingEval,
+      /** Pass 2: guest launched without account; claim email sent to guestEmail. */
+      guestLaunch: guestLaunch || undefined,
+      guestClaimEmailSent: guestLaunch ? guestClaimEmailSent : undefined,
+      guestClaimEmail: guestLaunch ? guestEmailRaw : undefined,
       message: body.launch
         ? submitLaunchForReview
           ? "Campaign submitted for ForkUp review"
