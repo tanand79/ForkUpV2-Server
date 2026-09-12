@@ -42,6 +42,7 @@
     "src/legacy/db/migrate-guest-campaign-claim.ts",
     "src/legacy/db/migrate-guest-fundraiser-invite.ts",
     "src/legacy/db/migrate-staff-product-email-split.ts",
+    "src/legacy/db/migrate-business-paperwork.ts",
     "src/legacy/db/run-guest-campaign-claim-production.ts",
     "src/legacy/db/run-guest-fundraiser-invite-production.ts",
     "src/legacy/db/run-staff-product-email-split-production.ts",
