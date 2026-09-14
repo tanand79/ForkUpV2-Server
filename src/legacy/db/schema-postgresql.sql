@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS businesses (
   claimed_by_user_id INTEGER,
   claim_date TIMESTAMP,
   verification_date TIMESTAMP,
+  -- Pass C1: Join Us door (restaurant | local). Null for legacy rows.
+  join_door_type VARCHAR(20) NULL
+    CHECK (join_door_type IS NULL OR join_door_type IN ('restaurant', 'local')),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

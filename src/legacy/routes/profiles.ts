@@ -8,6 +8,7 @@ import {
   parseLatLng,
   parseRadiusMiles,
 } from "../lib/geo-distance";
+import { normalizeJoinDoorType } from "../lib/join-door-type";
 
 export const profilesRouter = Router();
 
@@ -907,6 +908,7 @@ type BusinessRow = QueryResultRow & {
   business_status: string;
   claim_status: string;
   profile_status: string | null;
+  join_door_type?: string | null;
   default_giveback_percentage: number | null;
   supports_dine_and_donate: boolean;
   supports_shop_and_donate: boolean;
@@ -927,6 +929,8 @@ function mapBusiness(row: BusinessRow, locations: QueryResultRow[] = []) {
     businessStatus: row.business_status,
     claimStatus: row.claim_status,
     profileStatus: row.profile_status ?? row.business_status,
+    /** Pass C2: Join Us door (restaurant | local). Null for legacy rows. */
+    joinDoorType: normalizeJoinDoorType(row.join_door_type),
     defaultGivebackPercentage: row.default_giveback_percentage != null
       ? Number(row.default_giveback_percentage)
       : 10,
@@ -1058,6 +1062,8 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
       supportsShopAndDonate?: boolean;
       supportsServiceGiveback?: boolean;
       supportsGuestBartending?: boolean;
+      /** Pass C2: Join Us door — restaurant | local */
+      joinDoorType?: string;
     };
 
     if (!body.businessName?.trim()) {
@@ -1071,6 +1077,7 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
 
     const email = body.contactEmail.trim().toLowerCase();
     const slug = body.existingSlug?.trim() || slugify(body.businessName);
+    const joinDoor = normalizeJoinDoorType(body.joinDoorType);
 
     const { rows: existing } = await pool.query<BusinessRow>(
       "SELECT * FROM businesses WHERE slug = $1 OR contact_email = $2 LIMIT 1",
@@ -1090,12 +1097,13 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
           supports_shop_and_donate = COALESCE($7, supports_shop_and_donate),
           supports_service_giveback = COALESCE($8, supports_service_giveback),
           supports_guest_bartending = COALESCE($9, supports_guest_bartending),
+          join_door_type = COALESCE($10, join_door_type),
           claim_status = 'claimed',
           business_status = 'active',
           profile_status = 'claimed',
           claim_date = COALESCE(claim_date, NOW()),
           updated_at = NOW()
-         WHERE id = $10`,
+         WHERE id = $11`,
         [
           body.businessName.trim(),
           body.contactName?.trim() ?? null,
@@ -1106,6 +1114,7 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
           body.supportsShopAndDonate ? true : row.supports_shop_and_donate,
           body.supportsServiceGiveback ? true : row.supports_service_giveback,
           body.supportsGuestBartending ? true : row.supports_guest_bartending,
+          joinDoor,
           row.id,
         ],
       );
@@ -1142,10 +1151,10 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
     const { rows: result } = await pool.query<{ id: number }>(
       `INSERT INTO businesses (
         business_name, slug, business_type, website, contact_name, contact_email,
-        business_status, claim_status, profile_status,
+        business_status, claim_status, profile_status, join_door_type,
         supports_dine_and_donate, supports_shop_and_donate,
         supports_service_giveback, supports_guest_bartending
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 'claimed', 'claimed', $7, $8, $9, $10) RETURNING id`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 'claimed', 'claimed', $7, $8, $9, $10, $11) RETURNING id`,
       [
         body.businessName.trim(),
         slug,
@@ -1153,6 +1162,7 @@ profilesRouter.post("/businesses/claim", async (req, res) => {
         body.website ?? null,
         body.contactName?.trim() ?? body.businessName.trim(),
         email,
+        joinDoor,
         Boolean(body.supportsDineAndDonate),
         Boolean(body.supportsShopAndDonate),
         Boolean(body.supportsServiceGiveback),
@@ -1217,6 +1227,8 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
       supportsShopAndDonate?: boolean;
       supportsServiceGiveback?: boolean;
       supportsGuestBartending?: boolean;
+      /** Pass C2: Join Us door — restaurant | local */
+      joinDoorType?: string;
     };
 
     if (!body.businessName?.trim()) {
@@ -1237,6 +1249,7 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
     const relationship = body.relationship?.trim() || null;
     const requesterName = body.contactName?.trim() || null;
     const slug = body.existingSlug?.trim() || slugify(body.businessName);
+    const joinDoor = normalizeJoinDoorType(body.joinDoorType);
 
     type ClaimBusinessRow = BusinessRow & { claimed_by_user_id: number | null };
 
@@ -1297,13 +1310,14 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
           supports_shop_and_donate = COALESCE($7, supports_shop_and_donate),
           supports_service_giveback = COALESCE($8, supports_service_giveback),
           supports_guest_bartending = COALESCE($9, supports_guest_bartending),
-          claim_status = CASE WHEN $10 = 'medium' THEN 'needs_review' ELSE 'claimed' END,
+          join_door_type = COALESCE($10, join_door_type),
+          claim_status = CASE WHEN $11 = 'medium' THEN 'needs_review' ELSE 'claimed' END,
           business_status = 'active',
           profile_status = 'claimed',
-          claimed_by_user_id = COALESCE($11, claimed_by_user_id),
+          claimed_by_user_id = COALESCE($12, claimed_by_user_id),
           claim_date = COALESCE(claim_date, NOW()),
           updated_at = NOW()
-         WHERE id = $12`,
+         WHERE id = $13`,
         [
           body.businessName.trim(),
           requesterName,
@@ -1314,6 +1328,7 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
           body.supportsShopAndDonate ? true : biz.supports_shop_and_donate,
           body.supportsServiceGiveback ? true : biz.supports_service_giveback,
           body.supportsGuestBartending ? true : biz.supports_guest_bartending,
+          joinDoor,
           riskLevel,
           requestedByUserId,
           biz.id,
@@ -1377,9 +1392,10 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
       `INSERT INTO businesses (
         business_name, slug, business_type, website, contact_name, contact_email,
         business_status, claim_status, profile_status, claimed_by_user_id, claim_date,
+        join_door_type,
         supports_dine_and_donate, supports_shop_and_donate,
         supports_service_giveback, supports_guest_bartending
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 'claimed', $8, NOW(), $9, $10, $11, $12) RETURNING id`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 'claimed', $8, NOW(), $9, $10, $11, $12, $13) RETURNING id`,
       [
         body.businessName.trim(),
         slug,
@@ -1389,6 +1405,7 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
         email,
         riskLevel === "medium" ? "needs_review" : "claimed",
         requestedByUserId,
+        joinDoor,
         Boolean(body.supportsDineAndDonate),
         Boolean(body.supportsShopAndDonate),
         Boolean(body.supportsServiceGiveback),

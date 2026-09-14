@@ -28,6 +28,7 @@ import { aiCampaignFlowRouter } from "./routes/ai-campaign-flow";
 import { fundraiserRouter } from "./routes/fundraiser";
 import { supportRouter } from "./routes/support";
 import { guestCampaignClaimRouter } from "./routes/guest-campaign-claim";
+import { businessPostStartRouter } from "./routes/business-post-start";
 import { ensureUploadsDir } from "./lib/receipts";
 import { pool } from "./db/pool";
 
@@ -109,6 +110,7 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/fundraiser", fundraiserRouter);
   app.use("/api/support", supportRouter);
   app.use("/api/guest-campaign-claim", guestCampaignClaimRouter);
+  app.use("/api", businessPostStartRouter);
   app.use("/api/manage", manageRouter);
   app.use("/api", settlementAchApprovalRouter);
 }
