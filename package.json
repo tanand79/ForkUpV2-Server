@@ -40,6 +40,8 @@
     "db:fundraiser-invites": "tsx src/legacy/db/migrate-fundraiser-invites.ts",
     "db:guest-campaign-claim": "tsx src/legacy/db/migrate-guest-campaign-claim.ts",
     "db:guest-campaign-claim:production": "tsx src/legacy/db/run-guest-campaign-claim-production.ts",
+    "db:stripe-donations": "tsx src/legacy/db/migrate-stripe-donations.ts",
+    "db:stripe-donations:production": "tsx src/legacy/db/run-stripe-donations-production.ts",
     "db:guest-fundraiser-invite": "tsx src/legacy/db/migrate-guest-fundraiser-invite.ts",
     "db:guest-fundraiser-invite:production": "tsx src/legacy/db/run-guest-fundraiser-invite-production.ts",
     "db:staff-product-email-split": "tsx src/legacy/db/migrate-staff-product-email-split.ts",
@@ -77,7 +79,8 @@
     "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "stripe": "^17.7.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

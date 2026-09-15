@@ -133,4 +133,19 @@ export const config = {
       return (process.env.ACH_ENCRYPTION_IV ?? "").trim();
     },
   },
+  /**
+   * Stripe (online / virtual donations via Checkout).
+   * Keys must come from env — never hardcode. Empty → checkout returns 503.
+   */
+  stripe: {
+    get secretKey(): string {
+      return (process.env.STRIPE_SECRET_KEY ?? "").trim();
+    },
+    get publishableKey(): string {
+      return (process.env.STRIPE_PUBLISHABLE_KEY ?? "").trim();
+    },
+    get webhookSecret(): string {
+      return (process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
+    },
+  },
 };

@@ -22,4 +22,9 @@ export declare const config: {
         readonly key: string;
         readonly iv: string;
     };
+    stripe: {
+        readonly secretKey: string;
+        readonly publishableKey: string;
+        readonly webhookSecret: string;
+    };
 };

@@ -103,5 +103,16 @@ exports.config = {
             return (process.env.ACH_ENCRYPTION_IV ?? "").trim();
         },
     },
+    stripe: {
+        get secretKey() {
+            return (process.env.STRIPE_SECRET_KEY ?? "").trim();
+        },
+        get publishableKey() {
+            return (process.env.STRIPE_PUBLISHABLE_KEY ?? "").trim();
+        },
+        get webhookSecret() {
+            return (process.env.STRIPE_WEBHOOK_SECRET ?? "").trim();
+        },
+    },
 };
 //# sourceMappingURL=config.js.map

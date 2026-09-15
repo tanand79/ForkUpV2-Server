@@ -29,6 +29,11 @@ import { fundraiserRouter } from "./routes/fundraiser";
 import { supportRouter } from "./routes/support";
 import { guestCampaignClaimRouter } from "./routes/guest-campaign-claim";
 import { businessPostStartRouter } from "./routes/business-post-start";
+import {
+  stripeCheckoutRouter,
+  stripeConfigRouter,
+  stripeWebhookHandler,
+} from "./routes/stripe-donations";
 import { ensureUploadsDir } from "./lib/receipts";
 import { pool } from "./db/pool";
 
@@ -39,9 +44,19 @@ export function mountLegacyApi(app: Express) {
     cors({
       origin: config.corsOrigin,
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization"],
+      allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
     }),
   );
+
+  // Stripe webhooks require the raw body for signature verification — before JSON parser.
+  app.post(
+    "/api/stripe/webhook",
+    express.raw({ type: "application/json" }),
+    (req, res) => {
+      void stripeWebhookHandler(req, res);
+    },
+  );
+
   app.use(express.json({ limit: "12mb" }));
   // Next.js `trailingSlash` can append `/` to proxied API calls — normalize before routing.
   app.use((req, _res, next) => {
@@ -85,6 +100,8 @@ export function mountLegacyApi(app: Express) {
     });
   });
 
+  app.use("/api/stripe", stripeConfigRouter);
+  app.use("/api/campaigns", stripeCheckoutRouter);
   app.use("/api/campaigns", campaignsRouter);
   app.use("/api/campaign-images", campaignImagesRouter);
   app.use("/api/builder", builderRouter);

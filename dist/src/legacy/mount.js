@@ -35,6 +35,7 @@ const fundraiser_1 = require("./routes/fundraiser");
 const support_1 = require("./routes/support");
 const guest_campaign_claim_1 = require("./routes/guest-campaign-claim");
 const business_post_start_1 = require("./routes/business-post-start");
+const stripe_donations_1 = require("./routes/stripe-donations");
 const receipts_2 = require("./lib/receipts");
 const pool_1 = require("./db/pool");
 function mountLegacyApi(app) {
@@ -42,8 +43,11 @@ function mountLegacyApi(app) {
     app.use((0, cors_1.default)({
         origin: config_1.config.corsOrigin,
         methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
+        allowedHeaders: ["Content-Type", "Authorization", "Stripe-Signature"],
     }));
+    app.post("/api/stripe/webhook", express_1.default.raw({ type: "application/json" }), (req, res) => {
+        void (0, stripe_donations_1.stripeWebhookHandler)(req, res);
+    });
     app.use(express_1.default.json({ limit: "12mb" }));
     app.use((req, _res, next) => {
         if (req.url.length > 1 && req.url.endsWith("/")) {
@@ -80,6 +84,8 @@ function mountLegacyApi(app) {
             ...(databaseError ? { databaseError } : {}),
         });
     });
+    app.use("/api/stripe", stripe_donations_1.stripeConfigRouter);
+    app.use("/api/campaigns", stripe_donations_1.stripeCheckoutRouter);
     app.use("/api/campaigns", campaigns_1.campaignsRouter);
     app.use("/api/campaign-images", campaign_images_1.campaignImagesRouter);
     app.use("/api/builder", builder_1.builderRouter);
