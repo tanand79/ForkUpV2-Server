@@ -79,6 +79,23 @@ CREATE TABLE IF NOT EXISTS businesses (
   -- Pass C1: Join Us door (restaurant | local). Null for legacy rows.
   join_door_type VARCHAR(20) NULL
     CHECK (join_door_type IS NULL OR join_door_type IN ('restaurant', 'local')),
+  -- Pass D3: Giveback / cause prefs from 4-step join. Null for legacy rows.
+  join_giveback_mode VARCHAR(40) NULL
+    CHECK (
+      join_giveback_mode IS NULL OR join_giveback_mode IN (
+        'restaurant_dine_percent',
+        'percent_of_purchase',
+        'dollar_per_visit',
+        'special_offer'
+      )
+    ),
+  join_cause_mode VARCHAR(20) NULL
+    CHECK (join_cause_mode IS NULL OR join_cause_mode IN ('pick_now', 'forkup_match')),
+  join_preferred_campaign_slug VARCHAR(255) NULL,
+  guest_claim_email VARCHAR(255) NULL,
+  guest_claim_token VARCHAR(64) NULL,
+  guest_claim_expires_at TIMESTAMP NULL,
+  guest_claim_claimed_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

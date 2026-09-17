@@ -10,6 +10,7 @@ const auth_1 = require("../lib/auth");
 const pool_1 = require("../db/pool");
 const auth_profiles_1 = require("../lib/auth-profiles");
 const assert_may_link_organization_1 = require("../lib/assert-may-link-organization");
+const link_guest_businesses_on_verify_1 = require("../lib/link-guest-businesses-on-verify");
 const mailer_1 = require("../lib/mailer");
 exports.authRouter = (0, express_1.Router)();
 function normalizeEmail(raw) {
@@ -196,6 +197,12 @@ exports.authRouter.post("/login", async (req, res) => {
         }
         const token = (0, auth_1.generateSessionToken)();
         await pool_1.pool.query("INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)", [productRows[0].id, token, (0, auth_1.sessionExpiry)()]);
+        try {
+            await (0, link_guest_businesses_on_verify_1.linkGuestBusinessesForVerifiedUser)(Number(productRows[0].id), normalizedEmail);
+        }
+        catch (linkErr) {
+            console.error("guest business link on login failed:", linkErr);
+        }
         const user = await (0, auth_1.resolveAuthUser)(token);
         res.json({ token, user });
     }
@@ -428,6 +435,12 @@ exports.authRouter.post("/verify-email", async (req, res) => {
                 await pool_1.pool.query(`INSERT INTO organization_users (organization_type, organization_id, user_id, role)
            VALUES ($1, $2, $3, $4)`, [pending.organization_type, pending.organization_id, userId, orgRole]);
             }
+            try {
+                await (0, link_guest_businesses_on_verify_1.linkGuestBusinessesForVerifiedUser)(userId, String(pending.email));
+            }
+            catch (linkErr) {
+                console.error("guest business link on verify failed:", linkErr);
+            }
             await pool_1.pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
                 pending.id,
             ]);
@@ -473,6 +486,16 @@ exports.authRouter.post("/verify-email", async (req, res) => {
        SET email_verified_at = COALESCE(email_verified_at, NOW()), updated_at = NOW()
        WHERE id = $1`, [legacy.user_id]);
         await pool_1.pool.query(`UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`, [legacy.id]);
+        try {
+            const { rows: userRows } = await pool_1.pool.query(`SELECT email FROM users WHERE id = $1 LIMIT 1`, [legacy.user_id]);
+            const legacyEmail = userRows[0]?.email;
+            if (legacyEmail) {
+                await (0, link_guest_businesses_on_verify_1.linkGuestBusinessesForVerifiedUser)(Number(legacy.user_id), legacyEmail);
+            }
+        }
+        catch (linkErr) {
+            console.error("guest business link on legacy verify failed:", linkErr);
+        }
         res.json({ success: true, emailVerified: true });
     }
     catch (err) {

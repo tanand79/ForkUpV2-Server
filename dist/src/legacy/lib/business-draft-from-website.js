@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateBusinessDraftFromWebsite = generateBusinessDraftFromWebsite;
 const ai_chat_1 = require("./ai-chat");
 const suggest_social_images_1 = require("./suggest-social-images");
+const business_website_location_1 = require("./business-website-location");
 function normalizeWebsiteInput(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -29,7 +30,10 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     const imageSuggestions = await (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 6 });
     const imageUrls = imageSuggestions.map((img) => img.url).filter(Boolean);
     const fallbackName = suggestNameFromHost(website);
+    const locationHints = await (0, business_website_location_1.scrapeBusinessLocationHints)(website);
     if ((0, ai_chat_1.aiProviderName)() === "none") {
+        const city = locationHints.city;
+        const state = locationHints.state;
         return {
             website,
             businessName: fallbackName,
@@ -37,17 +41,28 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
             about: "",
             contactEmail: "",
             phone: "",
-            city: "",
-            state: "",
+            city,
+            state,
             locations: fallbackName
-                ? [{ locationName: "Main Location", city: "", state: "" }]
+                ? [
+                    {
+                        locationName: "Main Location",
+                        city,
+                        state,
+                        ...(locationHints.address ? { address: locationHints.address } : {}),
+                    },
+                ]
                 : [],
             imageUrls,
             supportsDineAndDonate: true,
             supportsShopAndDonate: false,
             supportsServiceGiveback: false,
             supportsGuestBartending: false,
-            missingFields: ["Business name", "Contact email", "City / state"],
+            missingFields: [
+                "Business name",
+                "Contact email",
+                ...(city || state ? [] : ["City / state"]),
+            ],
             confirmationStatus: "Website only",
             provider: "website_scrape",
         };
@@ -55,6 +70,7 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     const system = [
         "You draft ForkUp business partner profiles from a restaurant or local business website.",
         "Return a DRAFT for human review — never invent private contact emails or phone numbers.",
+        "Prefer city, state, and address from PAGE TEXT when present — do not invent placeholders like 'Not provided on the website'.",
         "If multiple locations are mentioned, include each in locations[].",
         "Infer fundraising capabilities: restaurants usually support dine_and_donate; retail supports shop_and_donate.",
         "Return ONLY JSON with keys:",
@@ -62,9 +78,12 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         "locations (array of { locationName, city, state, address }),",
         "supportsDineAndDonate, supportsShopAndDonate, supportsServiceGiveback, supportsGuestBartending (booleans).",
     ].join("\n");
+    const pageBlock = locationHints.pageText
+        ? `\n\nPAGE TEXT (may include Hours & Location / Contact):\n${locationHints.pageText}`
+        : "\n\nPAGE TEXT: (unavailable)";
     const content = await (0, ai_chat_1.aiChat)({
         system,
-        user: `Business website: ${website}`,
+        user: `Business website: ${website}${pageBlock}`,
         json: true,
         maxTokens: 2048,
         temperature: 0.2,
@@ -91,10 +110,16 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
                 continue;
             const loc = row;
             const locationName = typeof loc.locationName === "string" ? loc.locationName.trim() : "";
-            const city = typeof loc.city === "string" ? loc.city.trim() : "";
-            const state = typeof loc.state === "string" ? loc.state.trim() : "";
-            const address = typeof loc.address === "string" ? loc.address.trim() : "";
-            if (!locationName && !city)
+            let city = typeof loc.city === "string" ? loc.city.trim() : "";
+            let state = typeof loc.state === "string" ? loc.state.trim() : "";
+            let address = typeof loc.address === "string" ? loc.address.trim() : "";
+            if ((0, business_website_location_1.isEmptyLocationValue)(city))
+                city = "";
+            if ((0, business_website_location_1.isEmptyLocationValue)(state))
+                state = "";
+            if ((0, business_website_location_1.isEmptyLocationValue)(address))
+                address = "";
+            if (!locationName && !city && !address)
                 continue;
             locations.push({
                 locationName: locationName || "Main Location",
@@ -105,14 +130,29 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         }
     }
     const businessName = str("businessName") || fallbackName;
-    const city = str("city");
-    const state = str("state");
+    let city = (0, business_website_location_1.isEmptyLocationValue)(str("city")) ? "" : str("city");
+    let state = (0, business_website_location_1.isEmptyLocationValue)(str("state")) ? "" : str("state");
+    if (!city && locationHints.city)
+        city = locationHints.city;
+    if (!state && locationHints.state)
+        state = locationHints.state;
     if (locations.length === 0) {
         locations.push({
             locationName: "Main Location",
             city,
             state,
+            ...(locationHints.address ? { address: locationHints.address } : {}),
         });
+    }
+    else {
+        const primary = locations[0];
+        if ((0, business_website_location_1.isEmptyLocationValue)(primary.city) && city)
+            primary.city = city;
+        if ((0, business_website_location_1.isEmptyLocationValue)(primary.state) && state)
+            primary.state = state;
+        if ((0, business_website_location_1.isEmptyLocationValue)(primary.address) && locationHints.address) {
+            primary.address = locationHints.address;
+        }
     }
     const missingFields = [];
     if (!businessName)

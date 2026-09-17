@@ -7,6 +7,8 @@ const auth_1 = require("../lib/auth");
 const mailer_1 = require("../lib/mailer");
 const geo_distance_1 = require("../lib/geo-distance");
 const join_door_type_1 = require("../lib/join-door-type");
+const join_giveback_prefs_1 = require("../lib/join-giveback-prefs");
+const guest_business_claim_1 = require("../lib/guest-business-claim");
 exports.profilesRouter = (0, express_1.Router)();
 function slugify(name) {
     return name
@@ -660,6 +662,12 @@ function mapBusiness(row, locations = []) {
         claimStatus: row.claim_status,
         profileStatus: row.profile_status ?? row.business_status,
         joinDoorType: (0, join_door_type_1.normalizeJoinDoorType)(row.join_door_type),
+        joinGivebackMode: (0, join_giveback_prefs_1.normalizeJoinGivebackMode)(row.join_giveback_mode),
+        joinCauseMode: (0, join_giveback_prefs_1.normalizeJoinCauseMode)(row.join_cause_mode),
+        joinPreferredCampaignSlug: typeof row.join_preferred_campaign_slug === "string" &&
+            row.join_preferred_campaign_slug.trim()
+            ? row.join_preferred_campaign_slug.trim()
+            : null,
         defaultGivebackPercentage: row.default_giveback_percentage != null
             ? Number(row.default_giveback_percentage)
             : 10,
@@ -769,6 +777,9 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
         const email = body.contactEmail.trim().toLowerCase();
         const slug = body.existingSlug?.trim() || slugify(body.businessName);
         const joinDoor = (0, join_door_type_1.normalizeJoinDoorType)(body.joinDoorType);
+        const joinGiveback = (0, join_giveback_prefs_1.normalizeJoinGivebackMode)(body.joinGivebackMode);
+        const joinCause = (0, join_giveback_prefs_1.normalizeJoinCauseMode)(body.joinCauseMode);
+        const joinCampaignSlug = (0, join_giveback_prefs_1.normalizePreferredCampaignSlug)(body.joinPreferredCampaignSlug);
         const { rows: existing } = await pool_1.pool.query("SELECT * FROM businesses WHERE slug = $1 OR contact_email = $2 LIMIT 1", [slug, email]);
         if (existing.length > 0) {
             const row = existing[0];
@@ -783,12 +794,15 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
           supports_service_giveback = COALESCE($8, supports_service_giveback),
           supports_guest_bartending = COALESCE($9, supports_guest_bartending),
           join_door_type = COALESCE($10, join_door_type),
+          join_giveback_mode = COALESCE($11, join_giveback_mode),
+          join_cause_mode = COALESCE($12, join_cause_mode),
+          join_preferred_campaign_slug = COALESCE($13, join_preferred_campaign_slug),
           claim_status = 'claimed',
           business_status = 'active',
           profile_status = 'claimed',
           claim_date = COALESCE(claim_date, NOW()),
           updated_at = NOW()
-         WHERE id = $11`, [
+         WHERE id = $14`, [
                 body.businessName.trim(),
                 body.contactName?.trim() ?? null,
                 email,
@@ -799,6 +813,9 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
                 body.supportsServiceGiveback ? true : row.supports_service_giveback,
                 body.supportsGuestBartending ? true : row.supports_guest_bartending,
                 joinDoor,
+                joinGiveback,
+                joinCause,
+                joinCampaignSlug,
                 row.id,
             ]);
             const { rows: locCount } = await pool_1.pool.query("SELECT COUNT(*) AS c FROM business_locations WHERE business_id = $1", [row.id]);
@@ -819,9 +836,10 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
         const { rows: result } = await pool_1.pool.query(`INSERT INTO businesses (
         business_name, slug, business_type, website, contact_name, contact_email,
         business_status, claim_status, profile_status, join_door_type,
+        join_giveback_mode, join_cause_mode, join_preferred_campaign_slug,
         supports_dine_and_donate, supports_shop_and_donate,
         supports_service_giveback, supports_guest_bartending
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 'claimed', 'claimed', $7, $8, $9, $10, $11) RETURNING id`, [
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 'claimed', 'claimed', $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`, [
             body.businessName.trim(),
             slug,
             body.businessType ?? null,
@@ -829,6 +847,9 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
             body.contactName?.trim() ?? body.businessName.trim(),
             email,
             joinDoor,
+            joinGiveback,
+            joinCause,
+            joinCampaignSlug,
             Boolean(body.supportsDineAndDonate),
             Boolean(body.supportsShopAndDonate),
             Boolean(body.supportsServiceGiveback),
@@ -870,13 +891,47 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
         const requesterName = body.contactName?.trim() || null;
         const slug = body.existingSlug?.trim() || slugify(body.businessName);
         const joinDoor = (0, join_door_type_1.normalizeJoinDoorType)(body.joinDoorType);
-        const { rows: existing } = await pool_1.pool.query("SELECT * FROM businesses WHERE slug = $1 OR contact_email = $2 LIMIT 1", [slug, email]);
+        const joinGiveback = (0, join_giveback_prefs_1.normalizeJoinGivebackMode)(body.joinGivebackMode);
+        const joinCause = (0, join_giveback_prefs_1.normalizeJoinCauseMode)(body.joinCauseMode);
+        const joinCampaignSlug = (0, join_giveback_prefs_1.normalizePreferredCampaignSlug)(body.joinPreferredCampaignSlug);
+        const { rows: existingCandidates } = await pool_1.pool.query(`SELECT * FROM businesses
+       WHERE slug = $1
+          OR LOWER(TRIM(contact_email)) = $2
+          OR ($3 <> '' AND website IS NOT NULL AND LOWER(website) LIKE '%' || $3 || '%')
+       ORDER BY
+         CASE
+           WHEN LOWER(TRIM(contact_email)) = $2 THEN 0
+           WHEN slug = $1 THEN 1
+           ELSE 2
+         END
+       LIMIT 10`, [slug, email, providedDomain]);
+        const existing = (() => {
+            if (existingCandidates.length === 0)
+                return [];
+            const byEmail = existingCandidates.find((r) => (r.contact_email || "").trim().toLowerCase() === email);
+            if (byEmail)
+                return [byEmail];
+            const bySlug = existingCandidates.find((r) => r.slug === slug);
+            if (bySlug)
+                return [bySlug];
+            if (providedDomain) {
+                const byWeb = existingCandidates.find((r) => websiteDomain(r.website) === providedDomain);
+                if (byWeb)
+                    return [byWeb];
+            }
+            return [existingCandidates[0]];
+        })();
         if (existing.length > 0) {
             const biz = existing[0];
             const alreadyClaimedByOther = biz.claim_status === "claimed" &&
                 biz.claimed_by_user_id != null &&
                 biz.claimed_by_user_id !== requestedByUserId;
-            if (alreadyClaimedByOther) {
+            const existingContactEmail = (biz.contact_email || "").trim().toLowerCase();
+            const draftHeldByOtherGuest = !alreadyClaimedByOther &&
+                biz.claimed_by_user_id == null &&
+                Boolean(existingContactEmail) &&
+                existingContactEmail !== email;
+            if (alreadyClaimedByOther || draftHeldByOtherGuest) {
                 await logBusinessAccessRequest({
                     organizationId: biz.id,
                     organizationName: biz.business_name,
@@ -887,14 +942,18 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
                     requesterName,
                     requesterEmail: email,
                     relationship,
-                    riskReason: "Business already claimed by another user",
+                    riskReason: draftHeldByOtherGuest
+                        ? "Guest business draft already held by another email"
+                        : "Business already claimed by another user",
                 });
                 const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [biz.id]);
                 res.status(202).json({
                     action: "access_requested",
                     riskLevel: "high",
                     business: mapBusiness(biz, locations),
-                    message: "This business is already claimed. Your access request has been submitted for ForkUp review.",
+                    message: draftHeldByOtherGuest
+                        ? "This business draft is already saved under another email. Your access request has been submitted for ForkUp review."
+                        : "This business is already claimed. Your access request has been submitted for ForkUp review.",
                 });
                 return;
             }
@@ -917,8 +976,11 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
           profile_status = 'claimed',
           claimed_by_user_id = COALESCE($12, claimed_by_user_id),
           claim_date = COALESCE(claim_date, NOW()),
+          join_giveback_mode = COALESCE($13, join_giveback_mode),
+          join_cause_mode = COALESCE($14, join_cause_mode),
+          join_preferred_campaign_slug = COALESCE($15, join_preferred_campaign_slug),
           updated_at = NOW()
-         WHERE id = $13`, [
+         WHERE id = $16`, [
                 body.businessName.trim(),
                 requesterName,
                 email,
@@ -931,6 +993,9 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
                 joinDoor,
                 riskLevel,
                 requestedByUserId,
+                joinGiveback,
+                joinCause,
+                joinCampaignSlug,
                 biz.id,
             ]);
             const { rows: locCount } = await pool_1.pool.query("SELECT COUNT(*) AS c FROM business_locations WHERE business_id = $1", [biz.id]);
@@ -957,11 +1022,22 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
                     riskReason: "Contact email domain does not match business website",
                 });
             }
+            let claimEmailSent = false;
+            if (!requestedByUserId) {
+                const issued = await (0, guest_business_claim_1.issueGuestBusinessClaim)({
+                    businessId: biz.id,
+                    slug: biz.slug,
+                    businessName: body.businessName.trim(),
+                    guestEmail: email,
+                });
+                claimEmailSent = issued.emailSent;
+            }
             const { rows: updated } = await pool_1.pool.query("SELECT * FROM businesses WHERE id = $1", [biz.id]);
             const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [biz.id]);
             res.json({
                 action: riskLevel === "medium" ? "claimed_pending_verification" : "claimed",
                 riskLevel,
+                claimEmailSent,
                 business: mapBusiness(updated[0], locations),
             });
             return;
@@ -972,9 +1048,10 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
         business_name, slug, business_type, website, contact_name, contact_email,
         business_status, claim_status, profile_status, claimed_by_user_id, claim_date,
         join_door_type,
+        join_giveback_mode, join_cause_mode, join_preferred_campaign_slug,
         supports_dine_and_donate, supports_shop_and_donate,
         supports_service_giveback, supports_guest_bartending
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 'claimed', $8, NOW(), $9, $10, $11, $12, $13) RETURNING id`, [
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, 'claimed', $8, NOW(), $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id`, [
             body.businessName.trim(),
             slug,
             body.businessType ?? null,
@@ -984,6 +1061,9 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
             riskLevel === "medium" ? "needs_review" : "claimed",
             requestedByUserId,
             joinDoor,
+            joinGiveback,
+            joinCause,
+            joinCampaignSlug,
             Boolean(body.supportsDineAndDonate),
             Boolean(body.supportsShopAndDonate),
             Boolean(body.supportsServiceGiveback),
@@ -1010,11 +1090,22 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
                 riskReason: "New business created with a non-matching or missing website domain",
             });
         }
+        let claimEmailSent = false;
+        if (!requestedByUserId) {
+            const issued = await (0, guest_business_claim_1.issueGuestBusinessClaim)({
+                businessId: result[0].id,
+                slug,
+                businessName: body.businessName.trim(),
+                guestEmail: email,
+            });
+            claimEmailSent = issued.emailSent;
+        }
         const { rows: created } = await pool_1.pool.query("SELECT * FROM businesses WHERE id = $1", [result[0].id]);
         const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [result[0].id]);
         res.status(201).json({
             action: riskLevel === "medium" ? "created_pending_verification" : "created",
             riskLevel,
+            claimEmailSent,
             business: mapBusiness(created[0], locations),
         });
     }

@@ -13,6 +13,7 @@ import { generateCampaignDraftRouter } from "./routes/generate-campaign-draft";
 import { suggestCampaignGoalRouter } from "./routes/suggest-campaign-goal";
 import { generateOrganizationDraftRouter } from "./routes/generate-organization-draft";
 import { generateBusinessDraftRouter } from "./routes/generate-business-draft";
+import { findBusinessProfileRouter } from "./routes/find-business-profile";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
@@ -28,6 +29,7 @@ import { aiCampaignFlowRouter } from "./routes/ai-campaign-flow";
 import { fundraiserRouter } from "./routes/fundraiser";
 import { supportRouter } from "./routes/support";
 import { guestCampaignClaimRouter } from "./routes/guest-campaign-claim";
+import { guestBusinessClaimRouter } from "./routes/guest-business-claim";
 import { businessPostStartRouter } from "./routes/business-post-start";
 import {
   stripeCheckoutRouter,
@@ -122,11 +124,15 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", suggestCampaignGoalRouter);
   app.use("/api", generateOrganizationDraftRouter);
   app.use("/api", generateBusinessDraftRouter);
+  /** Pass D1: name → website/location/photos for restaurant & local Join Us. */
+  app.use("/api", findBusinessProfileRouter);
   app.use("/api/campaign-ai", campaignAiRouter);
   app.use("/api/ai-campaign-flow", aiCampaignFlowRouter);
   app.use("/api/fundraiser", fundraiserRouter);
   app.use("/api/support", supportRouter);
   app.use("/api/guest-campaign-claim", guestCampaignClaimRouter);
+  /** Guest restaurant/local claim link (email token → attach organization_users). */
+  app.use("/api/guest-business-claim", guestBusinessClaimRouter);
   app.use("/api", businessPostStartRouter);
   app.use("/api/manage", manageRouter);
   app.use("/api", settlementAchApprovalRouter);

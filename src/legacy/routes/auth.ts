@@ -15,6 +15,7 @@ import {
   loadUserNonprofitProfiles,
 } from "../lib/auth-profiles";
 import { assertUserMayLinkOrganization } from "../lib/assert-may-link-organization";
+import { linkGuestBusinessesForVerifiedUser } from "../lib/link-guest-businesses-on-verify";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 
 export const authRouter = Router();
@@ -289,6 +290,16 @@ authRouter.post("/login", async (req, res) => {
       "INSERT INTO auth_sessions (user_id, token, expires_at) VALUES ($1, $2, $3)",
       [productRows[0].id, token, sessionExpiry()],
     );
+
+    // Best-effort: attach guest Join Us drafts saved under this email.
+    try {
+      await linkGuestBusinessesForVerifiedUser(
+        Number(productRows[0].id),
+        normalizedEmail,
+      );
+    } catch (linkErr) {
+      console.error("guest business link on login failed:", linkErr);
+    }
 
     const user = await resolveAuthUser(token);
     res.json({ token, user });
@@ -621,6 +632,13 @@ authRouter.post("/verify-email", async (req, res) => {
         );
       }
 
+      // Guest Join Us drafts: attach businesses saved under this email before signup.
+      try {
+        await linkGuestBusinessesForVerifiedUser(userId, String(pending.email));
+      } catch (linkErr) {
+        console.error("guest business link on verify failed:", linkErr);
+      }
+
       await pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
         pending.id,
       ]);
@@ -685,6 +703,19 @@ authRouter.post("/verify-email", async (req, res) => {
       `UPDATE email_verification_tokens SET used_at = NOW() WHERE id = $1`,
       [legacy.id],
     );
+
+    try {
+      const { rows: userRows } = await pool.query<{ email: string }>(
+        `SELECT email FROM users WHERE id = $1 LIMIT 1`,
+        [legacy.user_id],
+      );
+      const legacyEmail = userRows[0]?.email;
+      if (legacyEmail) {
+        await linkGuestBusinessesForVerifiedUser(Number(legacy.user_id), legacyEmail);
+      }
+    } catch (linkErr) {
+      console.error("guest business link on legacy verify failed:", linkErr);
+    }
 
     res.json({ success: true, emailVerified: true });
   } catch (err) {
