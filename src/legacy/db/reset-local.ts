@@ -46,6 +46,7 @@ const LOCAL_RESET_TABLES = [
   "invitation_tokens",
   "campaign_business_locations",
   "campaign_methods",
+  "email_templates",
   "campaigns",
   "supporters",
   "business_locations",

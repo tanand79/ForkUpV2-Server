@@ -12,6 +12,7 @@ const slug_1 = require("../lib/slug");
 const pool_1 = require("../db/pool");
 const date_only_1 = require("../lib/date-only");
 const ensure_durable_image_1 = require("../lib/ensure-durable-image");
+const invite_sender_1 = require("../lib/invite-sender");
 exports.fundraiserRouter = (0, express_1.Router)();
 const DEFAULT_METHODS = ["virtual_donations", "ambassador_fundraising"];
 const ALL_METHOD_TYPES = new Set(Object.keys(methods_1.METHOD_LABELS));
@@ -135,9 +136,26 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             : timingEval.status;
         const needsForkupReview = wantsForkupReview;
         const fundraiserEmail = authUser?.email?.trim().toLowerCase() || guestEmail;
-        const fundraiserName = (typeof body.fundraiserName === "string" && body.fundraiserName.trim()) ||
+        let fundraiserName = (typeof body.fundraiserName === "string" && body.fundraiserName.trim()) ||
             authUser?.fullName?.trim() ||
             fundraiserEmail;
+        let fundraiserReplyTo = fundraiserEmail.includes("@") ? fundraiserEmail : null;
+        const senderId = (0, invite_sender_1.parseSenderUserId)(body.inviteSenderUserId);
+        if (senderId != null) {
+            if (!authUser || senderId !== authUser.id) {
+                res.status(400).json({
+                    error: "inviteSenderUserId must match the signed-in fundraiser",
+                });
+                return;
+            }
+            const resolved = await (0, invite_sender_1.resolveUserSender)(senderId, connection);
+            if (!resolved) {
+                res.status(400).json({ error: "Unable to resolve invite sender" });
+                return;
+            }
+            fundraiserName = resolved.fromName;
+            fundraiserReplyTo = resolved.replyTo;
+        }
         await connection.query("BEGIN");
         const slug = await (0, slug_1.uniqueCampaignSlug)(campaignName, async (s) => {
             const { rows } = await connection.query("SELECT id FROM campaigns WHERE slug = $1", [s]);
@@ -168,6 +186,9 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             needsForkupReview,
         ]);
         const campaignId = campResult[0].id;
+        if (senderId != null) {
+            await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
+        }
         for (const methodType of methods) {
             await connection.query(`INSERT INTO campaign_methods (
           campaign_id, method_type, method_name, method_status,
@@ -221,7 +242,7 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             relatedToken: token,
             platformSender: true,
             fromName: fundraiserName,
-            replyTo: fundraiserEmail.includes("@") ? fundraiserEmail : null,
+            replyTo: fundraiserReplyTo,
         });
         const at = nonprofitEmail.indexOf("@");
         const nonprofitEmailHint = at > 0 ? `***@${nonprofitEmail.slice(at + 1)}` : "on file";

@@ -1191,6 +1191,24 @@ exports.superadminRouter.delete("/users/:id", async (req, res) => {
             return;
         }
         const email = String(target.email);
+        const { rows: nonprofitTouchRows } = await connection.query(`SELECT DISTINCT organization_id AS id FROM (
+         SELECT organization_id FROM organization_users
+           WHERE user_id = $1 AND organization_type = 'nonprofit'
+         UNION
+         SELECT id AS organization_id FROM nonprofits WHERE claimed_by_user_id = $1
+       ) t`, [id]);
+        const nonprofitIds = nonprofitTouchRows
+            .map((r) => Number(r.id))
+            .filter((n) => Number.isFinite(n) && n > 0);
+        const { rows: businessTouchRows } = await connection.query(`SELECT DISTINCT organization_id AS id FROM (
+         SELECT organization_id FROM organization_users
+           WHERE user_id = $1 AND organization_type = 'business'
+         UNION
+         SELECT id AS organization_id FROM businesses WHERE claimed_by_user_id = $1
+       ) t`, [id]);
+        const businessIds = businessTouchRows
+            .map((r) => Number(r.id))
+            .filter((n) => Number.isFinite(n) && n > 0);
         await connection.query(`UPDATE nonprofits
        SET claimed_by_user_id = NULL, updated_at = CURRENT_TIMESTAMP
        WHERE claimed_by_user_id = $1`, [id]);
@@ -1224,6 +1242,38 @@ exports.superadminRouter.delete("/users/:id", async (req, res) => {
         await connection.query(`DELETE FROM supporters
        WHERE email ILIKE $1`, [email]);
         await connection.query(`DELETE FROM users WHERE id = $1`, [id]);
+        if (nonprofitIds.length > 0) {
+            await connection.query(`UPDATE nonprofits
+         SET claim_status = 'unclaimed',
+             profile_status = 'preloaded',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'nonprofit'
+               AND ou.organization_id = nonprofits.id
+           )`, [nonprofitIds]);
+        }
+        if (businessIds.length > 0) {
+            await connection.query(`UPDATE businesses
+         SET claim_status = 'unclaimed',
+             profile_status = 'preloaded',
+             business_status = CASE
+               WHEN business_status IN ('claimed', 'active') THEN 'preloaded'
+               ELSE business_status
+             END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'business'
+               AND ou.organization_id = businesses.id
+           )`, [businessIds]);
+        }
         await connection.query("COMMIT");
         res.json({ success: true, id, email });
     }

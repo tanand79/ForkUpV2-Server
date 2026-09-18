@@ -14,6 +14,11 @@ import {
   sendBusinessLifecycleBatch,
 } from "../lib/business-lifecycle-emails";
 import {
+  parseSenderUserId,
+  resolveOrgMemberSender,
+  setCampaignInviteSenderUserId,
+} from "../lib/invite-sender";
+import {
   formatCampaignDateLabel,
 } from "../lib/business-email-templates";
 import { buildCampaignVisibility } from "../lib/campaign-visibility";
@@ -1003,23 +1008,32 @@ manageRouter.post("/success-engine/:id/send", async (req, res) => {
 /**
  * Nick V2 Layer 5 — send business lifecycle emails 2/5/6/7 for a campaign.
  * Method: POST /api/manage/campaigns/:slug/business-emails
- * Body: { templateKey: 'invite_reminder' | 'missing_info' | 'launch_kit' | 'starting_soon', invitationId?: number }
+ * Body: {
+ *   templateKey: 'invite_reminder' | 'missing_info' | 'launch_kit' | 'starting_soon',
+ *   invitationId?: number,
+ *   inviteSenderUserId?: number
+ * }
  * Response: { success, sent, skipped, targeted, templateKey }
  */
 manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
   try {
     const slug = String(req.params.slug || "").replace(/\/+$/, "");
     const { rows: campRows } = await pool.query<QueryResultRow>(
-      `SELECT id FROM campaigns WHERE slug = $1 LIMIT 1`,
+      `SELECT id, nonprofit_id FROM campaigns WHERE slug = $1 LIMIT 1`,
       [slug],
     );
     const campaignId = Number(campRows[0]?.id);
+    const nonprofitId = Number(campRows[0]?.nonprofit_id);
     if (!campaignId) {
       res.status(404).json({ error: "Campaign not found" });
       return;
     }
 
-    const body = req.body as { templateKey?: string; invitationId?: number };
+    const body = req.body as {
+      templateKey?: string;
+      invitationId?: number;
+      inviteSenderUserId?: number;
+    };
     const allowed = ["invite_reminder", "missing_info", "launch_kit", "starting_soon"] as const;
     const templateKey = body.templateKey as (typeof allowed)[number] | undefined;
     if (!templateKey || !allowed.includes(templateKey)) {
@@ -1027,6 +1041,22 @@ manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
         error: `templateKey must be one of: ${allowed.join(", ")}`,
       });
       return;
+    }
+
+    const senderId = parseSenderUserId(body.inviteSenderUserId);
+    if (senderId != null && nonprofitId) {
+      const headers = await resolveOrgMemberSender(
+        "nonprofit",
+        nonprofitId,
+        senderId,
+      );
+      if (!headers) {
+        res.status(400).json({
+          error: "inviteSenderUserId must be a member of this nonprofit",
+        });
+        return;
+      }
+      await setCampaignInviteSenderUserId(campaignId, senderId);
     }
 
     const invitationId =

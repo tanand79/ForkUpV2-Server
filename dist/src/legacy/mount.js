@@ -34,9 +34,11 @@ const campaign_ai_1 = require("./routes/campaign-ai");
 const ai_campaign_flow_1 = require("./routes/ai-campaign-flow");
 const fundraiser_1 = require("./routes/fundraiser");
 const support_1 = require("./routes/support");
+const email_templates_1 = require("./routes/email-templates");
 const guest_campaign_claim_1 = require("./routes/guest-campaign-claim");
 const guest_business_claim_1 = require("./routes/guest-business-claim");
 const business_post_start_1 = require("./routes/business-post-start");
+const campaign_partner_join_requests_1 = require("./routes/campaign-partner-join-requests");
 const stripe_donations_1 = require("./routes/stripe-donations");
 const receipts_2 = require("./lib/receipts");
 const pool_1 = require("./db/pool");
@@ -100,6 +102,7 @@ function mountLegacyApi(app) {
     app.use("/api/superadmin", superadmin_1.superadminRouter);
     app.use("/api/business", business_1.businessRouter);
     app.use("/api/business", location_ach_1.locationAchRouter);
+    app.use("/api/business", campaign_partner_join_requests_1.campaignPartnerJoinBusinessRouter);
     app.use("/api", receipts_1.receiptsRouter);
     app.use("/api/uploads", uploads_1.uploadsRouter);
     app.use("/api", improve_story_1.improveStoryRouter);
@@ -112,10 +115,12 @@ function mountLegacyApi(app) {
     app.use("/api/ai-campaign-flow", ai_campaign_flow_1.aiCampaignFlowRouter);
     app.use("/api/fundraiser", fundraiser_1.fundraiserRouter);
     app.use("/api/support", support_1.supportRouter);
+    app.use("/api/email-templates", email_templates_1.emailTemplatesRouter);
     app.use("/api/guest-campaign-claim", guest_campaign_claim_1.guestCampaignClaimRouter);
     app.use("/api/guest-business-claim", guest_business_claim_1.guestBusinessClaimRouter);
     app.use("/api", business_post_start_1.businessPostStartRouter);
     app.use("/api/manage", manage_1.manageRouter);
+    app.use("/api/manage", campaign_partner_join_requests_1.campaignPartnerJoinManageRouter);
     app.use("/api", settlement_ach_approval_1.settlementAchApprovalRouter);
 }
 //# sourceMappingURL=mount.js.map

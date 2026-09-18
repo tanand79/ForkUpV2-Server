@@ -15,6 +15,10 @@ import {
   normalizePreferredCampaignSlug,
 } from "../lib/join-giveback-prefs";
 import { issueGuestBusinessClaim } from "../lib/guest-business-claim";
+import {
+  listOrganizationMembers,
+  type OrganizationType,
+} from "../lib/invite-sender";
 
 export const profilesRouter = Router();
 
@@ -1778,5 +1782,50 @@ profilesRouter.post("/access-requests/resubmit", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to resubmit access request" });
+  }
+});
+
+/**
+ * GET /api/profiles/organization-members
+ * Query: organizationType=nonprofit|business, organizationId=<id>
+ * Auth: must be a member of that organization (or platform admin).
+ * Response: { members: [{ userId, fullName, email, role }] }
+ */
+profilesRouter.get("/organization-members", async (req, res) => {
+  try {
+    const authUser = await resolveAuthUser(bearerToken(req));
+    if (!authUser) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const organizationTypeRaw = String(req.query.organizationType || "").trim();
+    const organizationType: OrganizationType | null =
+      organizationTypeRaw === "nonprofit" || organizationTypeRaw === "business"
+        ? organizationTypeRaw
+        : null;
+    const organizationId = Number(req.query.organizationId);
+    if (!organizationType || !Number.isFinite(organizationId) || organizationId <= 0) {
+      res.status(400).json({
+        error: "organizationType and organizationId are required",
+      });
+      return;
+    }
+
+    const isMember = authUser.organizations.some(
+      (o) =>
+        o.organizationType === organizationType &&
+        o.organizationId === organizationId,
+    );
+    if (!isMember && !authUser.isPlatformAdmin) {
+      res.status(403).json({ error: "Not a member of this organization" });
+      return;
+    }
+
+    const members = await listOrganizationMembers(organizationType, organizationId);
+    res.json({ members });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load organization members" });
   }
 });

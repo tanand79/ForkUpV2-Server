@@ -12,6 +12,7 @@ const crypto_1 = __importDefault(require("crypto"));
 const pool_1 = require("../db/pool");
 const mailer_1 = require("./mailer");
 const assert_may_link_organization_1 = require("./assert-may-link-organization");
+const guest_claim_email_1 = require("./guest-claim-email");
 const CLAIM_TTL_DAYS = 14;
 function generateGuestBusinessClaimToken() {
     return crypto_1.default.randomBytes(32).toString("hex");
@@ -34,20 +35,20 @@ async function issueGuestBusinessClaim(input) {
        updated_at = NOW()
      WHERE id = $4`, [email, token, expiresAt, input.businessId]);
     const claimUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}/?step=guest-business-claim&token=${encodeURIComponent(token)}`;
+    const rendered = (0, guest_claim_email_1.renderGuestClaimEmail)({
+        kind: "business",
+        entityName: input.businessName,
+        claimUrl,
+        expiresInDays: CLAIM_TTL_DAYS,
+    });
     const sent = await (0, mailer_1.sendEmail)({
         to: email,
         emailType: "guest_business_claim",
         relatedToken: token,
         senderParty: "platform",
-        subject: `Manage your ForkUp business: ${input.businessName}`,
-        body: [
-            `Your business "${input.businessName}" is saved on ForkUp.`,
-            ``,
-            `Claim / manage this business profile (works on any device):`,
-            claimUrl,
-            ``,
-            `This link expires in ${CLAIM_TTL_DAYS} days. Do not forward it — anyone with the link can claim management.`,
-        ].join("\n"),
+        subject: rendered.subject,
+        body: rendered.body,
+        html: rendered.html,
     });
     return { token, emailSent: sent.status === "sent" || sent.status === "skipped" };
 }

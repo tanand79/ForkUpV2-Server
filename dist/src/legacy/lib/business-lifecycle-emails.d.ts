@@ -6,6 +6,7 @@ export type LifecycleSendResult = {
 };
 export declare function sendInitialInvitationEmails(campaignId: number, options?: {
     onlyStatus?: string[];
+    cblId?: number;
 }): Promise<LifecycleSendResult>;
 export declare function sendBusinessAcceptedConfirmation(campaignId: number, businessId: number): Promise<void>;
 export declare function sendBusinessDeclinedConfirmation(campaignId: number, businessId: number): Promise<void>;

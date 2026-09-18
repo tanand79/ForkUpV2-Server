@@ -12,6 +12,7 @@ const crypto_1 = __importDefault(require("crypto"));
 const pool_1 = require("../db/pool");
 const mailer_1 = require("./mailer");
 const assert_may_link_organization_1 = require("./assert-may-link-organization");
+const guest_claim_email_1 = require("./guest-claim-email");
 const CLAIM_TTL_DAYS = 14;
 function generateGuestClaimToken() {
     return crypto_1.default.randomBytes(32).toString("hex");
@@ -35,32 +36,24 @@ async function issueGuestCampaignClaim(input) {
      WHERE id = $4`, [email, token, expiresAt, input.campaignId]);
     const claimUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}/?step=guest-campaign-claim&token=${encodeURIComponent(token)}`;
     const publicUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}/campaign/${encodeURIComponent(input.slug)}`;
+    const rendered = (0, guest_claim_email_1.renderGuestClaimEmail)({
+        kind: "campaign",
+        entityName: input.campaignName,
+        claimUrl,
+        publicUrl,
+        expiresInDays: CLAIM_TTL_DAYS,
+    });
     const sent = await (0, mailer_1.sendEmail)({
         to: email,
         emailType: "guest_campaign_claim",
         relatedToken: token,
         senderParty: "platform",
         campaignId: input.campaignId,
-        subject: `Manage your ForkUp campaign: ${input.campaignName}`,
-        body: [
-            `Your campaign "${input.campaignName}" is live on ForkUp.`,
-            ``,
-            `Public page: ${publicUrl}`,
-            ``,
-            `Claim / manage this campaign (works on any device):`,
-            claimUrl,
-            ``,
-            `This link expires in ${CLAIM_TTL_DAYS} days. Do not forward it — anyone with the link can claim management.`,
-        ].join("\n"),
+        subject: rendered.subject,
+        body: rendered.body,
+        html: rendered.html,
     });
     return { token, emailSent: sent.status === "sent" || sent.status === "skipped" };
-}
-function escapeHtml(s) {
-    return s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
 }
 async function lookupGuestClaimToken(token) {
     const t = token.trim();

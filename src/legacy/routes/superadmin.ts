@@ -1526,6 +1526,9 @@ superadminRouter.get("/users", async (req, res) => {
  * - Clears claim/contact refs and email-linked rows for that address.
  * - Nulls non-FK user id pointers that would otherwise orphan or block.
  * - Deletes the users row (auth_sessions / organization_users cascade).
+ * - If a nonprofit/business this user claimed or belonged to has no remaining
+ *   members after delete, resets claim_status to unclaimed so it can be
+ *   claimed again (avoids "already on ForkUp" with zero owners).
  * - Does NOT delete nonprofits, businesses, or campaigns.
  */
 superadminRouter.delete("/users/:id", async (req, res) => {
@@ -1565,6 +1568,33 @@ superadminRouter.delete("/users/:id", async (req, res) => {
     }
 
     const email = String(target.email);
+
+    // Capture orgs touched by this user before membership rows cascade away.
+    const { rows: nonprofitTouchRows } = await connection.query<QueryResultRow>(
+      `SELECT DISTINCT organization_id AS id FROM (
+         SELECT organization_id FROM organization_users
+           WHERE user_id = $1 AND organization_type = 'nonprofit'
+         UNION
+         SELECT id AS organization_id FROM nonprofits WHERE claimed_by_user_id = $1
+       ) t`,
+      [id],
+    );
+    const nonprofitIds = nonprofitTouchRows
+      .map((r) => Number(r.id))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    const { rows: businessTouchRows } = await connection.query<QueryResultRow>(
+      `SELECT DISTINCT organization_id AS id FROM (
+         SELECT organization_id FROM organization_users
+           WHERE user_id = $1 AND organization_type = 'business'
+         UNION
+         SELECT id AS organization_id FROM businesses WHERE claimed_by_user_id = $1
+       ) t`,
+      [id],
+    );
+    const businessIds = businessTouchRows
+      .map((r) => Number(r.id))
+      .filter((n) => Number.isFinite(n) && n > 0);
 
     await connection.query(
       `UPDATE nonprofits
@@ -1637,6 +1667,47 @@ superadminRouter.delete("/users/:id", async (req, res) => {
     );
 
     await connection.query(`DELETE FROM users WHERE id = $1`, [id]);
+
+    // Release claims only when the org now has zero members and no claimant.
+    if (nonprofitIds.length > 0) {
+      await connection.query(
+        `UPDATE nonprofits
+         SET claim_status = 'unclaimed',
+             profile_status = 'preloaded',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'nonprofit'
+               AND ou.organization_id = nonprofits.id
+           )`,
+        [nonprofitIds],
+      );
+    }
+
+    if (businessIds.length > 0) {
+      await connection.query(
+        `UPDATE businesses
+         SET claim_status = 'unclaimed',
+             profile_status = 'preloaded',
+             business_status = CASE
+               WHEN business_status IN ('claimed', 'active') THEN 'preloaded'
+               ELSE business_status
+             END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'business'
+               AND ou.organization_id = businesses.id
+           )`,
+        [businessIds],
+      );
+    }
 
     await connection.query("COMMIT");
     res.json({ success: true, id, email });

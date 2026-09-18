@@ -5,6 +5,7 @@ export type SendEmailInput = {
     name?: string | null;
     subject: string;
     body: string;
+    html?: string | null;
     emailType: string;
     campaignId?: number | null;
     businessId?: number | null;

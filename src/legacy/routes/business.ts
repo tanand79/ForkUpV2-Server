@@ -23,6 +23,11 @@ import {
 } from "../lib/business-invitation-record";
 import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
+import {
+  parseSenderUserId,
+  resolveOrgMemberSender,
+  setCampaignInviteSenderUserId,
+} from "../lib/invite-sender";
 
 export const businessRouter = Router();
 
@@ -932,6 +937,8 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
       givebackPercentage?: number;
       message?: string;
       campaignName?: string;
+      /** Optional: business org member used as From display name + Reply-To. */
+      inviteSenderUserId?: number;
     };
 
     const businessId = Number(body.businessId);
@@ -961,6 +968,27 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
       return;
     }
     const business = bizRows[0];
+
+    const senderId = parseSenderUserId(body.inviteSenderUserId);
+    let senderHeaders: { fromName: string; replyTo: string } | null = null;
+    if (senderId != null) {
+      const resolved = await resolveOrgMemberSender(
+        "business",
+        businessId,
+        senderId,
+        connection,
+      );
+      if (!resolved) {
+        res.status(400).json({
+          error: "inviteSenderUserId must be a member of this business",
+        });
+        return;
+      }
+      senderHeaders = {
+        fromName: resolved.fromName,
+        replyTo: resolved.replyTo,
+      };
+    }
 
     const { rows: locRows } = await connection.query<QueryResultRow>(
       "SELECT * FROM business_locations WHERE id = $1 AND business_id = $2",
@@ -1011,6 +1039,10 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
       [slug, nonprofitId, campaignName, story, startDate, endDate, startDate],
     );
     const campaignId = campResult[0].id;
+
+    if (senderId != null) {
+      await setCampaignInviteSenderUserId(campaignId, senderId, connection);
+    }
 
     const { rows: methodResult } = await connection.query<{ id: number }>(
       `INSERT INTO campaign_methods (
@@ -1073,6 +1105,9 @@ businessRouter.post("/nonprofit-invites", async (req, res) => {
         senderParty: "business",
         stakeholderRole: "nonprofit",
         relatedToken: token,
+        ...(senderHeaders
+          ? { fromName: senderHeaders.fromName, replyTo: senderHeaders.replyTo }
+          : {}),
       });
     }
 

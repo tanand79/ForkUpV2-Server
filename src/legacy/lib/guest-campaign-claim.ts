@@ -12,6 +12,7 @@ import type { PoolClient } from "pg";
 import { pool } from "../db/pool";
 import { sendEmail, resolveFrontendBaseUrl } from "./mailer";
 import { assertUserMayLinkOrganization } from "./assert-may-link-organization";
+import { renderGuestClaimEmail } from "./guest-claim-email";
 
 const CLAIM_TTL_DAYS = 14;
 
@@ -55,6 +56,13 @@ export async function issueGuestCampaignClaim(input: {
 
   const claimUrl = `${resolveFrontendBaseUrl()}/?step=guest-campaign-claim&token=${encodeURIComponent(token)}`;
   const publicUrl = `${resolveFrontendBaseUrl()}/campaign/${encodeURIComponent(input.slug)}`;
+  const rendered = renderGuestClaimEmail({
+    kind: "campaign",
+    entityName: input.campaignName,
+    claimUrl,
+    publicUrl,
+    expiresInDays: CLAIM_TTL_DAYS,
+  });
 
   const sent = await sendEmail({
     to: email,
@@ -62,28 +70,12 @@ export async function issueGuestCampaignClaim(input: {
     relatedToken: token,
     senderParty: "platform",
     campaignId: input.campaignId,
-    subject: `Manage your ForkUp campaign: ${input.campaignName}`,
-    body: [
-      `Your campaign "${input.campaignName}" is live on ForkUp.`,
-      ``,
-      `Public page: ${publicUrl}`,
-      ``,
-      `Claim / manage this campaign (works on any device):`,
-      claimUrl,
-      ``,
-      `This link expires in ${CLAIM_TTL_DAYS} days. Do not forward it — anyone with the link can claim management.`,
-    ].join("\n"),
+    subject: rendered.subject,
+    body: rendered.body,
+    html: rendered.html,
   });
 
   return { token, emailSent: sent.status === "sent" || sent.status === "skipped" };
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 export type GuestClaimLookup = {

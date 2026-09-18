@@ -29,6 +29,11 @@ import { pool } from "../db/pool";
 import type { MethodType } from "../types/campaign";
 import { toDateOnlyString } from "../lib/date-only";
 import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
+import {
+  parseSenderUserId,
+  resolveUserSender,
+  setCampaignInviteSenderUserId,
+} from "../lib/invite-sender";
 
 export const fundraiserRouter = Router();
 
@@ -55,6 +60,8 @@ type CreateInviteBody = {
    */
   fundraiserEmail?: string;
   fundraiserName?: string;
+  /** Optional: signed-in fundraiser user id for From display name + Reply-To. */
+  inviteSenderUserId?: number;
 };
 
 /**
@@ -220,10 +227,28 @@ fundraiserRouter.post("/invites", async (req, res) => {
     const needsForkupReview = wantsForkupReview;
 
     const fundraiserEmail = authUser?.email?.trim().toLowerCase() || guestEmail;
-    const fundraiserName =
+    let fundraiserName =
       (typeof body.fundraiserName === "string" && body.fundraiserName.trim()) ||
       authUser?.fullName?.trim() ||
       fundraiserEmail;
+    let fundraiserReplyTo = fundraiserEmail.includes("@") ? fundraiserEmail : null;
+
+    const senderId = parseSenderUserId(body.inviteSenderUserId);
+    if (senderId != null) {
+      if (!authUser || senderId !== authUser.id) {
+        res.status(400).json({
+          error: "inviteSenderUserId must match the signed-in fundraiser",
+        });
+        return;
+      }
+      const resolved = await resolveUserSender(senderId, connection);
+      if (!resolved) {
+        res.status(400).json({ error: "Unable to resolve invite sender" });
+        return;
+      }
+      fundraiserName = resolved.fromName;
+      fundraiserReplyTo = resolved.replyTo;
+    }
 
     await connection.query("BEGIN");
 
@@ -263,6 +288,10 @@ fundraiserRouter.post("/invites", async (req, res) => {
       ],
     );
     const campaignId = campResult[0].id;
+
+    if (senderId != null) {
+      await setCampaignInviteSenderUserId(campaignId, senderId, connection);
+    }
 
     for (const methodType of methods) {
       await connection.query(
@@ -332,7 +361,7 @@ fundraiserRouter.post("/invites", async (req, res) => {
       relatedToken: token,
       platformSender: true,
       fromName: fundraiserName,
-      replyTo: fundraiserEmail.includes("@") ? fundraiserEmail : null,
+      replyTo: fundraiserReplyTo,
     });
 
     const at = nonprofitEmail.indexOf("@");

@@ -28,9 +28,14 @@ import { campaignAiRouter } from "./routes/campaign-ai";
 import { aiCampaignFlowRouter } from "./routes/ai-campaign-flow";
 import { fundraiserRouter } from "./routes/fundraiser";
 import { supportRouter } from "./routes/support";
+import { emailTemplatesRouter } from "./routes/email-templates";
 import { guestCampaignClaimRouter } from "./routes/guest-campaign-claim";
 import { guestBusinessClaimRouter } from "./routes/guest-business-claim";
 import { businessPostStartRouter } from "./routes/business-post-start";
+import {
+  campaignPartnerJoinBusinessRouter,
+  campaignPartnerJoinManageRouter,
+} from "./routes/campaign-partner-join-requests";
 import {
   stripeCheckoutRouter,
   stripeConfigRouter,
@@ -117,6 +122,8 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/superadmin", superadminRouter);
   app.use("/api/business", businessRouter);
   app.use("/api/business", locationAchRouter);
+  /** Business → NPO: request to join an existing public campaign. */
+  app.use("/api/business", campaignPartnerJoinBusinessRouter);
   app.use("/api", receiptsRouter);
   app.use("/api/uploads", uploadsRouter);
   app.use("/api", improveStoryRouter);
@@ -130,10 +137,13 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/ai-campaign-flow", aiCampaignFlowRouter);
   app.use("/api/fundraiser", fundraiserRouter);
   app.use("/api/support", supportRouter);
+  app.use("/api/email-templates", emailTemplatesRouter);
   app.use("/api/guest-campaign-claim", guestCampaignClaimRouter);
   /** Guest restaurant/local claim link (email token → attach organization_users). */
   app.use("/api/guest-business-claim", guestBusinessClaimRouter);
   app.use("/api", businessPostStartRouter);
   app.use("/api/manage", manageRouter);
+  /** NPO: list / accept / decline partner join requests. */
+  app.use("/api/manage", campaignPartnerJoinManageRouter);
   app.use("/api", settlementAchApprovalRouter);
 }

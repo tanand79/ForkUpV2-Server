@@ -13,12 +13,17 @@ let sesClient = null;
 function escapeFromDisplayName(name) {
     return name.replace(/[\r\n]+/g, " ").replace(/"/g, '\\"').trim();
 }
-function formatSmtpFrom(smtpFrom, fromName) {
-    const addr = smtpFrom.trim();
-    const name = typeof fromName === "string" ? fromName.trim() : "";
+function formatSmtpMailbox(address, displayName) {
+    const addr = address.trim();
+    const name = typeof displayName === "string" ? displayName.trim() : "";
     if (!name)
         return addr;
+    if (addr.includes("<") && addr.includes(">"))
+        return addr;
     return `"${escapeFromDisplayName(name)}" <${addr}>`;
+}
+function formatSmtpFrom(smtpFrom, fromName) {
+    return formatSmtpMailbox(smtpFrom, fromName);
 }
 async function resolveNonprofitSender(campaignId) {
     try {
@@ -191,14 +196,21 @@ async function sendViaSmtp(input) {
                 ? { user: s.smtp_user, pass: s.smtp_pass }
                 : undefined,
         });
-        const replyTo = typeof input.replyTo === "string" && input.replyTo.includes("@")
+        const replyToAddr = typeof input.replyTo === "string" && input.replyTo.includes("@")
             ? input.replyTo.trim()
+            : undefined;
+        const replyTo = replyToAddr
+            ? formatSmtpMailbox(replyToAddr, input.fromName)
+            : undefined;
+        const html = typeof input.html === "string" && input.html.trim()
+            ? input.html
             : undefined;
         const info = await transport.sendMail({
             from: formatSmtpFrom(s.smtp_from, input.fromName),
             to: input.to,
             subject: input.subject,
             text: input.body,
+            ...(html ? { html } : {}),
             ...(replyTo ? { replyTo } : {}),
         });
         const result = {
@@ -234,12 +246,18 @@ async function sendViaSes(input) {
         return result;
     }
     try {
+        const html = typeof input.html === "string" && input.html.trim()
+            ? input.html
+            : undefined;
         const command = new client_ses_1.SendEmailCommand({
             Source: process.env.SES_FROM_EMAIL,
             Destination: { ToAddresses: [input.to] },
             Message: {
                 Subject: { Data: input.subject, Charset: "UTF-8" },
-                Body: { Text: { Data: input.body, Charset: "UTF-8" } },
+                Body: {
+                    Text: { Data: input.body, Charset: "UTF-8" },
+                    ...(html ? { Html: { Data: html, Charset: "UTF-8" } } : {}),
+                },
             },
         });
         const response = await getSesClient().send(command);

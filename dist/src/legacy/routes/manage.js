@@ -9,6 +9,7 @@ const change_request_message_1 = require("../lib/change-request-message");
 const invitations_1 = require("../lib/invitations");
 const parse_change_request_1 = require("../lib/parse-change-request");
 const business_lifecycle_emails_1 = require("../lib/business-lifecycle-emails");
+const invite_sender_1 = require("../lib/invite-sender");
 const business_email_templates_1 = require("../lib/business-email-templates");
 const campaign_visibility_1 = require("../lib/campaign-visibility");
 const participants_1 = require("./participants");
@@ -775,8 +776,9 @@ exports.manageRouter.post("/success-engine/:id/send", async (req, res) => {
 exports.manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
     try {
         const slug = String(req.params.slug || "").replace(/\/+$/, "");
-        const { rows: campRows } = await pool_1.pool.query(`SELECT id FROM campaigns WHERE slug = $1 LIMIT 1`, [slug]);
+        const { rows: campRows } = await pool_1.pool.query(`SELECT id, nonprofit_id FROM campaigns WHERE slug = $1 LIMIT 1`, [slug]);
         const campaignId = Number(campRows[0]?.id);
+        const nonprofitId = Number(campRows[0]?.nonprofit_id);
         if (!campaignId) {
             res.status(404).json({ error: "Campaign not found" });
             return;
@@ -789,6 +791,17 @@ exports.manageRouter.post("/campaigns/:slug/business-emails", async (req, res) =
                 error: `templateKey must be one of: ${allowed.join(", ")}`,
             });
             return;
+        }
+        const senderId = (0, invite_sender_1.parseSenderUserId)(body.inviteSenderUserId);
+        if (senderId != null && nonprofitId) {
+            const headers = await (0, invite_sender_1.resolveOrgMemberSender)("nonprofit", nonprofitId, senderId);
+            if (!headers) {
+                res.status(400).json({
+                    error: "inviteSenderUserId must be a member of this nonprofit",
+                });
+                return;
+            }
+            await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId);
         }
         const invitationId = typeof body.invitationId === "number" && Number.isFinite(body.invitationId)
             ? body.invitationId

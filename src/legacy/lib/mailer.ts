@@ -18,6 +18,11 @@ export type SendEmailInput = {
   name?: string | null;
   subject: string;
   body: string;
+  /**
+   * Optional HTML body. When set, SMTP/SES send multipart (text + html).
+   * Existing callers that omit this keep plain-text-only behavior.
+   */
+  html?: string | null;
   emailType: string;
   campaignId?: number | null;
   /** Required when senderParty is "business" (or inferred) so Reply-To / From name resolve. */
@@ -74,15 +79,26 @@ function escapeFromDisplayName(name: string): string {
 }
 
 /**
+ * Builds an RFC 5322 mailbox value: keeps address, optionally prefixes display name.
+ * Used for SMTP From and Reply-To so both can show the same name.
+ * Inputs: address, optional display name. Outputs: header string.
+ */
+function formatSmtpMailbox(address: string, displayName?: string | null): string {
+  const addr = address.trim();
+  const name = typeof displayName === "string" ? displayName.trim() : "";
+  if (!name) return addr;
+  // Already a "Name" <addr> form — leave as-is.
+  if (addr.includes("<") && addr.includes(">")) return addr;
+  return `"${escapeFromDisplayName(name)}" <${addr}>`;
+}
+
+/**
  * Builds the SMTP From value: keeps authenticated smtp_from address, optionally
  * prefixes the campaign creator / nonprofit display name.
  * Inputs: smtpFrom address, optional fromName. Outputs: header From string.
  */
 function formatSmtpFrom(smtpFrom: string, fromName?: string | null): string {
-  const addr = smtpFrom.trim();
-  const name = typeof fromName === "string" ? fromName.trim() : "";
-  if (!name) return addr;
-  return `"${escapeFromDisplayName(name)}" <${addr}>`;
+  return formatSmtpMailbox(smtpFrom, fromName);
 }
 
 /**
@@ -311,15 +327,24 @@ async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
           ? { user: s.smtp_user, pass: s.smtp_pass }
           : undefined,
     });
-    const replyTo =
+    const replyToAddr =
       typeof input.replyTo === "string" && input.replyTo.includes("@")
         ? input.replyTo.trim()
+        : undefined;
+    // Reply-To shows the same display name as From when both are set.
+    const replyTo = replyToAddr
+      ? formatSmtpMailbox(replyToAddr, input.fromName)
+      : undefined;
+    const html =
+      typeof input.html === "string" && input.html.trim()
+        ? input.html
         : undefined;
     const info = await transport.sendMail({
       from: formatSmtpFrom(s.smtp_from, input.fromName),
       to: input.to,
       subject: input.subject,
       text: input.body,
+      ...(html ? { html } : {}),
       ...(replyTo ? { replyTo } : {}),
     });
     const result: SendEmailResult = {
@@ -358,12 +383,19 @@ async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
   }
 
   try {
+    const html =
+      typeof input.html === "string" && input.html.trim()
+        ? input.html
+        : undefined;
     const command = new SendEmailCommand({
       Source: process.env.SES_FROM_EMAIL,
       Destination: { ToAddresses: [input.to] },
       Message: {
         Subject: { Data: input.subject, Charset: "UTF-8" },
-        Body: { Text: { Data: input.body, Charset: "UTF-8" } },
+        Body: {
+          Text: { Data: input.body, Charset: "UTF-8" },
+          ...(html ? { Html: { Data: html, Charset: "UTF-8" } } : {}),
+        },
       },
     });
     const response = await getSesClient().send(command);

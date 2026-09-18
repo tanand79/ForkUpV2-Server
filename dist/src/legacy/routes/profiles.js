@@ -9,6 +9,7 @@ const geo_distance_1 = require("../lib/geo-distance");
 const join_door_type_1 = require("../lib/join-door-type");
 const join_giveback_prefs_1 = require("../lib/join-giveback-prefs");
 const guest_business_claim_1 = require("../lib/guest-business-claim");
+const invite_sender_1 = require("../lib/invite-sender");
 exports.profilesRouter = (0, express_1.Router)();
 function slugify(name) {
     return name
@@ -1273,6 +1274,38 @@ exports.profilesRouter.post("/access-requests/resubmit", async (req, res) => {
     catch (err) {
         console.error(err);
         res.status(500).json({ error: "Failed to resubmit access request" });
+    }
+});
+exports.profilesRouter.get("/organization-members", async (req, res) => {
+    try {
+        const authUser = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
+        if (!authUser) {
+            res.status(401).json({ error: "Authentication required" });
+            return;
+        }
+        const organizationTypeRaw = String(req.query.organizationType || "").trim();
+        const organizationType = organizationTypeRaw === "nonprofit" || organizationTypeRaw === "business"
+            ? organizationTypeRaw
+            : null;
+        const organizationId = Number(req.query.organizationId);
+        if (!organizationType || !Number.isFinite(organizationId) || organizationId <= 0) {
+            res.status(400).json({
+                error: "organizationType and organizationId are required",
+            });
+            return;
+        }
+        const isMember = authUser.organizations.some((o) => o.organizationType === organizationType &&
+            o.organizationId === organizationId);
+        if (!isMember && !authUser.isPlatformAdmin) {
+            res.status(403).json({ error: "Not a member of this organization" });
+            return;
+        }
+        const members = await (0, invite_sender_1.listOrganizationMembers)(organizationType, organizationId);
+        res.json({ members });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to load organization members" });
     }
 });
 //# sourceMappingURL=profiles.js.map

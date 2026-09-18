@@ -25,6 +25,7 @@ const EXPECTED_TABLES = [
   "campaigns",
   "donations",
   "email_log",
+  "email_templates",
   "invitation_tokens",
   "nonprofit_campaign_invitations",
   "nonprofits",

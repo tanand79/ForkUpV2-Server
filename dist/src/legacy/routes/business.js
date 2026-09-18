@@ -13,6 +13,7 @@ const campaign_timing_1 = require("../lib/campaign-timing");
 const business_invite_timing_1 = require("../lib/business-invite-timing");
 const business_invitation_record_1 = require("../lib/business-invitation-record");
 const pool_1 = require("../db/pool");
+const invite_sender_1 = require("../lib/invite-sender");
 exports.businessRouter = (0, express_1.Router)();
 function formatDate(value) {
     return (0, date_only_1.toDateOnlyString)(value);
@@ -715,6 +716,21 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
             return;
         }
         const business = bizRows[0];
+        const senderId = (0, invite_sender_1.parseSenderUserId)(body.inviteSenderUserId);
+        let senderHeaders = null;
+        if (senderId != null) {
+            const resolved = await (0, invite_sender_1.resolveOrgMemberSender)("business", businessId, senderId, connection);
+            if (!resolved) {
+                res.status(400).json({
+                    error: "inviteSenderUserId must be a member of this business",
+                });
+                return;
+            }
+            senderHeaders = {
+                fromName: resolved.fromName,
+                replyTo: resolved.replyTo,
+            };
+        }
         const { rows: locRows } = await connection.query("SELECT * FROM business_locations WHERE id = $1 AND business_id = $2", [locationId, businessId]);
         if (locRows.length === 0) {
             res.status(400).json({ error: "Location does not belong to this business" });
@@ -744,6 +760,9 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
         invitation_deadline
       ) VALUES ($1, $2, $3, $4, 0, $5, $6, 'draft', '/placeholder-cover.jpg', $7::date - INTERVAL '7 days') RETURNING id`, [slug, nonprofitId, campaignName, story, startDate, endDate, startDate]);
         const campaignId = campResult[0].id;
+        if (senderId != null) {
+            await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
+        }
         const { rows: methodResult } = await connection.query(`INSERT INTO campaign_methods (
         campaign_id, method_type, method_name, method_start_date, method_end_date,
         method_status, requires_business_acceptance
@@ -790,6 +809,9 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
                 senderParty: "business",
                 stakeholderRole: "nonprofit",
                 relatedToken: token,
+                ...(senderHeaders
+                    ? { fromName: senderHeaders.fromName, replyTo: senderHeaders.replyTo }
+                    : {}),
             });
         }
         res.status(201).json({

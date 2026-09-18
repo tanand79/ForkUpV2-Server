@@ -13,6 +13,7 @@ import type { PoolClient } from "pg";
 import { pool } from "../db/pool";
 import { sendEmail, resolveFrontendBaseUrl } from "./mailer";
 import { assertUserMayLinkOrganization } from "./assert-may-link-organization";
+import { renderGuestClaimEmail } from "./guest-claim-email";
 
 const CLAIM_TTL_DAYS = 14;
 
@@ -55,21 +56,21 @@ export async function issueGuestBusinessClaim(input: {
   );
 
   const claimUrl = `${resolveFrontendBaseUrl()}/?step=guest-business-claim&token=${encodeURIComponent(token)}`;
+  const rendered = renderGuestClaimEmail({
+    kind: "business",
+    entityName: input.businessName,
+    claimUrl,
+    expiresInDays: CLAIM_TTL_DAYS,
+  });
 
   const sent = await sendEmail({
     to: email,
     emailType: "guest_business_claim",
     relatedToken: token,
     senderParty: "platform",
-    subject: `Manage your ForkUp business: ${input.businessName}`,
-    body: [
-      `Your business "${input.businessName}" is saved on ForkUp.`,
-      ``,
-      `Claim / manage this business profile (works on any device):`,
-      claimUrl,
-      ``,
-      `This link expires in ${CLAIM_TTL_DAYS} days. Do not forward it — anyone with the link can claim management.`,
-    ].join("\n"),
+    subject: rendered.subject,
+    body: rendered.body,
+    html: rendered.html,
   });
 
   return { token, emailSent: sent.status === "sent" || sent.status === "skipped" };

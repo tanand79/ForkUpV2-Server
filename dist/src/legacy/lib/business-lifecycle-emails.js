@@ -8,8 +8,10 @@ exports.buildSettlementBusinessEmail = buildSettlementBusinessEmail;
 const pool_1 = require("../db/pool");
 const date_only_1 = require("./date-only");
 const mailer_1 = require("./mailer");
+const invite_sender_1 = require("./invite-sender");
 const methods_1 = require("./methods");
 const business_email_templates_1 = require("./business-email-templates");
+const email_templates_1 = require("./email-templates");
 function money(n) {
     return `$${Number(n || 0).toFixed(2)}`;
 }
@@ -73,7 +75,7 @@ async function loadPartners(campaignId, cblId) {
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -84,7 +86,22 @@ async function loadPartners(campaignId, cblId) {
      ORDER BY cbl.id ASC`, params);
     return rows;
 }
-async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOnce = true) {
+async function withTemplateOverride(campaignId, nonprofitId, rendered, ctx) {
+    const overridden = await (0, email_templates_1.applyNonprofitTemplateOverride)({
+        nonprofitId,
+        campaignId,
+        templateKey: rendered.templateKey,
+        fallbackSubject: rendered.subject,
+        fallbackBody: rendered.body,
+        context: ctx,
+    });
+    return {
+        subject: overridden.subject,
+        body: overridden.body,
+        emailType: rendered.emailType,
+    };
+}
+async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOnce = true, sender) {
     const result = await (0, mailer_1.sendEmail)({
         to,
         name,
@@ -95,6 +112,9 @@ async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOn
         stakeholderRole: "business",
         relatedToken,
         onlyOnce,
+        ...(sender
+            ? { fromName: sender.fromName, replyTo: sender.replyTo }
+            : {}),
     });
     if (result.status === "sent")
         return "sent";
@@ -104,7 +124,8 @@ async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOn
 }
 async function sendInitialInvitationEmails(campaignId, options) {
     const allowed = options?.onlyStatus ?? ["invited"];
-    const rows = await loadPartners(campaignId);
+    const rows = await loadPartners(campaignId, options?.cblId);
+    const sender = await (0, invite_sender_1.loadCampaignInviteSender)(campaignId);
     let sent = 0;
     let skipped = 0;
     let targeted = 0;
@@ -119,7 +140,8 @@ async function sendInitialInvitationEmails(campaignId, options) {
         targeted += 1;
         const email = String(row.contact_email).trim();
         const rendered = (0, business_email_templates_1.renderInitialInvitation)(ctx);
-        const status = await sendRendered(email, ctx.businessName, rendered, campaignId, row.token, true);
+        const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
+        const status = await sendRendered(email, ctx.businessName, finalRendered, campaignId, row.token, true, sender);
         if (status === "sent")
             sent += 1;
         else
@@ -135,7 +157,7 @@ async function sendBusinessAcceptedConfirmation(campaignId, businessId) {
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -153,7 +175,9 @@ async function sendBusinessAcceptedConfirmation(campaignId, businessId) {
         return;
     const email = String(row.contact_email).trim();
     const rendered = (0, business_email_templates_1.renderAcceptedConfirmation)(ctx);
-    await sendRendered(email, ctx.businessName, rendered, campaignId, `biz-email-3:${row.cbl_id}`, true);
+    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
+    const sender = await (0, invite_sender_1.loadCampaignInviteSender)(campaignId);
+    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-3:${row.cbl_id}`, true, sender);
 }
 async function sendBusinessDeclinedConfirmation(campaignId, businessId) {
     const { rows } = await pool_1.pool.query(`SELECT cbl.id AS cbl_id, it.token, cbl.acceptance_status, cbl.invite_status,
@@ -163,7 +187,7 @@ async function sendBusinessDeclinedConfirmation(campaignId, businessId) {
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -181,7 +205,9 @@ async function sendBusinessDeclinedConfirmation(campaignId, businessId) {
         return;
     const email = String(row.contact_email).trim();
     const rendered = (0, business_email_templates_1.renderDeclinedConfirmation)(ctx);
-    await sendRendered(email, ctx.businessName, rendered, campaignId, `biz-email-4:${row.cbl_id}`, true);
+    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
+    const sender = await (0, invite_sender_1.loadCampaignInviteSender)(campaignId);
+    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-4:${row.cbl_id}`, true, sender);
 }
 function matchesTemplateAudience(key, row) {
     const status = String(row.acceptance_status);
@@ -205,6 +231,7 @@ function matchesTemplateAudience(key, row) {
 }
 async function sendBusinessLifecycleBatch(input) {
     const rows = await loadPartners(input.campaignId, input.invitationId);
+    const sender = await (0, invite_sender_1.loadCampaignInviteSender)(input.campaignId);
     let sent = 0;
     let skipped = 0;
     let targeted = 0;
@@ -227,8 +254,9 @@ async function sendBusinessLifecycleBatch(input) {
                 : input.templateKey === "launch_kit"
                     ? (0, business_email_templates_1.renderLaunchKit)(ctx)
                     : (0, business_email_templates_1.renderStartingSoon)(ctx);
+        const finalRendered = await withTemplateOverride(input.campaignId, Number(row.nonprofit_id), rendered, ctx);
         const tokenKey = `biz-email-${input.templateKey}:${row.cbl_id}`;
-        const status = await sendRendered(email, ctx.businessName, rendered, input.campaignId, tokenKey, true);
+        const status = await sendRendered(email, ctx.businessName, finalRendered, input.campaignId, tokenKey, true, sender);
         if (status === "sent")
             sent += 1;
         else

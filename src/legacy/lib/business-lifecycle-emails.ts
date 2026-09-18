@@ -9,6 +9,10 @@ import type { QueryResultRow } from "pg";
 import { pool } from "../db/pool";
 import { toDateOnlyString } from "./date-only";
 import { sendEmail, resolveFrontendBaseUrl } from "./mailer";
+import {
+  loadCampaignInviteSender,
+  type InviteSenderHeaders,
+} from "./invite-sender";
 import { METHOD_LABELS } from "./methods";
 import type { MethodType } from "../types/campaign";
 import {
@@ -25,6 +29,7 @@ import {
   type BusinessEmailContext,
   type BusinessEmailTemplateKey,
 } from "./business-email-templates";
+import { applyNonprofitTemplateOverride } from "./email-templates";
 
 export type LifecycleSendResult = {
   sent: number;
@@ -53,6 +58,7 @@ type PartnerRow = QueryResultRow & {
   campaign_end_date: string | Date | null;
   event_date: string | Date | null;
   organization_name: string;
+  nonprofit_id: number;
 };
 
 function money(n: number): string {
@@ -121,7 +127,7 @@ async function loadPartners(campaignId: number, cblId?: number): Promise<Partner
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -135,6 +141,30 @@ async function loadPartners(campaignId: number, cblId?: number): Promise<Partner
   return rows;
 }
 
+/**
+ * Prefer org/campaign DB template override when present; else system render.
+ */
+async function withTemplateOverride(
+  campaignId: number,
+  nonprofitId: number,
+  rendered: { subject: string; body: string; emailType: string; templateKey: BusinessEmailTemplateKey },
+  ctx: BusinessEmailContext,
+): Promise<{ subject: string; body: string; emailType: string }> {
+  const overridden = await applyNonprofitTemplateOverride({
+    nonprofitId,
+    campaignId,
+    templateKey: rendered.templateKey,
+    fallbackSubject: rendered.subject,
+    fallbackBody: rendered.body,
+    context: ctx,
+  });
+  return {
+    subject: overridden.subject,
+    body: overridden.body,
+    emailType: rendered.emailType,
+  };
+}
+
 async function sendRendered(
   to: string,
   name: string,
@@ -142,6 +172,7 @@ async function sendRendered(
   campaignId: number,
   relatedToken: string,
   onlyOnce = true,
+  sender?: InviteSenderHeaders | null,
 ): Promise<"sent" | "skipped" | "failed"> {
   const result = await sendEmail({
     to,
@@ -153,6 +184,10 @@ async function sendRendered(
     stakeholderRole: "business",
     relatedToken,
     onlyOnce,
+    // When set, wins over org-name enrichment (person From + Reply-To).
+    ...(sender
+      ? { fromName: sender.fromName, replyTo: sender.replyTo }
+      : {}),
   });
   if (result.status === "sent") return "sent";
   if (result.status === "skipped") return "skipped";
@@ -165,10 +200,11 @@ async function sendRendered(
  */
 export async function sendInitialInvitationEmails(
   campaignId: number,
-  options?: { onlyStatus?: string[] },
+  options?: { onlyStatus?: string[]; /** Optional: only this partner CBL row */ cblId?: number },
 ): Promise<LifecycleSendResult> {
   const allowed = options?.onlyStatus ?? ["invited"];
-  const rows = await loadPartners(campaignId);
+  const rows = await loadPartners(campaignId, options?.cblId);
+  const sender = await loadCampaignInviteSender(campaignId);
   let sent = 0;
   let skipped = 0;
   let targeted = 0;
@@ -182,13 +218,20 @@ export async function sendInitialInvitationEmails(
     targeted += 1;
     const email = String(row.contact_email).trim();
     const rendered = renderInitialInvitation(ctx);
+    const finalRendered = await withTemplateOverride(
+      campaignId,
+      Number(row.nonprofit_id),
+      rendered,
+      ctx,
+    );
     const status = await sendRendered(
       email,
       ctx.businessName,
-      rendered,
+      finalRendered,
       campaignId,
       row.token,
       true,
+      sender,
     );
     if (status === "sent") sent += 1;
     else skipped += 1;
@@ -209,7 +252,7 @@ export async function sendBusinessAcceptedConfirmation(
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -227,13 +270,21 @@ export async function sendBusinessAcceptedConfirmation(
   if (!ctx) return;
   const email = String(row.contact_email).trim();
   const rendered = renderAcceptedConfirmation(ctx);
+  const finalRendered = await withTemplateOverride(
+    campaignId,
+    Number(row.nonprofit_id),
+    rendered,
+    ctx,
+  );
+  const sender = await loadCampaignInviteSender(campaignId);
   await sendRendered(
     email,
     ctx.businessName,
-    rendered,
+    finalRendered,
     campaignId,
     `biz-email-3:${row.cbl_id}`,
     true,
+    sender,
   );
 }
 
@@ -250,7 +301,7 @@ export async function sendBusinessDeclinedConfirmation(
             cm.method_type,
             c.campaign_name, c.campaign_story, c.slug AS campaign_slug,
             c.campaign_start_date, c.campaign_end_date, c.event_date,
-            n.organization_name
+            n.organization_name, n.id AS nonprofit_id
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN campaigns c ON c.id = cbl.campaign_id
@@ -268,13 +319,21 @@ export async function sendBusinessDeclinedConfirmation(
   if (!ctx) return;
   const email = String(row.contact_email).trim();
   const rendered = renderDeclinedConfirmation(ctx);
+  const finalRendered = await withTemplateOverride(
+    campaignId,
+    Number(row.nonprofit_id),
+    rendered,
+    ctx,
+  );
+  const sender = await loadCampaignInviteSender(campaignId);
   await sendRendered(
     email,
     ctx.businessName,
-    rendered,
+    finalRendered,
     campaignId,
     `biz-email-4:${row.cbl_id}`,
     true,
+    sender,
   );
 }
 
@@ -316,6 +375,7 @@ export async function sendBusinessLifecycleBatch(input: {
   invitationId?: number;
 }): Promise<LifecycleSendResult> {
   const rows = await loadPartners(input.campaignId, input.invitationId);
+  const sender = await loadCampaignInviteSender(input.campaignId);
   let sent = 0;
   let skipped = 0;
   let targeted = 0;
@@ -340,14 +400,21 @@ export async function sendBusinessLifecycleBatch(input: {
           : input.templateKey === "launch_kit"
             ? renderLaunchKit(ctx)
             : renderStartingSoon(ctx);
+    const finalRendered = await withTemplateOverride(
+      input.campaignId,
+      Number(row.nonprofit_id),
+      rendered,
+      ctx,
+    );
     const tokenKey = `biz-email-${input.templateKey}:${row.cbl_id}`;
     const status = await sendRendered(
       email,
       ctx.businessName,
-      rendered,
+      finalRendered,
       input.campaignId,
       tokenKey,
       true,
+      sender,
     );
     if (status === "sent") sent += 1;
     else skipped += 1;
