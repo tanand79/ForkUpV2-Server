@@ -38,6 +38,7 @@
     "db:campaign-ai": "tsx src/legacy/db/migrate-campaign-ai.ts",
     "db:ai-campaign-flow": "tsx src/legacy/db/migrate-ai-campaign-flow.ts",
     "db:invite-sender-user": "tsx src/legacy/db/migrate-invite-sender-user.ts",
+    "db:invite-sender-user:production": "tsx src/legacy/db/run-invite-sender-user-production.ts",
     "db:email-templates": "tsx src/legacy/db/migrate-email-templates.ts",
     "db:email-templates:production": "tsx src/legacy/db/run-email-templates-production.ts",
     "db:email-template-from-name": "tsx src/legacy/db/migrate-email-template-from-name.ts",

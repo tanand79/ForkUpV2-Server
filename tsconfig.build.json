@@ -49,6 +49,7 @@
     "src/legacy/db/migrate-campaign-partner-join-requests.ts",
     "src/legacy/db/migrate-stripe-donations.ts",
     "src/legacy/db/migrate-invite-sender-user.ts",
+    "src/legacy/db/run-invite-sender-user-production.ts",
     "src/legacy/db/migrate-email-templates.ts",
     "src/legacy/db/migrate-email-template-from-name.ts",
     "src/legacy/db/run-email-templates-production.ts",
