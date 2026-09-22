@@ -13,6 +13,7 @@ const pool_1 = require("../db/pool");
 const date_only_1 = require("../lib/date-only");
 const ensure_durable_image_1 = require("../lib/ensure-durable-image");
 const invite_sender_1 = require("../lib/invite-sender");
+const email_templates_1 = require("../lib/email-templates");
 exports.fundraiserRouter = (0, express_1.Router)();
 const DEFAULT_METHODS = ["virtual_donations", "ambassador_fundraising"];
 const ALL_METHOD_TYPES = new Set(Object.keys(methods_1.METHOD_LABELS));
@@ -140,6 +141,7 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
             authUser?.fullName?.trim() ||
             fundraiserEmail;
         let fundraiserReplyTo = fundraiserEmail.includes("@") ? fundraiserEmail : null;
+        const customFromName = (0, invite_sender_1.parseInviteFromName)(body.inviteFromName);
         const senderId = (0, invite_sender_1.parseSenderUserId)(body.inviteSenderUserId);
         if (senderId != null) {
             if (!authUser || senderId !== authUser.id) {
@@ -153,8 +155,11 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
                 res.status(400).json({ error: "Unable to resolve invite sender" });
                 return;
             }
-            fundraiserName = resolved.fromName;
+            fundraiserName = customFromName || resolved.fromName;
             fundraiserReplyTo = resolved.replyTo;
+        }
+        else if (customFromName) {
+            fundraiserName = customFromName;
         }
         await connection.query("BEGIN");
         const slug = await (0, slug_1.uniqueCampaignSlug)(campaignName, async (s) => {
@@ -189,6 +194,9 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
         if (senderId != null) {
             await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
         }
+        if (customFromName) {
+            await (0, invite_sender_1.setCampaignInviteFromName)(campaignId, customFromName, connection);
+        }
         for (const methodType of methods) {
             await connection.query(`INSERT INTO campaign_methods (
           campaign_id, method_type, method_name, method_status,
@@ -222,26 +230,74 @@ exports.fundraiserRouter.post("/invites", async (req, res) => {
         await connection.query("COMMIT");
         const acceptPath = `/?step=fundraiser-invite-accept&token=${token}`;
         const acceptUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}${acceptPath}`;
+        const nonprofitName = String(nonprofit.organization_name ?? "").trim();
+        const fallbackSubject = `${fundraiserName} proposed a ForkUp campaign for ${nonprofitName}`;
+        const fallbackBody = `Hi ${nonprofitName},\n\n` +
+            `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
+            `"${campaignName}"\n\n` +
+            (body.message?.trim()
+                ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
+                : "") +
+            `Review and respond here:\n${acceptUrl}\n\n` +
+            `— ForkUp`;
+        let subject = fallbackSubject;
+        let text = fallbackBody;
+        let templateFromName = null;
+        if (authUser?.id) {
+            try {
+                const resolved = await (0, email_templates_1.resolveEmailTemplate)({
+                    scopeType: "fundraiser_user",
+                    scopeId: authUser.id,
+                    templateKey: "fundraiser_campaign_invitation",
+                    campaignId,
+                    ...(fundraiserName ? { fromName: fundraiserName } : {}),
+                });
+                if (resolved) {
+                    const placeholders = {
+                        fundraiserName,
+                        nonprofitName,
+                        campaignTitle: campaignName,
+                        businessName: "",
+                        businessContactName: "",
+                        campaignPurpose: "",
+                        participationLabel: "",
+                        dateRangeLabel: "",
+                        respondByDate: "",
+                        startOrEventDate: "",
+                        reviewUrl: acceptUrl,
+                        dashboardUrl: acceptUrl,
+                        materialsUrl: acceptUrl,
+                        settlementReportUrl: "",
+                        eligibleSales: "",
+                        donationAmount: "",
+                        forkupFee: "",
+                        achAmount: "",
+                    };
+                    subject = (0, email_templates_1.applyTemplatePlaceholders)(resolved.subject, placeholders);
+                    text = (0, email_templates_1.applyTemplatePlaceholders)(resolved.body, placeholders);
+                    if (body.message?.trim()) {
+                        text += `\n\nMessage from ${fundraiserName}:\n${body.message.trim()}\n`;
+                    }
+                    templateFromName = resolved.defaultFromName;
+                }
+            }
+            catch (templateErr) {
+                console.error("[fundraiser/invites] template resolve failed; using fallback copy:", templateErr);
+            }
+        }
         await (0, mailer_1.sendEmail)({
             to: nonprofitEmail,
             name: typeof nonprofit.contact_name === "string"
                 ? nonprofit.contact_name
                 : null,
-            subject: `${fundraiserName} proposed a ForkUp campaign for ${nonprofit.organization_name}`,
-            body: `Hi ${nonprofit.organization_name},\n\n` +
-                `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
-                `"${campaignName}"\n\n` +
-                (body.message?.trim()
-                    ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
-                    : "") +
-                `Review and respond here:\n${acceptUrl}\n\n` +
-                `— ForkUp`,
+            subject,
+            body: text,
             emailType: "fundraiser_campaign_invitation",
             campaignId,
             stakeholderRole: "nonprofit",
             relatedToken: token,
             platformSender: true,
-            fromName: fundraiserName,
+            fromName: fundraiserName || templateFromName || undefined,
             replyTo: fundraiserReplyTo,
         });
         const at = nonprofitEmail.indexOf("@");

@@ -165,11 +165,15 @@ exports.emailTemplatesRouter.post("/send", async (req, res) => {
             ? body.fromName.trim().slice(0, 255)
             : null;
         if (body.saveAsTemplate) {
+            const saveBaseKey = typeof body.baseTemplateKey === "string"
+                ? body.baseTemplateKey.trim().slice(0, 60)
+                : null;
             await (0, email_templates_1.upsertEmailTemplate)({
                 scopeType,
                 scopeId,
                 campaignId,
                 templateKey: templateKey || "custom",
+                baseTemplateKey: saveBaseKey,
                 name: typeof body.name === "string" ? body.name : templateKey || "Custom",
                 subject,
                 body: text,
@@ -284,11 +288,15 @@ exports.emailTemplatesRouter.post("/", async (req, res) => {
         const defaultFromName = typeof body.defaultFromName === "string" && body.defaultFromName.trim()
             ? body.defaultFromName.trim().slice(0, 255)
             : null;
+        const baseTemplateKey = typeof body.baseTemplateKey === "string" && body.baseTemplateKey.trim()
+            ? body.baseTemplateKey.trim().slice(0, 60)
+            : null;
         const template = await (0, email_templates_1.upsertEmailTemplate)({
             scopeType,
             scopeId,
             campaignId,
             templateKey,
+            baseTemplateKey,
             name: typeof body.name === "string" ? body.name : templateKey,
             subject: typeof body.subject === "string" ? body.subject : "",
             body: typeof body.body === "string" ? body.body : "",

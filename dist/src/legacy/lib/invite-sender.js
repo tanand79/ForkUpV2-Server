@@ -1,9 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.parseInviteFromName = parseInviteFromName;
 exports.listOrganizationMembers = listOrganizationMembers;
 exports.resolveOrgMemberSender = resolveOrgMemberSender;
 exports.loadCampaignInviteSender = loadCampaignInviteSender;
 exports.setCampaignInviteSenderUserId = setCampaignInviteSenderUserId;
+exports.setCampaignInviteFromName = setCampaignInviteFromName;
 exports.parseSenderUserId = parseSenderUserId;
 exports.resolveUserSender = resolveUserSender;
 const pool_1 = require("../db/pool");
@@ -20,6 +22,12 @@ function parsePositiveInt(value) {
     if (!Number.isFinite(n) || n <= 0)
         return null;
     return Math.floor(n);
+}
+function parseInviteFromName(value) {
+    if (typeof value !== "string")
+        return null;
+    const trimmed = value.trim().slice(0, 255);
+    return trimmed || null;
 }
 async function listOrganizationMembers(organizationType, organizationId, client) {
     const db = client ?? pool_1.pool;
@@ -66,22 +74,26 @@ async function resolveOrgMemberSender(organizationType, organizationId, senderUs
 }
 async function loadCampaignInviteSender(campaignId, client) {
     const db = client ?? pool_1.pool;
-    const { rows } = await db.query(`SELECT c.invite_sender_user_id AS user_id, u.full_name, u.email, 'owner'::text AS role
+    const { rows } = await db.query(`SELECT c.invite_sender_user_id, c.invite_from_name, u.full_name, u.email
      FROM campaigns c
-     JOIN users u ON u.id = c.invite_sender_user_id
+     LEFT JOIN users u ON u.id = c.invite_sender_user_id
      WHERE c.id = $1
-       AND c.invite_sender_user_id IS NOT NULL
      LIMIT 1`, [campaignId]);
     const row = rows[0];
     if (!row)
         return null;
-    const email = String(row.email).trim();
-    if (!email.includes("@"))
+    const customFrom = typeof row.invite_from_name === "string" ? row.invite_from_name.trim() : "";
+    const email = typeof row.email === "string" ? row.email.trim() : "";
+    const personFrom = row.invite_sender_user_id != null
+        ? displayNameFromRow({ full_name: row.full_name, email: email || "" })
+        : "";
+    const fromName = customFrom || personFrom;
+    if (!fromName && !email.includes("@"))
         return null;
     return {
-        userId: Number(row.user_id),
-        fromName: displayNameFromRow(row),
-        replyTo: email,
+        userId: row.invite_sender_user_id != null ? Number(row.invite_sender_user_id) : 0,
+        fromName: fromName || "ForkUp organizer",
+        replyTo: email.includes("@") ? email : "",
     };
 }
 async function setCampaignInviteSenderUserId(campaignId, senderUserId, client) {
@@ -89,6 +101,15 @@ async function setCampaignInviteSenderUserId(campaignId, senderUserId, client) {
     await db.query(`UPDATE campaigns
      SET invite_sender_user_id = $1, updated_at = NOW()
      WHERE id = $2`, [senderUserId, campaignId]);
+}
+async function setCampaignInviteFromName(campaignId, fromName, client) {
+    const db = client ?? pool_1.pool;
+    const value = typeof fromName === "string" && fromName.trim()
+        ? fromName.trim().slice(0, 255)
+        : null;
+    await db.query(`UPDATE campaigns
+     SET invite_from_name = $1, updated_at = NOW()
+     WHERE id = $2`, [value, campaignId]);
 }
 function parseSenderUserId(value) {
     return parsePositiveInt(value);

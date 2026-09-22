@@ -14,8 +14,10 @@ import {
   sendBusinessLifecycleBatch,
 } from "../lib/business-lifecycle-emails";
 import {
+  parseInviteFromName,
   parseSenderUserId,
   resolveOrgMemberSender,
+  setCampaignInviteFromName,
   setCampaignInviteSenderUserId,
 } from "../lib/invite-sender";
 import {
@@ -1033,6 +1035,7 @@ manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
       templateKey?: string;
       invitationId?: number;
       inviteSenderUserId?: number;
+      inviteFromName?: string;
     };
     const allowed = ["invite_reminder", "missing_info", "launch_kit", "starting_soon"] as const;
     const templateKey = body.templateKey as (typeof allowed)[number] | undefined;
@@ -1057,6 +1060,10 @@ manageRouter.post("/campaigns/:slug/business-emails", async (req, res) => {
         return;
       }
       await setCampaignInviteSenderUserId(campaignId, senderId);
+    }
+    const fromName = parseInviteFromName(body.inviteFromName);
+    if (fromName) {
+      await setCampaignInviteFromName(campaignId, fromName);
     }
 
     const invitationId =

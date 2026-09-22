@@ -34,8 +34,10 @@ import { computeRespondByDate } from "../lib/business-invite-timing";
 import { insertBusinessInvitationRecord } from "../lib/business-invitation-record";
 import { sendInitialInvitationEmails } from "../lib/business-lifecycle-emails";
 import {
+  parseInviteFromName,
   parseSenderUserId,
   resolveOrgMemberSender,
+  setCampaignInviteFromName,
   setCampaignInviteSenderUserId,
 } from "../lib/invite-sender";
 import { pool } from "../db/pool";
@@ -146,10 +148,12 @@ type CreateCampaignBody = {
   confirmedStatus?: string | null;
   confirmedNotes?: string | null;
   /**
-   * Optional: nonprofit org member used as email From display name + Reply-To.
+   * Optional: nonprofit org member used as Reply-To.
    * Persisted on campaigns.invite_sender_user_id for deferred invites.
    */
   inviteSenderUserId?: number;
+  /** Optional: custom From display name only (not email). */
+  inviteFromName?: string;
 };
 
 /**
@@ -224,8 +228,8 @@ function confirmationFromBody(body: CreateCampaignBody): BusinessConfirmationInp
 }
 
 /**
- * Validates + persists inviteSenderUserId on the campaign (nonprofit members only).
- * Inputs: connection, campaignId, nonprofitId, raw body field.
+ * Validates + persists inviteSenderUserId / inviteFromName on the campaign.
+ * Inputs: connection, campaignId, nonprofitId, raw body fields.
  * Outputs: null on success / omitted; error message string on invalid member.
  */
 async function applyNonprofitInviteSender(
@@ -233,19 +237,25 @@ async function applyNonprofitInviteSender(
   campaignId: number,
   nonprofitId: number,
   inviteSenderUserId: unknown,
+  inviteFromName?: unknown,
 ): Promise<string | null> {
   const senderId = parseSenderUserId(inviteSenderUserId);
-  if (senderId == null) return null;
-  const headers = await resolveOrgMemberSender(
-    "nonprofit",
-    nonprofitId,
-    senderId,
-    connection,
-  );
-  if (!headers) {
-    return "inviteSenderUserId must be a member of this nonprofit";
+  if (senderId != null) {
+    const headers = await resolveOrgMemberSender(
+      "nonprofit",
+      nonprofitId,
+      senderId,
+      connection,
+    );
+    if (!headers) {
+      return "inviteSenderUserId must be a member of this nonprofit";
+    }
+    await setCampaignInviteSenderUserId(campaignId, senderId, connection);
   }
-  await setCampaignInviteSenderUserId(campaignId, senderId, connection);
+  const fromName = parseInviteFromName(inviteFromName);
+  if (fromName) {
+    await setCampaignInviteFromName(campaignId, fromName, connection);
+  }
   return null;
 }
 
@@ -853,7 +863,8 @@ builderRouter.get("/campaigns/:slug", async (req, res) => {
     const { rows: campaigns } = await pool.query<QueryResultRow>(
       `SELECT c.id, c.slug, c.nonprofit_id, c.campaign_name, c.campaign_story, c.campaign_goal,
               c.campaign_start_date, c.campaign_end_date, c.cover_image_url,
-              c.featured_youtube_url, c.campaign_status, c.invite_sender_user_id
+              c.featured_youtube_url, c.campaign_status, c.invite_sender_user_id,
+              c.invite_from_name
        FROM campaigns c WHERE c.slug = $1`,
       [slug],
     );
@@ -911,6 +922,12 @@ builderRouter.get("/campaigns/:slug", async (req, res) => {
       inviteSenderUserId:
         campaign.invite_sender_user_id != null
           ? Number(campaign.invite_sender_user_id)
+          : null,
+      /** Additive: custom From display name when set. */
+      inviteFromName:
+        typeof campaign.invite_from_name === "string" &&
+        campaign.invite_from_name.trim()
+          ? String(campaign.invite_from_name).trim()
           : null,
       methods: methods.map((m) => m.method_type),
       partners: partners.map((p) => ({
@@ -1221,6 +1238,7 @@ builderRouter.patch("/campaigns/:slug", async (req, res) => {
       campaignId,
       nonprofitId,
       body.inviteSenderUserId,
+      body.inviteFromName,
     );
     if (inviteSenderError) {
       await connection.query("ROLLBACK");
@@ -1839,6 +1857,7 @@ builderRouter.post("/campaigns", async (req, res) => {
       campaignId,
       nonprofitId,
       body.inviteSenderUserId,
+      body.inviteFromName,
     );
     if (inviteSenderError) {
       await connection.query("ROLLBACK");
@@ -2192,6 +2211,7 @@ builderRouter.post("/campaigns/:slug/business-invitations", async (req, res) => 
       invitations?: CreateCampaignBody["invitations"];
       newBusinessInvites?: CreateCampaignBody["newBusinessInvites"];
       inviteSenderUserId?: number;
+      inviteFromName?: string;
     };
 
     const authUser = await resolveAuthUser(bearerToken(req));
@@ -2269,6 +2289,7 @@ builderRouter.post("/campaigns/:slug/business-invitations", async (req, res) => 
       campaignId,
       nonprofitId,
       body.inviteSenderUserId,
+      body.inviteFromName,
     );
     if (inviteSenderError) {
       await connection.query("ROLLBACK");

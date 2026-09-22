@@ -803,6 +803,10 @@ exports.manageRouter.post("/campaigns/:slug/business-emails", async (req, res) =
             }
             await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId);
         }
+        const fromName = (0, invite_sender_1.parseInviteFromName)(body.inviteFromName);
+        if (fromName) {
+            await (0, invite_sender_1.setCampaignInviteFromName)(campaignId, fromName);
+        }
         const invitationId = typeof body.invitationId === "number" && Number.isFinite(body.invitationId)
             ? body.invitationId
             : undefined;

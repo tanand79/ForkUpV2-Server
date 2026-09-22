@@ -8,6 +8,7 @@ exports.resolveFrontendBaseUrl = resolveFrontendBaseUrl;
 const client_ses_1 = require("@aws-sdk/client-ses");
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const pool_1 = require("../db/pool");
+const forkup_email_layout_1 = require("./forkup-email-layout");
 const platform_settings_1 = require("./platform-settings");
 let sesClient = null;
 function escapeFromDisplayName(name) {
@@ -284,19 +285,28 @@ async function sendViaSes(input) {
 }
 async function sendEmail(input) {
     const enriched = await enrichSenderFromCampaign(input);
-    if (await alreadySent(enriched)) {
+    const withLayout = {
+        ...enriched,
+        html: typeof enriched.html === "string" && enriched.html.trim()
+            ? enriched.html
+            : (0, forkup_email_layout_1.wrapForkUpEmailHtml)({
+                subject: enriched.subject,
+                bodyText: enriched.body,
+            }),
+    };
+    if (await alreadySent(withLayout)) {
         return { status: "skipped", provider: "noop", messageId: null };
     }
     const provider = await resolveEmailProvider();
     if (provider === "noop") {
         const result = { status: "skipped", provider: "noop", messageId: null };
-        console.info(`[mailer] Provider=noop — skipping. type=${enriched.emailType} to=${enriched.to}`);
-        await recordEmailLog(enriched, result, null);
+        console.info(`[mailer] Provider=noop — skipping. type=${withLayout.emailType} to=${withLayout.to}`);
+        await recordEmailLog(withLayout, result, null);
         return result;
     }
     if (provider === "smtp")
-        return sendViaSmtp(enriched);
-    return sendViaSes(enriched);
+        return sendViaSmtp(withLayout);
+    return sendViaSes(withLayout);
 }
 function resolveFrontendBaseUrl() {
     const candidate = process.env.FRONTEND_URL?.split(",")[0]?.trim() ||

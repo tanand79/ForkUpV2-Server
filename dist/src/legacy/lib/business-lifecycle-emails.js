@@ -86,7 +86,7 @@ async function loadPartners(campaignId, cblId) {
      ORDER BY cbl.id ASC`, params);
     return rows;
 }
-async function withTemplateOverride(campaignId, nonprofitId, rendered, ctx) {
+async function withTemplateOverride(campaignId, nonprofitId, rendered, ctx, fromName) {
     const overridden = await (0, email_templates_1.applyNonprofitTemplateOverride)({
         nonprofitId,
         campaignId,
@@ -94,11 +94,26 @@ async function withTemplateOverride(campaignId, nonprofitId, rendered, ctx) {
         fallbackSubject: rendered.subject,
         fallbackBody: rendered.body,
         context: ctx,
+        fromName: fromName ?? null,
     });
     return {
         subject: overridden.subject,
         body: overridden.body,
         emailType: rendered.emailType,
+        defaultFromName: overridden.defaultFromName,
+    };
+}
+function mergeInviteSender(sender, templateFromName) {
+    const fromName = (sender?.fromName && sender.fromName.trim()) ||
+        (typeof templateFromName === "string" && templateFromName.trim()) ||
+        "";
+    if (!fromName && !(sender?.replyTo && sender.replyTo.includes("@"))) {
+        return sender ?? null;
+    }
+    return {
+        userId: sender?.userId ?? 0,
+        fromName: fromName || sender?.fromName || "ForkUp organizer",
+        replyTo: sender?.replyTo ?? "",
     };
 }
 async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOnce = true, sender) {
@@ -112,9 +127,8 @@ async function sendRendered(to, name, rendered, campaignId, relatedToken, onlyOn
         stakeholderRole: "business",
         relatedToken,
         onlyOnce,
-        ...(sender
-            ? { fromName: sender.fromName, replyTo: sender.replyTo }
-            : {}),
+        ...(sender?.fromName ? { fromName: sender.fromName } : {}),
+        ...(sender?.replyTo?.includes("@") ? { replyTo: sender.replyTo } : {}),
     });
     if (result.status === "sent")
         return "sent";
@@ -140,8 +154,8 @@ async function sendInitialInvitationEmails(campaignId, options) {
         targeted += 1;
         const email = String(row.contact_email).trim();
         const rendered = (0, business_email_templates_1.renderInitialInvitation)(ctx);
-        const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
-        const status = await sendRendered(email, ctx.businessName, finalRendered, campaignId, row.token, true, sender);
+        const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx, sender?.fromName);
+        const status = await sendRendered(email, ctx.businessName, finalRendered, campaignId, row.token, true, mergeInviteSender(sender, finalRendered.defaultFromName));
         if (status === "sent")
             sent += 1;
         else
@@ -175,9 +189,9 @@ async function sendBusinessAcceptedConfirmation(campaignId, businessId) {
         return;
     const email = String(row.contact_email).trim();
     const rendered = (0, business_email_templates_1.renderAcceptedConfirmation)(ctx);
-    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
     const sender = await (0, invite_sender_1.loadCampaignInviteSender)(campaignId);
-    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-3:${row.cbl_id}`, true, sender);
+    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx, sender?.fromName);
+    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-3:${row.cbl_id}`, true, mergeInviteSender(sender, finalRendered.defaultFromName));
 }
 async function sendBusinessDeclinedConfirmation(campaignId, businessId) {
     const { rows } = await pool_1.pool.query(`SELECT cbl.id AS cbl_id, it.token, cbl.acceptance_status, cbl.invite_status,
@@ -205,9 +219,9 @@ async function sendBusinessDeclinedConfirmation(campaignId, businessId) {
         return;
     const email = String(row.contact_email).trim();
     const rendered = (0, business_email_templates_1.renderDeclinedConfirmation)(ctx);
-    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx);
     const sender = await (0, invite_sender_1.loadCampaignInviteSender)(campaignId);
-    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-4:${row.cbl_id}`, true, sender);
+    const finalRendered = await withTemplateOverride(campaignId, Number(row.nonprofit_id), rendered, ctx, sender?.fromName);
+    await sendRendered(email, ctx.businessName, finalRendered, campaignId, `biz-email-4:${row.cbl_id}`, true, mergeInviteSender(sender, finalRendered.defaultFromName));
 }
 function matchesTemplateAudience(key, row) {
     const status = String(row.acceptance_status);
@@ -254,9 +268,9 @@ async function sendBusinessLifecycleBatch(input) {
                 : input.templateKey === "launch_kit"
                     ? (0, business_email_templates_1.renderLaunchKit)(ctx)
                     : (0, business_email_templates_1.renderStartingSoon)(ctx);
-        const finalRendered = await withTemplateOverride(input.campaignId, Number(row.nonprofit_id), rendered, ctx);
+        const finalRendered = await withTemplateOverride(input.campaignId, Number(row.nonprofit_id), rendered, ctx, sender?.fromName);
         const tokenKey = `biz-email-${input.templateKey}:${row.cbl_id}`;
-        const status = await sendRendered(email, ctx.businessName, finalRendered, input.campaignId, tokenKey, true, sender);
+        const status = await sendRendered(email, ctx.businessName, finalRendered, input.campaignId, tokenKey, true, mergeInviteSender(sender, finalRendered.defaultFromName));
         if (status === "sent")
             sent += 1;
         else

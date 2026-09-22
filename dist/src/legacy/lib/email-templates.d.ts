@@ -7,6 +7,7 @@ export type EmailTemplateRecord = {
     scopeId: number;
     campaignId: number | null;
     templateKey: string;
+    baseTemplateKey: string | null;
     name: string;
     subject: string;
     body: string;
@@ -34,6 +35,7 @@ export declare function resolveEmailTemplate(input: {
     scopeId: number;
     templateKey: string;
     campaignId?: number | null;
+    fromName?: string | null;
 }): Promise<{
     subject: string;
     body: string;
@@ -43,6 +45,7 @@ export declare function resolveEmailTemplate(input: {
     source: "database" | "system";
     id: number | null;
     campaignId: number | null;
+    baseTemplateKey: string | null;
 } | null>;
 export declare function applyNonprofitTemplateOverride(input: {
     nonprofitId: number;
@@ -51,16 +54,19 @@ export declare function applyNonprofitTemplateOverride(input: {
     fallbackSubject: string;
     fallbackBody: string;
     context: BusinessEmailContext;
+    fromName?: string | null;
 }): Promise<{
     subject: string;
     body: string;
     usedDatabase: boolean;
+    defaultFromName: string | null;
 }>;
 export declare function upsertEmailTemplate(input: {
     scopeType: EmailTemplateScopeType;
     scopeId: number;
     campaignId?: number | null;
     templateKey: string;
+    baseTemplateKey?: string | null;
     name: string;
     subject: string;
     body: string;

@@ -30,10 +30,16 @@ import type { MethodType } from "../types/campaign";
 import { toDateOnlyString } from "../lib/date-only";
 import { ensureDurableImageUrl } from "../lib/ensure-durable-image";
 import {
+  parseInviteFromName,
   parseSenderUserId,
   resolveUserSender,
+  setCampaignInviteFromName,
   setCampaignInviteSenderUserId,
 } from "../lib/invite-sender";
+import {
+  applyTemplatePlaceholders,
+  resolveEmailTemplate,
+} from "../lib/email-templates";
 
 export const fundraiserRouter = Router();
 
@@ -60,8 +66,10 @@ type CreateInviteBody = {
    */
   fundraiserEmail?: string;
   fundraiserName?: string;
-  /** Optional: signed-in fundraiser user id for From display name + Reply-To. */
+  /** Optional: signed-in fundraiser user id for Reply-To. */
   inviteSenderUserId?: number;
+  /** Optional: custom From display name only (not email). */
+  inviteFromName?: string;
 };
 
 /**
@@ -233,6 +241,7 @@ fundraiserRouter.post("/invites", async (req, res) => {
       fundraiserEmail;
     let fundraiserReplyTo = fundraiserEmail.includes("@") ? fundraiserEmail : null;
 
+    const customFromName = parseInviteFromName(body.inviteFromName);
     const senderId = parseSenderUserId(body.inviteSenderUserId);
     if (senderId != null) {
       if (!authUser || senderId !== authUser.id) {
@@ -246,8 +255,10 @@ fundraiserRouter.post("/invites", async (req, res) => {
         res.status(400).json({ error: "Unable to resolve invite sender" });
         return;
       }
-      fundraiserName = resolved.fromName;
+      fundraiserName = customFromName || resolved.fromName;
       fundraiserReplyTo = resolved.replyTo;
+    } else if (customFromName) {
+      fundraiserName = customFromName;
     }
 
     await connection.query("BEGIN");
@@ -291,6 +302,9 @@ fundraiserRouter.post("/invites", async (req, res) => {
 
     if (senderId != null) {
       await setCampaignInviteSenderUserId(campaignId, senderId, connection);
+    }
+    if (customFromName) {
+      await setCampaignInviteFromName(campaignId, customFromName, connection);
     }
 
     for (const methodType of methods) {
@@ -339,28 +353,80 @@ fundraiserRouter.post("/invites", async (req, res) => {
 
     const acceptPath = `/?step=fundraiser-invite-accept&token=${token}`;
     const acceptUrl = `${resolveFrontendBaseUrl()}${acceptPath}`;
+    const nonprofitName = String(nonprofit.organization_name ?? "").trim();
+    const fallbackSubject = `${fundraiserName} proposed a ForkUp campaign for ${nonprofitName}`;
+    const fallbackBody =
+      `Hi ${nonprofitName},\n\n` +
+      `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
+      `"${campaignName}"\n\n` +
+      (body.message?.trim()
+        ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
+        : "") +
+      `Review and respond here:\n${acceptUrl}\n\n` +
+      `— ForkUp`;
+
+    let subject = fallbackSubject;
+    let text = fallbackBody;
+    let templateFromName: string | null = null;
+    if (authUser?.id) {
+      try {
+        const resolved = await resolveEmailTemplate({
+          scopeType: "fundraiser_user",
+          scopeId: authUser.id,
+          templateKey: "fundraiser_campaign_invitation",
+          campaignId,
+          ...(fundraiserName ? { fromName: fundraiserName } : {}),
+        });
+        if (resolved) {
+          const placeholders = {
+            fundraiserName,
+            nonprofitName,
+            campaignTitle: campaignName,
+            businessName: "",
+            businessContactName: "",
+            campaignPurpose: "",
+            participationLabel: "",
+            dateRangeLabel: "",
+            respondByDate: "",
+            startOrEventDate: "",
+            reviewUrl: acceptUrl,
+            dashboardUrl: acceptUrl,
+            materialsUrl: acceptUrl,
+            settlementReportUrl: "",
+            eligibleSales: "",
+            donationAmount: "",
+            forkupFee: "",
+            achAmount: "",
+          };
+          subject = applyTemplatePlaceholders(resolved.subject, placeholders);
+          text = applyTemplatePlaceholders(resolved.body, placeholders);
+          if (body.message?.trim()) {
+            text += `\n\nMessage from ${fundraiserName}:\n${body.message.trim()}\n`;
+          }
+          templateFromName = resolved.defaultFromName;
+        }
+      } catch (templateErr) {
+        console.error(
+          "[fundraiser/invites] template resolve failed; using fallback copy:",
+          templateErr,
+        );
+      }
+    }
+
     await sendEmail({
       to: nonprofitEmail,
       name:
         typeof nonprofit.contact_name === "string"
           ? nonprofit.contact_name
           : null,
-      subject: `${fundraiserName} proposed a ForkUp campaign for ${nonprofit.organization_name}`,
-      body:
-        `Hi ${nonprofit.organization_name},\n\n` +
-        `${fundraiserName} (${fundraiserEmail}) wants to run a campaign with you on ForkUp:\n` +
-        `"${campaignName}"\n\n` +
-        (body.message?.trim()
-          ? `Message from ${fundraiserName}:\n${body.message.trim()}\n\n`
-          : "") +
-        `Review and respond here:\n${acceptUrl}\n\n` +
-        `— ForkUp`,
+      subject,
+      body: text,
       emailType: "fundraiser_campaign_invitation",
       campaignId,
       stakeholderRole: "nonprofit",
       relatedToken: token,
       platformSender: true,
-      fromName: fundraiserName,
+      fromName: fundraiserName || templateFromName || undefined,
       replyTo: fundraiserReplyTo,
     });
 

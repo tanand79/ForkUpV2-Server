@@ -69,15 +69,19 @@ function confirmationFromBody(body) {
         confirmedNotes: body.confirmedNotes,
     };
 }
-async function applyNonprofitInviteSender(connection, campaignId, nonprofitId, inviteSenderUserId) {
+async function applyNonprofitInviteSender(connection, campaignId, nonprofitId, inviteSenderUserId, inviteFromName) {
     const senderId = (0, invite_sender_1.parseSenderUserId)(inviteSenderUserId);
-    if (senderId == null)
-        return null;
-    const headers = await (0, invite_sender_1.resolveOrgMemberSender)("nonprofit", nonprofitId, senderId, connection);
-    if (!headers) {
-        return "inviteSenderUserId must be a member of this nonprofit";
+    if (senderId != null) {
+        const headers = await (0, invite_sender_1.resolveOrgMemberSender)("nonprofit", nonprofitId, senderId, connection);
+        if (!headers) {
+            return "inviteSenderUserId must be a member of this nonprofit";
+        }
+        await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
     }
-    await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
+    const fromName = (0, invite_sender_1.parseInviteFromName)(inviteFromName);
+    if (fromName) {
+        await (0, invite_sender_1.setCampaignInviteFromName)(campaignId, fromName, connection);
+    }
     return null;
 }
 function businessTimingSaveError(evaluation, body, methods) {
@@ -450,7 +454,8 @@ exports.builderRouter.get("/campaigns/:slug", async (req, res) => {
         const slug = req.params.slug.replace(/\/+$/, "");
         const { rows: campaigns } = await pool_1.pool.query(`SELECT c.id, c.slug, c.nonprofit_id, c.campaign_name, c.campaign_story, c.campaign_goal,
               c.campaign_start_date, c.campaign_end_date, c.cover_image_url,
-              c.featured_youtube_url, c.campaign_status, c.invite_sender_user_id
+              c.featured_youtube_url, c.campaign_status, c.invite_sender_user_id,
+              c.invite_from_name
        FROM campaigns c WHERE c.slug = $1`, [slug]);
         if (campaigns.length === 0) {
             res.status(404).json({ error: "Campaign not found" });
@@ -488,6 +493,10 @@ exports.builderRouter.get("/campaigns/:slug", async (req, res) => {
             origin: originRows.length > 0 ? "business_invite" : "nonprofit",
             inviteSenderUserId: campaign.invite_sender_user_id != null
                 ? Number(campaign.invite_sender_user_id)
+                : null,
+            inviteFromName: typeof campaign.invite_from_name === "string" &&
+                campaign.invite_from_name.trim()
+                ? String(campaign.invite_from_name).trim()
                 : null,
             methods: methods.map((m) => m.method_type),
             partners: partners.map((p) => ({
@@ -735,7 +744,7 @@ exports.builderRouter.patch("/campaigns/:slug", async (req, res) => {
                 : null,
             businessConfirmed,
         ]);
-        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId);
+        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId, body.inviteFromName);
         if (inviteSenderError) {
             await connection.query("ROLLBACK");
             res.status(400).json({ error: inviteSenderError });
@@ -1214,7 +1223,7 @@ exports.builderRouter.post("/campaigns", async (req, res) => {
             businessConfirmed ? new Date() : null,
         ]);
         const campaignId = campResult[0].id;
-        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId);
+        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId, body.inviteFromName);
         if (inviteSenderError) {
             await connection.query("ROLLBACK");
             res.status(400).json({ error: inviteSenderError });
@@ -1513,7 +1522,7 @@ exports.builderRouter.post("/campaigns/:slug/business-invitations", async (req, 
             res.status(403).json({ error: "Not allowed to invite businesses on this campaign" });
             return;
         }
-        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId);
+        const inviteSenderError = await applyNonprofitInviteSender(connection, campaignId, nonprofitId, body.inviteSenderUserId, body.inviteFromName);
         if (inviteSenderError) {
             await connection.query("ROLLBACK");
             res.status(400).json({ error: inviteSenderError });

@@ -4,7 +4,9 @@
  * Purpose: CRUD + resolve org/fundraiser templates with optional campaign
  * override. System hardcoded templates remain the fallback.
  *
- * Resolve order: campaign override → scope default → system catalog.
+ * Resolve for send (with fromName): person variant by base_template_key +
+ * default_from_name → else system catalog.
+ * Resolve for UI (exact templateKey): that row → else system.
  * Placeholders: {{nonprofitName}}, {{businessName}}, {{campaignTitle}}, etc.
  *
  * SMTP From address stays platform smtp_from; default_sender_user_id is optional.
@@ -26,6 +28,8 @@ export type EmailTemplateRecord = {
   scopeId: number;
   campaignId: number | null;
   templateKey: string;
+  /** System catalog key this variant belongs to (e.g. nonprofit_campaign_invitation). */
+  baseTemplateKey: string | null;
   name: string;
   subject: string;
   body: string;
@@ -45,6 +49,7 @@ type DbRow = QueryResultRow & {
   scope_id: number;
   campaign_id: number | null;
   template_key: string;
+  base_template_key: string | null;
   name: string;
   subject: string;
   body: string;
@@ -121,12 +126,15 @@ function parsePositiveInt(value: unknown): number | null {
 function mapRow(row: DbRow): EmailTemplateRecord {
   const fromName =
     typeof row.default_from_name === "string" ? row.default_from_name.trim() : "";
+  const baseKey =
+    typeof row.base_template_key === "string" ? row.base_template_key.trim() : "";
   return {
     id: Number(row.id),
     scopeType: row.scope_type as EmailTemplateScopeType,
     scopeId: Number(row.scope_id),
     campaignId: row.campaign_id != null ? Number(row.campaign_id) : null,
     templateKey: String(row.template_key),
+    baseTemplateKey: baseKey || String(row.template_key),
     name: String(row.name),
     subject: String(row.subject),
     body: String(row.body),
@@ -137,6 +145,28 @@ function mapRow(row: DbRow): EmailTemplateRecord {
     source: "database",
     canEdit: true,
   };
+}
+
+function isCatalogKey(
+  scopeType: EmailTemplateScopeType,
+  templateKey: string,
+): boolean {
+  return systemKeysForScope(scopeType).some((c) => c.key === templateKey);
+}
+
+function slugifyFromName(name: string): string {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 32);
+  return slug || "user";
+}
+
+/** Builds a unique template_key for a person variant under a system base key. */
+function makeVariantTemplateKey(baseKey: string, fromName: string): string {
+  return `${baseKey}__${slugifyFromName(fromName)}`.slice(0, 60);
 }
 
 /**
@@ -307,8 +337,8 @@ async function loadDbTemplates(
 }
 
 /**
- * Lists catalog for a scope: system keys merged with DB overrides.
- * When campaignId set, campaign rows win over org defaults for the same key.
+ * Lists catalog for a scope: system keys always, plus every active DB variant.
+ * Variants are matched at send time by base_template_key + From name.
  */
 export async function listEmailTemplates(input: {
   scopeType: EmailTemplateScopeType;
@@ -318,30 +348,9 @@ export async function listEmailTemplates(input: {
 }): Promise<EmailTemplateRecord[]> {
   const campaignId = input.campaignId ?? null;
   const rows = await loadDbTemplates(input.scopeType, input.scopeId, campaignId);
-  const byKey = new Map<string, DbRow>();
-  for (const row of rows) {
-    const key = String(row.template_key);
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, row);
-      continue;
-    }
-    // Prefer campaign-specific over org default.
-    if (existing.campaign_id == null && row.campaign_id != null) {
-      byKey.set(key, row);
-    }
-  }
-
   const out: EmailTemplateRecord[] = [];
-  const seen = new Set<string>();
 
   for (const meta of systemKeysForScope(input.scopeType)) {
-    seen.add(meta.key);
-    const dbRow = byKey.get(meta.key);
-    if (dbRow) {
-      out.push({ ...mapRow(dbRow), canEdit: input.canEdit });
-      continue;
-    }
     const sys = systemSubjectBody(input.scopeType, meta.key);
     if (!sys) continue;
     out.push({
@@ -350,6 +359,7 @@ export async function listEmailTemplates(input: {
       scopeId: input.scopeId,
       campaignId,
       templateKey: meta.key,
+      baseTemplateKey: meta.key,
       name: sys.name,
       subject: sys.subject,
       body: sys.body,
@@ -361,24 +371,55 @@ export async function listEmailTemplates(input: {
     });
   }
 
-  // Extra custom DB rows (multiple customs allowed only as distinct keys later;
-  // for now include any DB keys not in system catalog).
-  for (const [key, row] of byKey) {
-    if (seen.has(key)) continue;
+  for (const row of rows) {
     out.push({ ...mapRow(row), canEdit: input.canEdit });
   }
 
   return out;
 }
 
+function systemFallback(
+  scopeType: EmailTemplateScopeType,
+  templateKey: string,
+  campaignId: number | null,
+): {
+  subject: string;
+  body: string;
+  name: string;
+  defaultSenderUserId: number | null;
+  defaultFromName: string | null;
+  source: "system";
+  id: null;
+  campaignId: number | null;
+  baseTemplateKey: string;
+} | null {
+  const sys = systemSubjectBody(scopeType, templateKey);
+  if (!sys) return null;
+  return {
+    id: null,
+    subject: sys.subject,
+    body: sys.body,
+    name: sys.name,
+    defaultSenderUserId: null,
+    defaultFromName: null,
+    source: "system",
+    campaignId,
+    baseTemplateKey: templateKey,
+  };
+}
+
 /**
- * Resolves subject/body for a key: campaign DB → scope DB → system.
+ * Resolves subject/body for a key.
+ * When fromName is set (invite send): match base_template_key + From name → else system.
+ * When fromName omitted (UI / exact key): exact template_key row → else system.
  */
 export async function resolveEmailTemplate(input: {
   scopeType: EmailTemplateScopeType;
   scopeId: number;
   templateKey: string;
   campaignId?: number | null;
+  /** When set, pick the person variant for this From name under the base key. */
+  fromName?: string | null;
 }): Promise<{
   subject: string;
   body: string;
@@ -388,17 +429,89 @@ export async function resolveEmailTemplate(input: {
   source: "database" | "system";
   id: number | null;
   campaignId: number | null;
+  baseTemplateKey: string | null;
 } | null> {
   const campaignId = input.campaignId ?? null;
-  const db = pool;
+  const templateKey = input.templateKey.trim();
+  if (!templateKey) return null;
+  const fromName =
+    typeof input.fromName === "string" && input.fromName.trim()
+      ? input.fromName.trim()
+      : "";
+
+  if (fromName) {
+    const baseKey = isCatalogKey(input.scopeType, templateKey)
+      ? templateKey
+      : templateKey;
+    const matchParams = [
+      input.scopeType,
+      input.scopeId,
+      baseKey,
+      fromName.toLowerCase(),
+    ] as const;
+
+    if (campaignId != null) {
+      const { rows } = await pool.query<DbRow>(
+        `SELECT * FROM email_templates
+         WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+           AND campaign_id = $5
+           AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+           AND lower(trim(default_from_name)) = $4
+         ORDER BY id DESC
+         LIMIT 1`,
+        [...matchParams, campaignId],
+      );
+      if (rows[0]) {
+        const r = mapRow(rows[0]);
+        return {
+          id: r.id,
+          subject: r.subject,
+          body: r.body,
+          name: r.name,
+          defaultSenderUserId: r.defaultSenderUserId,
+          defaultFromName: r.defaultFromName,
+          source: "database",
+          campaignId: r.campaignId,
+          baseTemplateKey: r.baseTemplateKey,
+        };
+      }
+    }
+
+    const { rows: orgRows } = await pool.query<DbRow>(
+      `SELECT * FROM email_templates
+       WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+         AND campaign_id IS NULL
+         AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+         AND lower(trim(default_from_name)) = $4
+       ORDER BY id DESC
+       LIMIT 1`,
+      [...matchParams],
+    );
+    if (orgRows[0]) {
+      const r = mapRow(orgRows[0]);
+      return {
+        id: r.id,
+        subject: r.subject,
+        body: r.body,
+        name: r.name,
+        defaultSenderUserId: r.defaultSenderUserId,
+        defaultFromName: r.defaultFromName,
+        source: "database",
+        campaignId: null,
+        baseTemplateKey: r.baseTemplateKey,
+      };
+    }
+
+    return systemFallback(input.scopeType, baseKey, campaignId);
+  }
 
   if (campaignId != null) {
-    const { rows } = await db.query<DbRow>(
+    const { rows } = await pool.query<DbRow>(
       `SELECT * FROM email_templates
        WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
          AND campaign_id = $4 AND is_active = TRUE
        LIMIT 1`,
-      [input.scopeType, input.scopeId, input.templateKey, campaignId],
+      [input.scopeType, input.scopeId, templateKey, campaignId],
     );
     if (rows[0]) {
       const r = mapRow(rows[0]);
@@ -411,16 +524,17 @@ export async function resolveEmailTemplate(input: {
         defaultFromName: r.defaultFromName,
         source: "database",
         campaignId: r.campaignId,
+        baseTemplateKey: r.baseTemplateKey,
       };
     }
   }
 
-  const { rows: defaults } = await db.query<DbRow>(
+  const { rows: defaults } = await pool.query<DbRow>(
     `SELECT * FROM email_templates
      WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
        AND campaign_id IS NULL AND is_active = TRUE
      LIMIT 1`,
-    [input.scopeType, input.scopeId, input.templateKey],
+    [input.scopeType, input.scopeId, templateKey],
   );
   if (defaults[0]) {
     const r = mapRow(defaults[0]);
@@ -433,26 +547,17 @@ export async function resolveEmailTemplate(input: {
       defaultFromName: r.defaultFromName,
       source: "database",
       campaignId: null,
+      baseTemplateKey: r.baseTemplateKey,
     };
   }
 
-  const sys = systemSubjectBody(input.scopeType, input.templateKey);
-  if (!sys) return null;
-  return {
-    id: null,
-    subject: sys.subject,
-    body: sys.body,
-    name: sys.name,
-    defaultSenderUserId: null,
-    defaultFromName: null,
-    source: "system",
-    campaignId,
-  };
+  return systemFallback(input.scopeType, templateKey, campaignId);
 }
 
 /**
- * When a nonprofit lifecycle email is about to send, prefer DB override if present.
- * Inputs: nonprofitId, campaignId, templateKey, rendered system email, business context.
+ * When a nonprofit lifecycle email is about to send, prefer DB person variant
+ * matching fromName; else system fallback copy.
+ * Inputs: nonprofitId, campaignId, templateKey, fromName, rendered system email, business context.
  * Outputs: subject/body (possibly overridden + placeholders applied).
  */
 export async function applyNonprofitTemplateOverride(input: {
@@ -462,25 +567,59 @@ export async function applyNonprofitTemplateOverride(input: {
   fallbackSubject: string;
   fallbackBody: string;
   context: BusinessEmailContext;
-}): Promise<{ subject: string; body: string; usedDatabase: boolean }> {
+  /** Campaign invite From name — selects which stored variant to use. */
+  fromName?: string | null;
+}): Promise<{
+  subject: string;
+  body: string;
+  usedDatabase: boolean;
+  defaultFromName: string | null;
+}> {
+  const fromName =
+    typeof input.fromName === "string" && input.fromName.trim()
+      ? input.fromName.trim()
+      : "";
   const resolved = await resolveEmailTemplate({
     scopeType: "nonprofit",
     scopeId: input.nonprofitId,
     templateKey: input.templateKey,
     campaignId: input.campaignId,
+    ...(fromName ? { fromName } : {}),
   });
-  if (!resolved || resolved.source !== "database") {
+  // With fromName: only database person variants count (system resolve = no match).
+  // Without fromName: keep exact-key DB override if present.
+  if (
+    !resolved ||
+    resolved.source !== "database" ||
+    (fromName && !resolved.defaultFromName)
+  ) {
     return {
       subject: input.fallbackSubject,
       body: input.fallbackBody,
       usedDatabase: false,
+      defaultFromName: null,
     };
+  }
+  if (fromName) {
+    // Ensure the row actually matched this From name (systemFallback has null).
+    const matched =
+      (resolved.defaultFromName || "").trim().toLowerCase() ===
+      fromName.toLowerCase();
+    if (!matched) {
+      return {
+        subject: input.fallbackSubject,
+        body: input.fallbackBody,
+        usedDatabase: false,
+        defaultFromName: null,
+      };
+    }
   }
   const placeholders = businessContextToPlaceholders(input.context);
   return {
     subject: applyTemplatePlaceholders(resolved.subject, placeholders),
     body: applyTemplatePlaceholders(resolved.body, placeholders),
     usedDatabase: true,
+    defaultFromName: resolved.defaultFromName,
   };
 }
 
@@ -489,11 +628,13 @@ export async function upsertEmailTemplate(input: {
   scopeId: number;
   campaignId?: number | null;
   templateKey: string;
+  /** System catalog key for person variants. Defaults from templateKey when catalog. */
+  baseTemplateKey?: string | null;
   name: string;
   subject: string;
   body: string;
   defaultSenderUserId?: number | null;
-  /** Custom From display name only (not email). */
+  /** Custom From display name only (not email). When set → person variant. */
   defaultFromName?: string | null;
   userId: number;
 }): Promise<EmailTemplateRecord> {
@@ -504,8 +645,8 @@ export async function upsertEmailTemplate(input: {
   if (!subject || !body) {
     throw new Error("subject and body are required");
   }
-  const templateKey = input.templateKey.trim().slice(0, 60);
-  if (!templateKey) throw new Error("templateKey is required");
+  const rawKey = input.templateKey.trim().slice(0, 60);
+  if (!rawKey) throw new Error("templateKey is required");
 
   const senderId =
     input.defaultSenderUserId != null && input.defaultSenderUserId > 0
@@ -516,7 +657,130 @@ export async function upsertEmailTemplate(input: {
       ? input.defaultFromName.trim().slice(0, 255)
       : null;
 
-  // Soft-deactivate prior active row for same uniqueness key, then insert.
+  const catalogBase = isCatalogKey(input.scopeType, rawKey)
+    ? rawKey
+    : typeof input.baseTemplateKey === "string" && input.baseTemplateKey.trim()
+      ? input.baseTemplateKey.trim().slice(0, 60)
+      : rawKey.includes("__")
+        ? rawKey.slice(0, rawKey.indexOf("__")).slice(0, 60)
+        : rawKey;
+
+  // Person variant: unique template_key, match at send by base + From name.
+  if (fromName) {
+    const baseKey =
+      typeof input.baseTemplateKey === "string" && input.baseTemplateKey.trim()
+        ? input.baseTemplateKey.trim().slice(0, 60)
+        : catalogBase;
+
+    const existingQuery =
+      campaignId == null
+        ? await pool.query<DbRow>(
+            `SELECT * FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+               AND campaign_id IS NULL
+               AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+               AND lower(trim(default_from_name)) = $4
+             ORDER BY id DESC
+             LIMIT 1`,
+            [input.scopeType, input.scopeId, baseKey, fromName.toLowerCase()],
+          )
+        : await pool.query<DbRow>(
+            `SELECT * FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+               AND campaign_id = $5
+               AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+               AND lower(trim(default_from_name)) = $4
+             ORDER BY id DESC
+             LIMIT 1`,
+            [
+              input.scopeType,
+              input.scopeId,
+              baseKey,
+              fromName.toLowerCase(),
+              campaignId,
+            ],
+          );
+
+    const existing = existingQuery.rows[0];
+    let templateKey = existing
+      ? String(existing.template_key)
+      : makeVariantTemplateKey(baseKey, fromName);
+
+    if (!existing) {
+      // Avoid unique-index clash if slug already used for another from-name.
+      const { rows: clash } = await pool.query<{ id: number }>(
+        campaignId == null
+          ? `SELECT id FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+               AND campaign_id IS NULL AND is_active = TRUE
+             LIMIT 1`
+          : `SELECT id FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+               AND campaign_id = $4 AND is_active = TRUE
+             LIMIT 1`,
+        campaignId == null
+          ? [input.scopeType, input.scopeId, templateKey]
+          : [input.scopeType, input.scopeId, templateKey, campaignId],
+      );
+      if (clash[0]) {
+        templateKey = `${makeVariantTemplateKey(baseKey, fromName)}_${Date.now()
+          .toString(36)
+          .slice(-4)}`.slice(0, 60);
+      }
+    }
+
+    if (campaignId == null) {
+      await pool.query(
+        `UPDATE email_templates
+         SET is_active = FALSE, updated_at = NOW(), updated_by_user_id = $4
+         WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+           AND campaign_id IS NULL AND is_active = TRUE`,
+        [input.scopeType, input.scopeId, templateKey, input.userId],
+      );
+    } else {
+      await pool.query(
+        `UPDATE email_templates
+         SET is_active = FALSE, updated_at = NOW(), updated_by_user_id = $5
+         WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+           AND campaign_id = $4 AND is_active = TRUE`,
+        [input.scopeType, input.scopeId, templateKey, campaignId, input.userId],
+      );
+    }
+
+    const displayName =
+      name.trim() && name.trim() !== rawKey
+        ? name.trim()
+        : `${fromName} — ${baseKey}`;
+
+    const { rows } = await pool.query<DbRow>(
+      `INSERT INTO email_templates (
+        scope_type, scope_id, campaign_id, template_key, base_template_key,
+        name, subject, body,
+        default_sender_user_id, default_from_name, is_active,
+        created_by_user_id, updated_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $11)
+      RETURNING *`,
+      [
+        input.scopeType,
+        input.scopeId,
+        campaignId,
+        templateKey,
+        baseKey,
+        displayName.slice(0, 255),
+        subject.slice(0, 500),
+        body,
+        senderId,
+        fromName,
+        input.userId,
+      ],
+    );
+    return { ...mapRow(rows[0]), canEdit: true };
+  }
+
+  // No From name: classic single override for this exact template_key.
+  const templateKey = rawKey;
+  const baseKey = catalogBase;
+
   if (campaignId == null) {
     await pool.query(
       `UPDATE email_templates
@@ -537,21 +801,22 @@ export async function upsertEmailTemplate(input: {
 
   const { rows } = await pool.query<DbRow>(
     `INSERT INTO email_templates (
-      scope_type, scope_id, campaign_id, template_key, name, subject, body,
+      scope_type, scope_id, campaign_id, template_key, base_template_key,
+      name, subject, body,
       default_sender_user_id, default_from_name, is_active,
       created_by_user_id, updated_by_user_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, TRUE, $10, $10)
     RETURNING *`,
     [
       input.scopeType,
       input.scopeId,
       campaignId,
       templateKey,
+      baseKey,
       name.slice(0, 255),
       subject.slice(0, 500),
       body,
       senderId,
-      fromName,
       input.userId,
     ],
   );

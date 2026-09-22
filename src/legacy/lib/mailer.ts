@@ -1,6 +1,7 @@
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import nodemailer from "nodemailer";
 import { pool } from "../db/pool";
+import { wrapForkUpEmailHtml } from "./forkup-email-layout";
 import { getPlatformSettings } from "./platform-settings";
 
 export type StakeholderRole =
@@ -431,20 +432,31 @@ async function sendViaSes(input: SendEmailInput): Promise<SendEmailResult> {
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
   const enriched = await enrichSenderFromCampaign(input);
+  // Branded HTML shell when caller did not supply html (templates stay plain text).
+  const withLayout: SendEmailInput = {
+    ...enriched,
+    html:
+      typeof enriched.html === "string" && enriched.html.trim()
+        ? enriched.html
+        : wrapForkUpEmailHtml({
+            subject: enriched.subject,
+            bodyText: enriched.body,
+          }),
+  };
 
-  if (await alreadySent(enriched)) {
+  if (await alreadySent(withLayout)) {
     return { status: "skipped", provider: "noop", messageId: null };
   }
 
   const provider = await resolveEmailProvider();
   if (provider === "noop") {
     const result: SendEmailResult = { status: "skipped", provider: "noop", messageId: null };
-    console.info(`[mailer] Provider=noop — skipping. type=${enriched.emailType} to=${enriched.to}`);
-    await recordEmailLog(enriched, result, null);
+    console.info(`[mailer] Provider=noop — skipping. type=${withLayout.emailType} to=${withLayout.to}`);
+    await recordEmailLog(withLayout, result, null);
     return result;
   }
-  if (provider === "smtp") return sendViaSmtp(enriched);
-  return sendViaSes(enriched);
+  if (provider === "smtp") return sendViaSmtp(withLayout);
+  return sendViaSes(withLayout);
 }
 
 /** Resolves the public frontend base URL used to build stakeholder links. */

@@ -4,9 +4,10 @@
  * Purpose: List organization members (NPO or business) and resolve From display
  * name + Reply-To for outbound mail. SMTP From address stays Super Admin
  * smtp_from; callers pass fromName/replyTo into sendEmail.
+ * Optional campaigns.invite_from_name overrides From display name (editable).
  *
- * Inputs: organization type/id, optional senderUserId, campaign id.
- * Outputs: member list; { fromName, replyTo }; campaign.invite_sender_user_id updates.
+ * Inputs: organization type/id, optional senderUserId, campaign id, inviteFromName.
+ * Outputs: member list; { fromName, replyTo }; campaign sender / from-name updates.
  */
 import type { PoolClient, QueryResultRow } from "pg";
 import { pool } from "../db/pool";
@@ -45,6 +46,16 @@ function parsePositiveInt(value: unknown): number | null {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.floor(n);
+}
+
+/**
+ * Parses optional body.inviteFromName (display name only, not email).
+ * Inputs: raw body field. Outputs: trimmed string ≤255 or null.
+ */
+export function parseInviteFromName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().slice(0, 255);
+  return trimmed || null;
 }
 
 /** Lists active organization_users joined to users for sender dropdowns. */
@@ -110,29 +121,49 @@ export async function resolveOrgMemberSender(
   };
 }
 
-/** Loads persisted campaign invite sender headers (nullable). */
+/**
+ * Loads persisted campaign From / Reply-To for lifecycle + deferred invites.
+ * From display name: invite_from_name (custom) → person name when sender set.
+ * Reply-To: selected sender email when invite_sender_user_id is set.
+ */
 export async function loadCampaignInviteSender(
   campaignId: number,
   client?: PoolClient,
 ): Promise<InviteSenderHeaders | null> {
   const db = client ?? pool;
-  const { rows } = await db.query<MemberRow & { invite_sender_user_id: number | null }>(
-    `SELECT c.invite_sender_user_id AS user_id, u.full_name, u.email, 'owner'::text AS role
+  const { rows } = await db.query<
+    QueryResultRow & {
+      invite_sender_user_id: number | null;
+      invite_from_name: string | null;
+      full_name: string | null;
+      email: string | null;
+    }
+  >(
+    `SELECT c.invite_sender_user_id, c.invite_from_name, u.full_name, u.email
      FROM campaigns c
-     JOIN users u ON u.id = c.invite_sender_user_id
+     LEFT JOIN users u ON u.id = c.invite_sender_user_id
      WHERE c.id = $1
-       AND c.invite_sender_user_id IS NOT NULL
      LIMIT 1`,
     [campaignId],
   );
   const row = rows[0];
   if (!row) return null;
-  const email = String(row.email).trim();
-  if (!email.includes("@")) return null;
+
+  const customFrom =
+    typeof row.invite_from_name === "string" ? row.invite_from_name.trim() : "";
+  const email = typeof row.email === "string" ? row.email.trim() : "";
+  const personFrom =
+    row.invite_sender_user_id != null
+      ? displayNameFromRow({ full_name: row.full_name, email: email || "" })
+      : "";
+  const fromName = customFrom || personFrom;
+  if (!fromName && !email.includes("@")) return null;
+
   return {
-    userId: Number(row.user_id),
-    fromName: displayNameFromRow(row),
-    replyTo: email,
+    userId:
+      row.invite_sender_user_id != null ? Number(row.invite_sender_user_id) : 0,
+    fromName: fromName || "ForkUp organizer",
+    replyTo: email.includes("@") ? email : "",
   };
 }
 
@@ -148,6 +179,25 @@ export async function setCampaignInviteSenderUserId(
      SET invite_sender_user_id = $1, updated_at = NOW()
      WHERE id = $2`,
     [senderUserId, campaignId],
+  );
+}
+
+/** Persists campaigns.invite_from_name (nullable display name only). */
+export async function setCampaignInviteFromName(
+  campaignId: number,
+  fromName: string | null,
+  client?: PoolClient,
+): Promise<void> {
+  const db = client ?? pool;
+  const value =
+    typeof fromName === "string" && fromName.trim()
+      ? fromName.trim().slice(0, 255)
+      : null;
+  await db.query(
+    `UPDATE campaigns
+     SET invite_from_name = $1, updated_at = NOW()
+     WHERE id = $2`,
+    [value, campaignId],
   );
 }
 

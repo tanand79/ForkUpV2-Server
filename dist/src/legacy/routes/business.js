@@ -14,6 +14,7 @@ const business_invite_timing_1 = require("../lib/business-invite-timing");
 const business_invitation_record_1 = require("../lib/business-invitation-record");
 const pool_1 = require("../db/pool");
 const invite_sender_1 = require("../lib/invite-sender");
+const email_templates_1 = require("../lib/email-templates");
 exports.businessRouter = (0, express_1.Router)();
 function formatDate(value) {
     return (0, date_only_1.toDateOnlyString)(value);
@@ -716,6 +717,7 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
             return;
         }
         const business = bizRows[0];
+        const customFromName = (0, invite_sender_1.parseInviteFromName)(body.inviteFromName);
         const senderId = (0, invite_sender_1.parseSenderUserId)(body.inviteSenderUserId);
         let senderHeaders = null;
         if (senderId != null) {
@@ -727,9 +729,12 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
                 return;
             }
             senderHeaders = {
-                fromName: resolved.fromName,
+                fromName: customFromName || resolved.fromName,
                 replyTo: resolved.replyTo,
             };
+        }
+        else if (customFromName) {
+            senderHeaders = { fromName: customFromName, replyTo: "" };
         }
         const { rows: locRows } = await connection.query("SELECT * FROM business_locations WHERE id = $1 AND business_id = $2", [locationId, businessId]);
         if (locRows.length === 0) {
@@ -763,6 +768,9 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
         if (senderId != null) {
             await (0, invite_sender_1.setCampaignInviteSenderUserId)(campaignId, senderId, connection);
         }
+        if (customFromName) {
+            await (0, invite_sender_1.setCampaignInviteFromName)(campaignId, customFromName, connection);
+        }
         const { rows: methodResult } = await connection.query(`INSERT INTO campaign_methods (
         campaign_id, method_type, method_name, method_start_date, method_end_date,
         method_status, requires_business_acceptance
@@ -793,24 +801,81 @@ exports.businessRouter.post("/nonprofit-invites", async (req, res) => {
         const nonprofitEmail = typeof nonprofit.contact_email === "string" ? nonprofit.contact_email.trim() : "";
         if (nonprofitEmail) {
             const acceptUrl = `${(0, mailer_1.resolveFrontendBaseUrl)()}${acceptPath}`;
+            const nonprofitName = String(nonprofit.organization_name ?? "").trim();
+            const businessName = String(business.business_name ?? "").trim();
+            const fallbackSubject = `${businessName} invited ${nonprofitName} to a ForkUp campaign`;
+            const fallbackBody = `Hi ${nonprofitName},\n\n` +
+                `${businessName} would like to run a ${methodLabel} campaign with you on ForkUp` +
+                `${giveback ? ` (giveback: ${giveback}%)` : ""}.\n\n` +
+                (body.message?.trim()
+                    ? `Message from ${businessName}:\n${body.message.trim()}\n\n`
+                    : "") +
+                `Review and respond to the invitation here:\n${acceptUrl}\n\n` +
+                `— ForkUp`;
+            let subject = fallbackSubject;
+            let text = fallbackBody;
+            let templateFromName = null;
+            try {
+                const inviteFrom = (senderHeaders?.fromName && senderHeaders.fromName.trim()) ||
+                    customFromName ||
+                    "";
+                const resolved = await (0, email_templates_1.resolveEmailTemplate)({
+                    scopeType: "business",
+                    scopeId: businessId,
+                    templateKey: "nonprofit_campaign_invitation",
+                    campaignId,
+                    ...(inviteFrom ? { fromName: inviteFrom } : {}),
+                });
+                if (resolved) {
+                    const placeholders = {
+                        businessName,
+                        businessContactName: typeof business.contact_name === "string" && business.contact_name.trim()
+                            ? business.contact_name.trim()
+                            : businessName,
+                        nonprofitName,
+                        campaignTitle: campaignName,
+                        campaignPurpose: giveback ? `Giveback: ${giveback}%` : "",
+                        participationLabel: methodLabel,
+                        dateRangeLabel: `${startDate} – ${endDate}`,
+                        respondByDate: "",
+                        startOrEventDate: startDate,
+                        reviewUrl: acceptUrl,
+                        dashboardUrl: acceptUrl,
+                        materialsUrl: acceptUrl,
+                        settlementReportUrl: "",
+                        eligibleSales: "",
+                        donationAmount: "",
+                        forkupFee: "",
+                        achAmount: "",
+                    };
+                    subject = (0, email_templates_1.applyTemplatePlaceholders)(resolved.subject, placeholders);
+                    text = (0, email_templates_1.applyTemplatePlaceholders)(resolved.body, placeholders);
+                    if (body.message?.trim()) {
+                        text += `\n\nMessage from ${businessName}:\n${body.message.trim()}\n`;
+                    }
+                    templateFromName = resolved.defaultFromName;
+                }
+            }
+            catch (templateErr) {
+                console.error("[business/nonprofit-invites] template resolve failed; using fallback copy:", templateErr);
+            }
+            const fromName = (senderHeaders?.fromName && senderHeaders.fromName.trim()) ||
+                templateFromName ||
+                null;
             await (0, mailer_1.sendEmail)({
                 to: nonprofitEmail,
                 name: typeof nonprofit.contact_name === "string" ? nonprofit.contact_name : null,
-                subject: `${business.business_name} invited ${nonprofit.organization_name} to a ForkUp campaign`,
-                body: `Hi ${nonprofit.organization_name},\n\n` +
-                    `${business.business_name} would like to run a ${methodLabel} campaign with you on ForkUp` +
-                    `${giveback ? ` (giveback: ${giveback}%)` : ""}.\n\n` +
-                    (body.message?.trim() ? `Message from ${business.business_name}:\n${body.message.trim()}\n\n` : "") +
-                    `Review and respond to the invitation here:\n${acceptUrl}\n\n` +
-                    `— ForkUp`,
+                subject,
+                body: text,
                 emailType: "nonprofit_campaign_invitation",
                 campaignId,
                 businessId,
                 senderParty: "business",
                 stakeholderRole: "nonprofit",
                 relatedToken: token,
-                ...(senderHeaders
-                    ? { fromName: senderHeaders.fromName, replyTo: senderHeaders.replyTo }
+                ...(fromName ? { fromName } : {}),
+                ...(senderHeaders?.replyTo?.includes("@")
+                    ? { replyTo: senderHeaders.replyTo }
                     : {}),
             });
         }

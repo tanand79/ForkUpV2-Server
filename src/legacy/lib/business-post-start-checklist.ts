@@ -93,13 +93,6 @@ export function buildBusinessPostStartChecklist(
       when: "later",
       hint: "Respond to nonprofit invitations when you are ready.",
     },
-    {
-      id: "success_engine",
-      label: "Success Engine & deeper setup",
-      status: "optional",
-      when: "later",
-      hint: "Messaging, reminders, and full dashboard tools after you start.",
-    },
   ];
 
   return { joinDoorType: input.joinDoorType, required, later };

@@ -251,11 +251,16 @@ emailTemplatesRouter.post("/send", async (req, res) => {
         : null;
 
     if (body.saveAsTemplate) {
+      const saveBaseKey =
+        typeof (body as { baseTemplateKey?: string }).baseTemplateKey === "string"
+          ? (body as { baseTemplateKey?: string }).baseTemplateKey!.trim().slice(0, 60)
+          : null;
       await upsertEmailTemplate({
         scopeType,
         scopeId,
         campaignId,
         templateKey: templateKey || "custom",
+        baseTemplateKey: saveBaseKey,
         name: typeof body.name === "string" ? body.name : templateKey || "Custom",
         subject,
         body: text,
@@ -359,6 +364,8 @@ emailTemplatesRouter.post("/", async (req, res) => {
       scopeId?: number;
       campaignId?: number | null;
       templateKey?: string;
+      /** System catalog key when saving a person variant. */
+      baseTemplateKey?: string | null;
       name?: string;
       subject?: string;
       body?: string;
@@ -400,12 +407,17 @@ emailTemplatesRouter.post("/", async (req, res) => {
       typeof body.defaultFromName === "string" && body.defaultFromName.trim()
         ? body.defaultFromName.trim().slice(0, 255)
         : null;
+    const baseTemplateKey =
+      typeof body.baseTemplateKey === "string" && body.baseTemplateKey.trim()
+        ? body.baseTemplateKey.trim().slice(0, 60)
+        : null;
 
     const template = await upsertEmailTemplate({
       scopeType,
       scopeId,
       campaignId,
       templateKey,
+      baseTemplateKey,
       name: typeof body.name === "string" ? body.name : templateKey,
       subject: typeof body.subject === "string" ? body.subject : "",
       body: typeof body.body === "string" ? body.body : "",

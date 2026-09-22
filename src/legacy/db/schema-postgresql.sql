@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- Additive: org member chosen as email From display name / Reply-To (smtp_from unchanged).
   -- FK added in migrate-invite-sender-user.ts (users table is created later in this file).
   invite_sender_user_id INTEGER,
+  -- Additive: editable From display name for invite/lifecycle emails (smtp_from unchanged).
+  invite_from_name VARCHAR(255),
   -- Settlement engine (ported from ForkUpSettlementEngine): grace + close + freeze
   settlement_grace_days INTEGER NOT NULL DEFAULT 7,
   settlement_closed_at TIMESTAMP,
@@ -988,6 +990,8 @@ CREATE TABLE IF NOT EXISTS email_templates (
   default_sender_user_id INTEGER NULL,
   -- Additive: custom From display name (email address unchanged; Reply-To from sender user).
   default_from_name VARCHAR(255) NULL,
+  -- Additive: system catalog key for multi-person variants (match send by default_from_name).
+  base_template_key VARCHAR(60) NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_by_user_id INTEGER NULL,
   updated_by_user_id INTEGER NULL,
@@ -1017,4 +1021,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_email_templates_scope_default
 CREATE UNIQUE INDEX IF NOT EXISTS uq_email_templates_scope_campaign
   ON email_templates (scope_type, scope_id, campaign_id, template_key)
   WHERE campaign_id IS NOT NULL AND is_active = TRUE;
+
+CREATE INDEX IF NOT EXISTS idx_email_templates_base_from
+  ON email_templates (
+    scope_type,
+    scope_id,
+    base_template_key,
+    lower(default_from_name)
+  )
+  WHERE is_active = TRUE AND default_from_name IS NOT NULL;
 

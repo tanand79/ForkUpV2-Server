@@ -74,12 +74,14 @@ function parsePositiveInt(value) {
 }
 function mapRow(row) {
     const fromName = typeof row.default_from_name === "string" ? row.default_from_name.trim() : "";
+    const baseKey = typeof row.base_template_key === "string" ? row.base_template_key.trim() : "";
     return {
         id: Number(row.id),
         scopeType: row.scope_type,
         scopeId: Number(row.scope_id),
         campaignId: row.campaign_id != null ? Number(row.campaign_id) : null,
         templateKey: String(row.template_key),
+        baseTemplateKey: baseKey || String(row.template_key),
         name: String(row.name),
         subject: String(row.subject),
         body: String(row.body),
@@ -89,6 +91,21 @@ function mapRow(row) {
         source: "database",
         canEdit: true,
     };
+}
+function isCatalogKey(scopeType, templateKey) {
+    return systemKeysForScope(scopeType).some((c) => c.key === templateKey);
+}
+function slugifyFromName(name) {
+    const slug = name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 32);
+    return slug || "user";
+}
+function makeVariantTemplateKey(baseKey, fromName) {
+    return `${baseKey}__${slugifyFromName(fromName)}`.slice(0, 60);
 }
 function applyTemplatePlaceholders(template, context) {
     return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
@@ -209,27 +226,8 @@ async function loadDbTemplates(scopeType, scopeId, campaignId, client) {
 async function listEmailTemplates(input) {
     const campaignId = input.campaignId ?? null;
     const rows = await loadDbTemplates(input.scopeType, input.scopeId, campaignId);
-    const byKey = new Map();
-    for (const row of rows) {
-        const key = String(row.template_key);
-        const existing = byKey.get(key);
-        if (!existing) {
-            byKey.set(key, row);
-            continue;
-        }
-        if (existing.campaign_id == null && row.campaign_id != null) {
-            byKey.set(key, row);
-        }
-    }
     const out = [];
-    const seen = new Set();
     for (const meta of systemKeysForScope(input.scopeType)) {
-        seen.add(meta.key);
-        const dbRow = byKey.get(meta.key);
-        if (dbRow) {
-            out.push({ ...mapRow(dbRow), canEdit: input.canEdit });
-            continue;
-        }
         const sys = systemSubjectBody(input.scopeType, meta.key);
         if (!sys)
             continue;
@@ -239,6 +237,7 @@ async function listEmailTemplates(input) {
             scopeId: input.scopeId,
             campaignId,
             templateKey: meta.key,
+            baseTemplateKey: meta.key,
             name: sys.name,
             subject: sys.subject,
             body: sys.body,
@@ -249,53 +248,13 @@ async function listEmailTemplates(input) {
             canEdit: input.canEdit,
         });
     }
-    for (const [key, row] of byKey) {
-        if (seen.has(key))
-            continue;
+    for (const row of rows) {
         out.push({ ...mapRow(row), canEdit: input.canEdit });
     }
     return out;
 }
-async function resolveEmailTemplate(input) {
-    const campaignId = input.campaignId ?? null;
-    const db = pool_1.pool;
-    if (campaignId != null) {
-        const { rows } = await db.query(`SELECT * FROM email_templates
-       WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
-         AND campaign_id = $4 AND is_active = TRUE
-       LIMIT 1`, [input.scopeType, input.scopeId, input.templateKey, campaignId]);
-        if (rows[0]) {
-            const r = mapRow(rows[0]);
-            return {
-                id: r.id,
-                subject: r.subject,
-                body: r.body,
-                name: r.name,
-                defaultSenderUserId: r.defaultSenderUserId,
-                defaultFromName: r.defaultFromName,
-                source: "database",
-                campaignId: r.campaignId,
-            };
-        }
-    }
-    const { rows: defaults } = await db.query(`SELECT * FROM email_templates
-     WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
-       AND campaign_id IS NULL AND is_active = TRUE
-     LIMIT 1`, [input.scopeType, input.scopeId, input.templateKey]);
-    if (defaults[0]) {
-        const r = mapRow(defaults[0]);
-        return {
-            id: r.id,
-            subject: r.subject,
-            body: r.body,
-            name: r.name,
-            defaultSenderUserId: r.defaultSenderUserId,
-            defaultFromName: r.defaultFromName,
-            source: "database",
-            campaignId: null,
-        };
-    }
-    const sys = systemSubjectBody(input.scopeType, input.templateKey);
+function systemFallback(scopeType, templateKey, campaignId) {
+    const sys = systemSubjectBody(scopeType, templateKey);
     if (!sys)
         return null;
     return {
@@ -307,27 +266,152 @@ async function resolveEmailTemplate(input) {
         defaultFromName: null,
         source: "system",
         campaignId,
+        baseTemplateKey: templateKey,
     };
 }
+async function resolveEmailTemplate(input) {
+    const campaignId = input.campaignId ?? null;
+    const templateKey = input.templateKey.trim();
+    if (!templateKey)
+        return null;
+    const fromName = typeof input.fromName === "string" && input.fromName.trim()
+        ? input.fromName.trim()
+        : "";
+    if (fromName) {
+        const baseKey = isCatalogKey(input.scopeType, templateKey)
+            ? templateKey
+            : templateKey;
+        const matchParams = [
+            input.scopeType,
+            input.scopeId,
+            baseKey,
+            fromName.toLowerCase(),
+        ];
+        if (campaignId != null) {
+            const { rows } = await pool_1.pool.query(`SELECT * FROM email_templates
+         WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+           AND campaign_id = $5
+           AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+           AND lower(trim(default_from_name)) = $4
+         ORDER BY id DESC
+         LIMIT 1`, [...matchParams, campaignId]);
+            if (rows[0]) {
+                const r = mapRow(rows[0]);
+                return {
+                    id: r.id,
+                    subject: r.subject,
+                    body: r.body,
+                    name: r.name,
+                    defaultSenderUserId: r.defaultSenderUserId,
+                    defaultFromName: r.defaultFromName,
+                    source: "database",
+                    campaignId: r.campaignId,
+                    baseTemplateKey: r.baseTemplateKey,
+                };
+            }
+        }
+        const { rows: orgRows } = await pool_1.pool.query(`SELECT * FROM email_templates
+       WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+         AND campaign_id IS NULL
+         AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+         AND lower(trim(default_from_name)) = $4
+       ORDER BY id DESC
+       LIMIT 1`, [...matchParams]);
+        if (orgRows[0]) {
+            const r = mapRow(orgRows[0]);
+            return {
+                id: r.id,
+                subject: r.subject,
+                body: r.body,
+                name: r.name,
+                defaultSenderUserId: r.defaultSenderUserId,
+                defaultFromName: r.defaultFromName,
+                source: "database",
+                campaignId: null,
+                baseTemplateKey: r.baseTemplateKey,
+            };
+        }
+        return systemFallback(input.scopeType, baseKey, campaignId);
+    }
+    if (campaignId != null) {
+        const { rows } = await pool_1.pool.query(`SELECT * FROM email_templates
+       WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+         AND campaign_id = $4 AND is_active = TRUE
+       LIMIT 1`, [input.scopeType, input.scopeId, templateKey, campaignId]);
+        if (rows[0]) {
+            const r = mapRow(rows[0]);
+            return {
+                id: r.id,
+                subject: r.subject,
+                body: r.body,
+                name: r.name,
+                defaultSenderUserId: r.defaultSenderUserId,
+                defaultFromName: r.defaultFromName,
+                source: "database",
+                campaignId: r.campaignId,
+                baseTemplateKey: r.baseTemplateKey,
+            };
+        }
+    }
+    const { rows: defaults } = await pool_1.pool.query(`SELECT * FROM email_templates
+     WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+       AND campaign_id IS NULL AND is_active = TRUE
+     LIMIT 1`, [input.scopeType, input.scopeId, templateKey]);
+    if (defaults[0]) {
+        const r = mapRow(defaults[0]);
+        return {
+            id: r.id,
+            subject: r.subject,
+            body: r.body,
+            name: r.name,
+            defaultSenderUserId: r.defaultSenderUserId,
+            defaultFromName: r.defaultFromName,
+            source: "database",
+            campaignId: null,
+            baseTemplateKey: r.baseTemplateKey,
+        };
+    }
+    return systemFallback(input.scopeType, templateKey, campaignId);
+}
 async function applyNonprofitTemplateOverride(input) {
+    const fromName = typeof input.fromName === "string" && input.fromName.trim()
+        ? input.fromName.trim()
+        : "";
     const resolved = await resolveEmailTemplate({
         scopeType: "nonprofit",
         scopeId: input.nonprofitId,
         templateKey: input.templateKey,
         campaignId: input.campaignId,
+        ...(fromName ? { fromName } : {}),
     });
-    if (!resolved || resolved.source !== "database") {
+    if (!resolved ||
+        resolved.source !== "database" ||
+        (fromName && !resolved.defaultFromName)) {
         return {
             subject: input.fallbackSubject,
             body: input.fallbackBody,
             usedDatabase: false,
+            defaultFromName: null,
         };
+    }
+    if (fromName) {
+        const matched = (resolved.defaultFromName || "").trim().toLowerCase() ===
+            fromName.toLowerCase();
+        if (!matched) {
+            return {
+                subject: input.fallbackSubject,
+                body: input.fallbackBody,
+                usedDatabase: false,
+                defaultFromName: null,
+            };
+        }
     }
     const placeholders = businessContextToPlaceholders(input.context);
     return {
         subject: applyTemplatePlaceholders(resolved.subject, placeholders),
         body: applyTemplatePlaceholders(resolved.body, placeholders),
         usedDatabase: true,
+        defaultFromName: resolved.defaultFromName,
     };
 }
 async function upsertEmailTemplate(input) {
@@ -338,8 +422,8 @@ async function upsertEmailTemplate(input) {
     if (!subject || !body) {
         throw new Error("subject and body are required");
     }
-    const templateKey = input.templateKey.trim().slice(0, 60);
-    if (!templateKey)
+    const rawKey = input.templateKey.trim().slice(0, 60);
+    if (!rawKey)
         throw new Error("templateKey is required");
     const senderId = input.defaultSenderUserId != null && input.defaultSenderUserId > 0
         ? input.defaultSenderUserId
@@ -347,6 +431,98 @@ async function upsertEmailTemplate(input) {
     const fromName = typeof input.defaultFromName === "string" && input.defaultFromName.trim()
         ? input.defaultFromName.trim().slice(0, 255)
         : null;
+    const catalogBase = isCatalogKey(input.scopeType, rawKey)
+        ? rawKey
+        : typeof input.baseTemplateKey === "string" && input.baseTemplateKey.trim()
+            ? input.baseTemplateKey.trim().slice(0, 60)
+            : rawKey.includes("__")
+                ? rawKey.slice(0, rawKey.indexOf("__")).slice(0, 60)
+                : rawKey;
+    if (fromName) {
+        const baseKey = typeof input.baseTemplateKey === "string" && input.baseTemplateKey.trim()
+            ? input.baseTemplateKey.trim().slice(0, 60)
+            : catalogBase;
+        const existingQuery = campaignId == null
+            ? await pool_1.pool.query(`SELECT * FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+               AND campaign_id IS NULL
+               AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+               AND lower(trim(default_from_name)) = $4
+             ORDER BY id DESC
+             LIMIT 1`, [input.scopeType, input.scopeId, baseKey, fromName.toLowerCase()])
+            : await pool_1.pool.query(`SELECT * FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND is_active = TRUE
+               AND campaign_id = $5
+               AND COALESCE(NULLIF(trim(base_template_key), ''), template_key) = $3
+               AND lower(trim(default_from_name)) = $4
+             ORDER BY id DESC
+             LIMIT 1`, [
+                input.scopeType,
+                input.scopeId,
+                baseKey,
+                fromName.toLowerCase(),
+                campaignId,
+            ]);
+        const existing = existingQuery.rows[0];
+        let templateKey = existing
+            ? String(existing.template_key)
+            : makeVariantTemplateKey(baseKey, fromName);
+        if (!existing) {
+            const { rows: clash } = await pool_1.pool.query(campaignId == null
+                ? `SELECT id FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+               AND campaign_id IS NULL AND is_active = TRUE
+             LIMIT 1`
+                : `SELECT id FROM email_templates
+             WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+               AND campaign_id = $4 AND is_active = TRUE
+             LIMIT 1`, campaignId == null
+                ? [input.scopeType, input.scopeId, templateKey]
+                : [input.scopeType, input.scopeId, templateKey, campaignId]);
+            if (clash[0]) {
+                templateKey = `${makeVariantTemplateKey(baseKey, fromName)}_${Date.now()
+                    .toString(36)
+                    .slice(-4)}`.slice(0, 60);
+            }
+        }
+        if (campaignId == null) {
+            await pool_1.pool.query(`UPDATE email_templates
+         SET is_active = FALSE, updated_at = NOW(), updated_by_user_id = $4
+         WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+           AND campaign_id IS NULL AND is_active = TRUE`, [input.scopeType, input.scopeId, templateKey, input.userId]);
+        }
+        else {
+            await pool_1.pool.query(`UPDATE email_templates
+         SET is_active = FALSE, updated_at = NOW(), updated_by_user_id = $5
+         WHERE scope_type = $1 AND scope_id = $2 AND template_key = $3
+           AND campaign_id = $4 AND is_active = TRUE`, [input.scopeType, input.scopeId, templateKey, campaignId, input.userId]);
+        }
+        const displayName = name.trim() && name.trim() !== rawKey
+            ? name.trim()
+            : `${fromName} — ${baseKey}`;
+        const { rows } = await pool_1.pool.query(`INSERT INTO email_templates (
+        scope_type, scope_id, campaign_id, template_key, base_template_key,
+        name, subject, body,
+        default_sender_user_id, default_from_name, is_active,
+        created_by_user_id, updated_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $11)
+      RETURNING *`, [
+            input.scopeType,
+            input.scopeId,
+            campaignId,
+            templateKey,
+            baseKey,
+            displayName.slice(0, 255),
+            subject.slice(0, 500),
+            body,
+            senderId,
+            fromName,
+            input.userId,
+        ]);
+        return { ...mapRow(rows[0]), canEdit: true };
+    }
+    const templateKey = rawKey;
+    const baseKey = catalogBase;
     if (campaignId == null) {
         await pool_1.pool.query(`UPDATE email_templates
        SET is_active = FALSE, updated_at = NOW(), updated_by_user_id = $4
@@ -360,20 +536,21 @@ async function upsertEmailTemplate(input) {
          AND campaign_id = $4 AND is_active = TRUE`, [input.scopeType, input.scopeId, templateKey, campaignId, input.userId]);
     }
     const { rows } = await pool_1.pool.query(`INSERT INTO email_templates (
-      scope_type, scope_id, campaign_id, template_key, name, subject, body,
+      scope_type, scope_id, campaign_id, template_key, base_template_key,
+      name, subject, body,
       default_sender_user_id, default_from_name, is_active,
       created_by_user_id, updated_by_user_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, TRUE, $10, $10)
     RETURNING *`, [
         input.scopeType,
         input.scopeId,
         campaignId,
         templateKey,
+        baseKey,
         name.slice(0, 255),
         subject.slice(0, 500),
         body,
         senderId,
-        fromName,
         input.userId,
     ]);
     return { ...mapRow(rows[0]), canEdit: true };
