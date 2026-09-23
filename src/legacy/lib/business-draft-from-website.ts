@@ -6,19 +6,25 @@
  *
  * Changelog (D1): Prefer scraped Hours/Location page text + US address parse
  * over AI-only city/state guesses; strip "Not provided" placeholders.
+ * Changelog: Attach a booking-platform URL scraped from the same pages
+ * (Resy, OpenTable, Tock, and other hosts the site links to).
  */
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
-import { suggestSocialImages } from "./suggest-social-images";
+import { looksLikeDecorativeAssetUrl, suggestSocialImages } from "./suggest-social-images";
+import { scrapeBusinessVenueImages } from "./business-venue-images";
 import {
   isEmptyLocationValue,
   scrapeBusinessLocationHints,
 } from "./business-website-location";
+import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extract";
 
 export type BusinessLocationDraft = {
   locationName: string;
   city: string;
   state: string;
   address?: string;
+  /** Booking page linked from the business site, when one was found. */
+  reservationUrl?: string;
 };
 
 export type BusinessDraftFromWebsite = {
@@ -31,7 +37,14 @@ export type BusinessDraftFromWebsite = {
   city: string;
   state: string;
   locations: BusinessLocationDraft[];
+  /** Primary booking link for the business, when the site links one. */
+  reservationUrl: string | null;
+  bookingPlatform: string | null;
   imageUrls: string[];
+  /** Weekday labels taken from the public site. Null when the page listed none. */
+  discountHours: VenuePageCopy["discountHours"] | null;
+  /** Time range from the site, when one was stated. */
+  eligibleWindow: string;
   supportsDineAndDonate: boolean;
   supportsShopAndDonate: boolean;
   supportsServiceGiveback: boolean;
@@ -45,6 +58,14 @@ function normalizeWebsiteInput(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+function withReservation<T extends BusinessLocationDraft>(
+  loc: T,
+  reservationUrl: string | null,
+): T {
+  if (!reservationUrl) return loc;
+  return { ...loc, reservationUrl };
 }
 
 function suggestNameFromHost(website: string): string {
@@ -69,35 +90,64 @@ export async function generateBusinessDraftFromWebsite(
     throw new Error("A valid website URL is required.");
   }
 
-  const imageSuggestions = await suggestSocialImages({ websiteUrl: website, limit: 6 });
-  const imageUrls = imageSuggestions.map((img) => img.url).filter(Boolean);
+  const locationHints = await scrapeBusinessLocationHints(website);
+  const [imageSuggestions, venuePhotos] = await Promise.all([
+    suggestSocialImages({ websiteUrl: website, limit: 10 }),
+    scrapeBusinessVenueImages({
+      websiteUrl: website,
+      reservationUrl: locationHints.reservationUrl,
+      limit: 14,
+    }),
+  ]);
+  const imageUrls = [
+    ...new Set([
+      ...venuePhotos,
+      ...imageSuggestions.map((img) => img.url).filter(Boolean),
+    ]),
+  ].filter((u) => u && !looksLikeDecorativeAssetUrl(u));
 
   const fallbackName = suggestNameFromHost(website);
-  const locationHints = await scrapeBusinessLocationHints(website);
 
   if (aiProviderName() === "none") {
     const city = locationHints.city;
     const state = locationHints.state;
+    const pageCopy =
+      locationHints.pageText || locationHints.aboutHint || locationHints.hoursText
+        ? await extractVenueCopyFromPage(
+            locationHints.pageText || locationHints.hoursText || locationHints.aboutHint,
+            {
+              aboutHint: locationHints.aboutHint,
+              hoursText: locationHints.hoursText,
+            },
+          )
+        : null;
     return {
       website,
       businessName: fallbackName,
       businessType: "Restaurant",
-      about: "",
+      about: pageCopy?.about || locationHints.aboutHint || "",
       contactEmail: "",
       phone: "",
       city,
       state,
       locations: fallbackName
         ? [
-            {
-              locationName: "Main Location",
-              city,
-              state,
-              ...(locationHints.address ? { address: locationHints.address } : {}),
-            },
+            withReservation(
+              {
+                locationName: "Main Location",
+                city,
+                state,
+                ...(locationHints.address ? { address: locationHints.address } : {}),
+              },
+              locationHints.reservationUrl,
+            ),
           ]
         : [],
+      reservationUrl: locationHints.reservationUrl,
+      bookingPlatform: locationHints.bookingPlatform,
       imageUrls,
+      discountHours: pageCopy?.discountHours ?? null,
+      eligibleWindow: pageCopy?.eligibleWindow ?? "",
       supportsDineAndDonate: true,
       supportsShopAndDonate: false,
       supportsServiceGiveback: false,
@@ -127,6 +177,17 @@ export async function generateBusinessDraftFromWebsite(
   const pageBlock = locationHints.pageText
     ? `\n\nPAGE TEXT (may include Hours & Location / Contact):\n${locationHints.pageText}`
     : "\n\nPAGE TEXT: (unavailable)";
+
+  const pageCopyPromise =
+    locationHints.pageText || locationHints.aboutHint || locationHints.hoursText
+      ? extractVenueCopyFromPage(
+          locationHints.pageText || locationHints.hoursText || locationHints.aboutHint,
+          {
+            aboutHint: locationHints.aboutHint,
+            hoursText: locationHints.hoursText,
+          },
+        )
+      : Promise.resolve(null);
 
   const content = await aiChat({
     system,
@@ -181,12 +242,17 @@ export async function generateBusinessDraftFromWebsite(
   if (!state && locationHints.state) state = locationHints.state;
 
   if (locations.length === 0) {
-    locations.push({
-      locationName: "Main Location",
-      city,
-      state,
-      ...(locationHints.address ? { address: locationHints.address } : {}),
-    });
+    locations.push(
+      withReservation(
+        {
+          locationName: "Main Location",
+          city,
+          state,
+          ...(locationHints.address ? { address: locationHints.address } : {}),
+        },
+        locationHints.reservationUrl,
+      ),
+    );
   } else {
     const primary = locations[0];
     if (isEmptyLocationValue(primary.city) && city) primary.city = city;
@@ -194,7 +260,14 @@ export async function generateBusinessDraftFromWebsite(
     if (isEmptyLocationValue(primary.address) && locationHints.address) {
       primary.address = locationHints.address;
     }
+    if (!primary.reservationUrl && locationHints.reservationUrl) {
+      primary.reservationUrl = locationHints.reservationUrl;
+    }
   }
+
+  const pageCopy = await pageCopyPromise;
+  const aboutFromPage =
+    pageCopy?.about?.trim() || locationHints.aboutHint?.trim() || "";
 
   const missingFields: string[] = [];
   if (!businessName) missingFields.push("Business name");
@@ -205,12 +278,16 @@ export async function generateBusinessDraftFromWebsite(
     website,
     businessName,
     businessType: str("businessType") || "Restaurant",
-    about: str("about"),
+    about: aboutFromPage || str("about"),
+    discountHours: pageCopy?.discountHours ?? null,
+    eligibleWindow: pageCopy?.eligibleWindow ?? "",
     contactEmail: str("contactEmail"),
     phone: str("phone"),
     city,
     state,
     locations,
+    reservationUrl: locationHints.reservationUrl,
+    bookingPlatform: locationHints.bookingPlatform,
     imageUrls,
     supportsDineAndDonate: bool("supportsDineAndDonate", true),
     supportsShopAndDonate: bool("supportsShopAndDonate", false),

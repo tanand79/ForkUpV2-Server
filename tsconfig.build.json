@@ -68,6 +68,8 @@
     "src/legacy/db/run-campaign-partner-join-requests-production.ts",
     "src/legacy/db/run-stripe-donations-production.ts",
     "src/legacy/db/backfill-geo-coordinates.ts",
+    "src/legacy/db/backfill-known-booking-urls.ts",
+    "src/legacy/db/run-backfill-known-booking-urls-production.ts",
     "src/legacy/db/list-tables.ts",
     "src/legacy/db/push-rds-schema.ts",
     "src/legacy/db/run-production.ts",

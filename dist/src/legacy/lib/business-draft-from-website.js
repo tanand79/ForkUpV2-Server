@@ -3,12 +3,19 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateBusinessDraftFromWebsite = generateBusinessDraftFromWebsite;
 const ai_chat_1 = require("./ai-chat");
 const suggest_social_images_1 = require("./suggest-social-images");
+const business_venue_images_1 = require("./business-venue-images");
 const business_website_location_1 = require("./business-website-location");
+const venue_page_extract_1 = require("./venue-page-extract");
 function normalizeWebsiteInput(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
         return "";
     return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+function withReservation(loc, reservationUrl) {
+    if (!reservationUrl)
+        return loc;
+    return { ...loc, reservationUrl };
 }
 function suggestNameFromHost(website) {
     try {
@@ -27,33 +34,55 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     if (!website || website.length > 2048) {
         throw new Error("A valid website URL is required.");
     }
-    const imageSuggestions = await (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 6 });
-    const imageUrls = imageSuggestions.map((img) => img.url).filter(Boolean);
-    const fallbackName = suggestNameFromHost(website);
     const locationHints = await (0, business_website_location_1.scrapeBusinessLocationHints)(website);
+    const [imageSuggestions, venuePhotos] = await Promise.all([
+        (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }),
+        (0, business_venue_images_1.scrapeBusinessVenueImages)({
+            websiteUrl: website,
+            reservationUrl: locationHints.reservationUrl,
+            limit: 14,
+        }),
+    ]);
+    const imageUrls = [
+        ...new Set([
+            ...venuePhotos,
+            ...imageSuggestions.map((img) => img.url).filter(Boolean),
+        ]),
+    ].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
+    const fallbackName = suggestNameFromHost(website);
     if ((0, ai_chat_1.aiProviderName)() === "none") {
         const city = locationHints.city;
         const state = locationHints.state;
+        const pageCopy = locationHints.pageText || locationHints.aboutHint || locationHints.hoursText
+            ? await (0, venue_page_extract_1.extractVenueCopyFromPage)(locationHints.pageText || locationHints.hoursText || locationHints.aboutHint, {
+                aboutHint: locationHints.aboutHint,
+                hoursText: locationHints.hoursText,
+            })
+            : null;
         return {
             website,
             businessName: fallbackName,
             businessType: "Restaurant",
-            about: "",
+            about: pageCopy?.about || locationHints.aboutHint || "",
             contactEmail: "",
             phone: "",
             city,
             state,
             locations: fallbackName
                 ? [
-                    {
+                    withReservation({
                         locationName: "Main Location",
                         city,
                         state,
                         ...(locationHints.address ? { address: locationHints.address } : {}),
-                    },
+                    }, locationHints.reservationUrl),
                 ]
                 : [],
+            reservationUrl: locationHints.reservationUrl,
+            bookingPlatform: locationHints.bookingPlatform,
             imageUrls,
+            discountHours: pageCopy?.discountHours ?? null,
+            eligibleWindow: pageCopy?.eligibleWindow ?? "",
             supportsDineAndDonate: true,
             supportsShopAndDonate: false,
             supportsServiceGiveback: false,
@@ -81,6 +110,12 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     const pageBlock = locationHints.pageText
         ? `\n\nPAGE TEXT (may include Hours & Location / Contact):\n${locationHints.pageText}`
         : "\n\nPAGE TEXT: (unavailable)";
+    const pageCopyPromise = locationHints.pageText || locationHints.aboutHint || locationHints.hoursText
+        ? (0, venue_page_extract_1.extractVenueCopyFromPage)(locationHints.pageText || locationHints.hoursText || locationHints.aboutHint, {
+            aboutHint: locationHints.aboutHint,
+            hoursText: locationHints.hoursText,
+        })
+        : Promise.resolve(null);
     const content = await (0, ai_chat_1.aiChat)({
         system,
         user: `Business website: ${website}${pageBlock}`,
@@ -137,12 +172,12 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     if (!state && locationHints.state)
         state = locationHints.state;
     if (locations.length === 0) {
-        locations.push({
+        locations.push(withReservation({
             locationName: "Main Location",
             city,
             state,
             ...(locationHints.address ? { address: locationHints.address } : {}),
-        });
+        }, locationHints.reservationUrl));
     }
     else {
         const primary = locations[0];
@@ -153,7 +188,12 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         if ((0, business_website_location_1.isEmptyLocationValue)(primary.address) && locationHints.address) {
             primary.address = locationHints.address;
         }
+        if (!primary.reservationUrl && locationHints.reservationUrl) {
+            primary.reservationUrl = locationHints.reservationUrl;
+        }
     }
+    const pageCopy = await pageCopyPromise;
+    const aboutFromPage = pageCopy?.about?.trim() || locationHints.aboutHint?.trim() || "";
     const missingFields = [];
     if (!businessName)
         missingFields.push("Business name");
@@ -165,12 +205,16 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         website,
         businessName,
         businessType: str("businessType") || "Restaurant",
-        about: str("about"),
+        about: aboutFromPage || str("about"),
+        discountHours: pageCopy?.discountHours ?? null,
+        eligibleWindow: pageCopy?.eligibleWindow ?? "",
         contactEmail: str("contactEmail"),
         phone: str("phone"),
         city,
         state,
         locations,
+        reservationUrl: locationHints.reservationUrl,
+        bookingPlatform: locationHints.bookingPlatform,
         imageUrls,
         supportsDineAndDonate: bool("supportsDineAndDonate", true),
         supportsShopAndDonate: bool("supportsShopAndDonate", false),

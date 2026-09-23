@@ -40,6 +40,12 @@ export interface ParticipatingLocation {
   cta: ParticipationCta;
   reservationUrl: string | null;
   acceptanceStatus: string;
+  /** Additive: from businesses / business_locations for public venue profile. */
+  website?: string | null;
+  description?: string | null;
+  logoUrl?: string | null;
+  address?: string | null;
+  zip?: string | null;
 }
 
 export interface ParticipationRequest {

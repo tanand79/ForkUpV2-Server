@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.scrapeBusinessLocationHints = scrapeBusinessLocationHints;
 exports.isEmptyLocationValue = isEmptyLocationValue;
+const booking_platform_links_1 = require("./booking-platform-links");
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_200_000;
 const MAX_PAGE_TEXT = 6_000;
@@ -79,6 +80,89 @@ function htmlToText(html) {
         .replace(/<\/(p|div|li|h[1-6]|tr|section|article)>/gi, "\n")
         .replace(/<[^>]+>/g, " "));
     return text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+function extractMetaDescription(html) {
+    const patterns = [
+        /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i,
+        /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i,
+        /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i,
+        /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i,
+    ];
+    for (const re of patterns) {
+        const m = html.match(re);
+        const value = m?.[1] ? decodeHtmlEntities(m[1]).trim() : "";
+        if (value.length >= 40)
+            return value.slice(0, 600);
+    }
+    return "";
+}
+function extractAboutParagraphs(text) {
+    const cleaned = text
+        .replace(/\u00a0/g, " ")
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    if (!cleaned)
+        return "";
+    const start = cleaned.search(/\b(owners?\s*-|chef\s+\w+|about us|our story|for over \d+|welcome to)\b/i);
+    if (start < 0)
+        return "";
+    const slice = cleaned.slice(start, start + 2200);
+    const chunks = slice
+        .split(/\n+/)
+        .map((p) => p.replace(/\s+/g, " ").trim())
+        .filter((p) => p.length >= 50)
+        .filter((p) => !/skip to main|toggle navigation|order online|gift cards|reservations|follow us on|recaptcha|close this site|just minutes from|located on the corner|general manager|sommelier/i.test(p));
+    if (chunks.length === 0) {
+        const sentences = slice
+            .split(/(?<=[.!?])\s+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length >= 60)
+            .filter((s) => !/skip to main|toggle navigation|order online|gift cards|recaptcha|just minutes from|general manager/i.test(s));
+        return sentences.slice(0, 4).join("\n\n").slice(0, 2000);
+    }
+    return chunks.slice(0, 4).join("\n\n").slice(0, 2000);
+}
+function aboutQualityScore(text) {
+    const t = text.trim();
+    if (t.length < 40)
+        return 0;
+    let score = Math.min(40, Math.floor(t.length / 8));
+    if (/\b(chef|owner|family|restaurant|bistro|cuisine|community|story)\b/i.test(t)) {
+        score += 25;
+    }
+    if (/\b(about us|owners?|chef)\b/i.test(t))
+        score += 15;
+    if (/recaptcha|close this site|just minutes from|located on the corner/i.test(t)) {
+        score -= 40;
+    }
+    return score;
+}
+function extractHoursBlock(text) {
+    const m = text.match(/(?:^|\n)\s*hours?\b(?!\s*&\s*location\b)[\s\S]{0,1800}?(?=\n\s*(?:holiday hours|contact|follow|reservations|menu|about)\b|$)/i);
+    if (m?.[0] && /\b(monday|tuesday|closed|lunch|dinner)\b/i.test(m[0])) {
+        return m[0].trim().slice(0, 1800);
+    }
+    const dayHeavy = text.match(/(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)[\s\S]{0,1200}?(?:dinner|lunch|closed|am|pm)/i);
+    if (dayHeavy?.[0])
+        return dayHeavy[0].trim().slice(0, 1800);
+    return "";
+}
+function scorePageForHours(text) {
+    let score = 0;
+    if (/\bhours?\b/i.test(text))
+        score += 10;
+    if (/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(text)) {
+        score += 30;
+    }
+    if (/\b(closed|lunch|dinner|brunch)\b/i.test(text))
+        score += 25;
+    if (/\d\s*[-–]\s*\d/.test(text) || /\d\s*(am|pm)\b/i.test(text))
+        score += 15;
+    if (score < 40 && /hours\s*&\s*location/i.test(text) && !/\bclosed\b/i.test(text)) {
+        return 0;
+    }
+    return score;
 }
 function extractUsAddress(text) {
     if (!text)
@@ -191,8 +275,13 @@ async function scrapeBusinessLocationHints(websiteInput) {
         state: "",
         zip: "",
         pageText: "",
+        aboutHint: "",
+        hoursText: "",
         sourceUrl: null,
         websiteFound: false,
+        reservationUrl: null,
+        bookingPlatform: null,
+        bookingLabel: null,
     };
     const website = normalizeWebsiteUrl(websiteInput);
     if (!website)
@@ -209,14 +298,32 @@ async function scrapeBusinessLocationHints(websiteInput) {
         urls.push(`${origin}${path}`);
         urls.push(`${origin}${path}/`);
     }
-    const uniqueUrls = [...new Set(urls)].slice(0, 12);
+    const uniqueUrls = [...new Set(urls)].slice(0, 14);
     let best = null;
+    let bestHours = { score: 0, text: "" };
+    let bestAbout = { score: 0, text: "" };
     let anyOk = Boolean(seedHtml);
+    let booking = seedHtml ? (0, booking_platform_links_1.extractBookingPlatformLink)(seedHtml) : null;
+    const bookingRank = (platform) => {
+        const order = ["resy", "opentable", "tock", "sevenrooms", "thefork"];
+        const idx = order.indexOf(platform);
+        return idx === -1 ? 20 : idx;
+    };
+    if (seedHtml) {
+        const meta = extractMetaDescription(seedHtml);
+        const metaScore = aboutQualityScore(meta);
+        if (metaScore > 0)
+            bestAbout = { score: metaScore + 5, text: meta };
+    }
     for (const url of uniqueUrls) {
         const html = url === website ? seedHtml : await fetchHtml(url);
         if (!html)
             continue;
         anyOk = true;
+        const found = (0, booking_platform_links_1.extractBookingPlatformLink)(html);
+        if (found && (!booking || bookingRank(found.platform) < bookingRank(booking.platform))) {
+            booking = found;
+        }
         const fromLd = extractJsonLdAddress(html);
         const text = htmlToText(html);
         const fromText = extractUsAddress(text);
@@ -230,20 +337,56 @@ async function scrapeBusinessLocationHints(websiteInput) {
                 sourceUrl: url,
             };
         }
-        if (parsed && score >= 50)
+        const hoursScore = scorePageForHours(text);
+        if (hoursScore > bestHours.score) {
+            const block = extractHoursBlock(text);
+            if (block)
+                bestHours = { score: hoursScore, text: block };
+        }
+        const meta = extractMetaDescription(html);
+        const aboutFromPage = extractAboutParagraphs(text);
+        for (const candidate of [aboutFromPage, meta]) {
+            const q = aboutQualityScore(candidate);
+            if (q > bestAbout.score)
+                bestAbout = { score: q, text: candidate };
+        }
+        if (parsed && score >= 50 && bestHours.score >= 40 && bestAbout.score >= 30)
             break;
     }
     if (!best) {
-        return { ...empty, websiteFound: anyOk };
+        return {
+            ...empty,
+            aboutHint: bestAbout.text,
+            hoursText: bestHours.text,
+            websiteFound: anyOk,
+            reservationUrl: booking?.url ?? null,
+            bookingPlatform: booking?.platform ?? null,
+            bookingLabel: booking?.label ?? null,
+        };
     }
+    const mergedPageText = [
+        best.pageText,
+        bestHours.text && bestHours.text !== best.pageText ? bestHours.text : "",
+        bestAbout.text && !best.pageText.includes(bestAbout.text.slice(0, 40))
+            ? bestAbout.text
+            : "",
+    ]
+        .filter(Boolean)
+        .join("\n\n")
+        .slice(0, MAX_PAGE_TEXT);
     return {
         address: best.parsed?.address ?? "",
         city: best.parsed?.city ?? "",
         state: best.parsed?.state ?? "",
         zip: best.parsed?.zip ?? "",
-        pageText: best.pageText,
+        pageText: mergedPageText,
+        aboutHint: bestAbout.text,
+        hoursText: bestHours.text,
         sourceUrl: best.sourceUrl,
         websiteFound: anyOk,
+        reservationUrl: booking?.url ?? null,
+        bookingPlatform: booking?.platform ?? null,
+        bookingLabel: booking?.label ?? null,
     };
 }
 function isEmptyLocationValue(raw) {

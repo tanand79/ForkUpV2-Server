@@ -66,6 +66,42 @@ export function looksLikeLogoUrl(url: string): boolean {
 }
 
 /**
+ * True when the URL is a site decoration / illustration (paper-cut strips,
+ * doodles, single-ingredient icons) — not a real venue or food photo.
+ * Inputs: absolute image URL. Outputs: boolean.
+ */
+export function looksLikeDecorativeAssetUrl(url: string): boolean {
+  const raw = (url || "").trim();
+  if (!raw) return false;
+  if (
+    /paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox/i.test(
+      raw,
+    )
+  ) {
+    return true;
+  }
+  // Single-ingredient / utensil PNGs used as page ornaments (not photography).
+  // Matches basilAJ / onionaj (no separator) as well as tomato_AJ.
+  if (
+    /\.png(\?|$)/i.test(raw) &&
+    /(?:^|[\/_\-])(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)(?:aj|[_\-.]|$)/i.test(
+      raw,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\.png(\?|$)/i.test(raw) &&
+    /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|menu\.png/i.test(
+      raw,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Lower is better for featured campaign covers.
  * Prefer hero/photo/CDN content assets; demote brand marks and bare PNG og:images.
  *
@@ -75,7 +111,10 @@ export function looksLikeLogoUrl(url: string): boolean {
 export function photoCoverRank(url: string): number {
   const raw = (url || "").trim();
   if (!raw) return 999;
+  if (looksLikeDecorativeAssetUrl(raw)) return 200;
   if (looksLikeLogoUrl(raw)) return 100;
+  // Resy / booking CDN photos are real venue gallery shots.
+  if (/image\.resy\.com|images\.resy\.com/i.test(raw)) return 0;
   if (/hero|photo|portrait|team|gallery|donate|people|event|bg[-_]|[_-]bg|shoelace/i.test(raw)) {
     return 0;
   }

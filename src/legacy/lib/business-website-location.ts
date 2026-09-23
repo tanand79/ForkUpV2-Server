@@ -8,7 +8,10 @@
  * Outputs: address/city/state/zip when found, pageText snippet for AI, sourceUrl.
  *
  * Changelog (D1): Added — fetch given URL + common location paths; US address + JSON-LD parse.
+ * Changelog: Also collect a booking-platform link (Resy, OpenTable, Tock, and other
+ * hosts the site itself links to) so the public card can send guests to reserve.
  */
+import { extractBookingPlatformLink } from "./booking-platform-links";
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_200_000;
 const MAX_PAGE_TEXT = 6_000;
@@ -16,7 +19,7 @@ const MAX_PAGE_TEXT = 6_000;
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
-/** Common public paths that often list address / hours. */
+/** Common public paths that often list address / hours / about. */
 const LOCATION_PATHS = [
   "/location",
   "/locations",
@@ -37,8 +40,16 @@ export type BusinessLocationHints = {
   zip: string;
   /** Truncated plain text from the best page for AI context. */
   pageText: string;
+  /** Meta / about-page story for the venue profile. */
+  aboutHint: string;
+  /** Hours section text when a hours/location page was found. */
+  hoursText: string;
   sourceUrl: string | null;
   websiteFound: boolean;
+  /** Venue page on Resy / OpenTable / Tock / other linked booking host. */
+  reservationUrl: string | null;
+  bookingPlatform: string | null;
+  bookingLabel: string | null;
 };
 
 function normalizeWebsiteUrl(raw: string): string {
@@ -108,6 +119,106 @@ function htmlToText(html: string): string {
       .replace(/<[^>]+>/g, " "),
   );
   return text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+/** Pull meta / Open Graph description from HTML. */
+function extractMetaDescription(html: string): string {
+  const patterns = [
+    /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i,
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    const value = m?.[1] ? decodeHtmlEntities(m[1]).trim() : "";
+    if (value.length >= 40) return value.slice(0, 600);
+  }
+  return "";
+}
+
+/** Prefer story paragraphs from an About page (skip nav chrome). */
+function extractAboutParagraphs(text: string): string {
+  const cleaned = text
+    .replace(/\u00a0/g, " ")
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!cleaned) return "";
+  const start = cleaned.search(
+    /\b(owners?\s*-|chef\s+\w+|about us|our story|for over \d+|welcome to)\b/i,
+  );
+  if (start < 0) return "";
+  const slice = cleaned.slice(start, start + 2200);
+  const chunks = slice
+    .split(/\n+/)
+    .map((p) => p.replace(/\s+/g, " ").trim())
+    .filter((p) => p.length >= 50)
+    .filter(
+      (p) =>
+        !/skip to main|toggle navigation|order online|gift cards|reservations|follow us on|recaptcha|close this site|just minutes from|located on the corner|general manager|sommelier/i.test(
+          p,
+        ),
+    );
+  if (chunks.length === 0) {
+    // Fallback: sentence split when the page has few line breaks.
+    const sentences = slice
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 60)
+      .filter(
+        (s) =>
+          !/skip to main|toggle navigation|order online|gift cards|recaptcha|just minutes from|general manager/i.test(
+            s,
+          ),
+      );
+    return sentences.slice(0, 4).join("\n\n").slice(0, 2000);
+  }
+  return chunks.slice(0, 4).join("\n\n").slice(0, 2000);
+}
+
+function aboutQualityScore(text: string): number {
+  const t = text.trim();
+  if (t.length < 40) return 0;
+  let score = Math.min(40, Math.floor(t.length / 8));
+  if (/\b(chef|owner|family|restaurant|bistro|cuisine|community|story)\b/i.test(t)) {
+    score += 25;
+  }
+  if (/\b(about us|owners?|chef)\b/i.test(t)) score += 15;
+  if (/recaptcha|close this site|just minutes from|located on the corner/i.test(t)) {
+    score -= 40;
+  }
+  return score;
+}
+
+/** Isolate an Hours block from page text when present. */
+function extractHoursBlock(text: string): string {
+  const m = text.match(
+    /(?:^|\n)\s*hours?\b(?!\s*&\s*location\b)[\s\S]{0,1800}?(?=\n\s*(?:holiday hours|contact|follow|reservations|menu|about)\b|$)/i,
+  );
+  if (m?.[0] && /\b(monday|tuesday|closed|lunch|dinner)\b/i.test(m[0])) {
+    return m[0].trim().slice(0, 1800);
+  }
+  const dayHeavy = text.match(
+    /(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)[\s\S]{0,1200}?(?:dinner|lunch|closed|am|pm)/i,
+  );
+  if (dayHeavy?.[0]) return dayHeavy[0].trim().slice(0, 1800);
+  return "";
+}
+
+function scorePageForHours(text: string): number {
+  let score = 0;
+  if (/\bhours?\b/i.test(text)) score += 10;
+  if (/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(text)) {
+    score += 30;
+  }
+  if (/\b(closed|lunch|dinner|brunch)\b/i.test(text)) score += 25;
+  if (/\d\s*[-–]\s*\d/.test(text) || /\d\s*(am|pm)\b/i.test(text)) score += 15;
+  // Nav-only "Hours & Location" titles without real schedule.
+  if (score < 40 && /hours\s*&\s*location/i.test(text) && !/\bclosed\b/i.test(text)) {
+    return 0;
+  }
+  return score;
 }
 
 type ParsedAddress = { address: string; city: string; state: string; zip: string };
@@ -220,7 +331,7 @@ function scorePageForLocation(text: string, parsed: ParsedAddress | null): numbe
 /**
  * Scrape a business website for location hints.
  * Inputs: any public page URL for the business (home, menus, etc.).
- * Outputs: best address/city/state found + text snippet for AI.
+ * Outputs: best address/city/state found + about/hours text for the venue profile.
  */
 export async function scrapeBusinessLocationHints(
   websiteInput: string,
@@ -231,8 +342,13 @@ export async function scrapeBusinessLocationHints(
     state: "",
     zip: "",
     pageText: "",
+    aboutHint: "",
+    hoursText: "",
     sourceUrl: null,
     websiteFound: false,
+    reservationUrl: null,
+    bookingPlatform: null,
+    bookingLabel: null,
   };
 
   const website = normalizeWebsiteUrl(websiteInput);
@@ -251,7 +367,7 @@ export async function scrapeBusinessLocationHints(
     urls.push(`${origin}${path}/`);
   }
 
-  const uniqueUrls = [...new Set(urls)].slice(0, 12);
+  const uniqueUrls = [...new Set(urls)].slice(0, 14);
 
   let best: {
     score: number;
@@ -259,12 +375,30 @@ export async function scrapeBusinessLocationHints(
     pageText: string;
     sourceUrl: string;
   } | null = null;
+  let bestHours = { score: 0, text: "" };
+  let bestAbout = { score: 0, text: "" };
   let anyOk = Boolean(seedHtml);
+  let booking = seedHtml ? extractBookingPlatformLink(seedHtml) : null;
+  const bookingRank = (platform: string) => {
+    const order = ["resy", "opentable", "tock", "sevenrooms", "thefork"];
+    const idx = order.indexOf(platform);
+    return idx === -1 ? 20 : idx;
+  };
+
+  if (seedHtml) {
+    const meta = extractMetaDescription(seedHtml);
+    const metaScore = aboutQualityScore(meta);
+    if (metaScore > 0) bestAbout = { score: metaScore + 5, text: meta };
+  }
 
   for (const url of uniqueUrls) {
     const html = url === website ? seedHtml : await fetchHtml(url);
     if (!html) continue;
     anyOk = true;
+    const found = extractBookingPlatformLink(html);
+    if (found && (!booking || bookingRank(found.platform) < bookingRank(booking.platform))) {
+      booking = found;
+    }
     const fromLd = extractJsonLdAddress(html);
     const text = htmlToText(html);
     const fromText = extractUsAddress(text);
@@ -278,21 +412,60 @@ export async function scrapeBusinessLocationHints(
         sourceUrl: url,
       };
     }
-    if (parsed && score >= 50) break;
+
+    const hoursScore = scorePageForHours(text);
+    if (hoursScore > bestHours.score) {
+      const block = extractHoursBlock(text);
+      if (block) bestHours = { score: hoursScore, text: block };
+    }
+
+    const meta = extractMetaDescription(html);
+    const aboutFromPage = extractAboutParagraphs(text);
+    for (const candidate of [aboutFromPage, meta]) {
+      const q = aboutQualityScore(candidate);
+      if (q > bestAbout.score) bestAbout = { score: q, text: candidate };
+    }
+
+    // Keep scanning until we have both an address and a hours block when possible.
+    if (parsed && score >= 50 && bestHours.score >= 40 && bestAbout.score >= 30) break;
   }
 
   if (!best) {
-    return { ...empty, websiteFound: anyOk };
+    return {
+      ...empty,
+      aboutHint: bestAbout.text,
+      hoursText: bestHours.text,
+      websiteFound: anyOk,
+      reservationUrl: booking?.url ?? null,
+      bookingPlatform: booking?.platform ?? null,
+      bookingLabel: booking?.label ?? null,
+    };
   }
+
+  const mergedPageText = [
+    best.pageText,
+    bestHours.text && bestHours.text !== best.pageText ? bestHours.text : "",
+    bestAbout.text && !best.pageText.includes(bestAbout.text.slice(0, 40))
+      ? bestAbout.text
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, MAX_PAGE_TEXT);
 
   return {
     address: best.parsed?.address ?? "",
     city: best.parsed?.city ?? "",
     state: best.parsed?.state ?? "",
     zip: best.parsed?.zip ?? "",
-    pageText: best.pageText,
+    pageText: mergedPageText,
+    aboutHint: bestAbout.text,
+    hoursText: bestHours.text,
     sourceUrl: best.sourceUrl,
     websiteFound: anyOk,
+    reservationUrl: booking?.url ?? null,
+    bookingPlatform: booking?.platform ?? null,
+    bookingLabel: booking?.label ?? null,
   };
 }
 

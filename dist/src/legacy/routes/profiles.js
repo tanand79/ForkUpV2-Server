@@ -9,6 +9,7 @@ const geo_distance_1 = require("../lib/geo-distance");
 const join_door_type_1 = require("../lib/join-door-type");
 const join_giveback_prefs_1 = require("../lib/join-giveback-prefs");
 const guest_business_claim_1 = require("../lib/guest-business-claim");
+const booking_platform_links_1 = require("../lib/booking-platform-links");
 const invite_sender_1 = require("../lib/invite-sender");
 exports.profilesRouter = (0, express_1.Router)();
 function slugify(name) {
@@ -684,8 +685,34 @@ function mapBusiness(row, locations = []) {
             city: l.city,
             state: l.state,
             address: l.address,
+            reservationUrl: l.reservation_url ?? null,
         })),
     };
+}
+async function writePrimaryLocation(args) {
+    const { rows } = await pool_1.pool.query(`SELECT id, reservation_url
+     FROM business_locations
+     WHERE business_id = $1
+     ORDER BY id ASC
+     LIMIT 1`, [args.businessId]);
+    if (rows.length === 0) {
+        await pool_1.pool.query(`INSERT INTO business_locations (business_id, location_name, city, state, reservation_url)
+       VALUES ($1, $2, $3, $4, $5)`, [args.businessId, args.locationName, args.city, args.state, args.reservationUrl]);
+        return;
+    }
+    if (!args.reservationUrl)
+        return;
+    const current = (rows[0].reservation_url ?? "").trim();
+    if (current)
+        return;
+    await pool_1.pool.query(`UPDATE business_locations
+     SET reservation_url = $1, updated_at = NOW()
+     WHERE id = $2`, [args.reservationUrl, rows[0].id]);
+}
+function reservationUrlFromBody(raw) {
+    if (typeof raw !== "string")
+        return null;
+    return (0, booking_platform_links_1.classifyBookingPlatformUrl)(raw)?.url ?? null;
 }
 exports.profilesRouter.get("/businesses/readiness", async (req, res) => {
     try {
@@ -776,6 +803,7 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
             return;
         }
         const email = body.contactEmail.trim().toLowerCase();
+        const reservationUrl = reservationUrlFromBody(body.reservationUrl);
         const slug = body.existingSlug?.trim() || slugify(body.businessName);
         const joinDoor = (0, join_door_type_1.normalizeJoinDoorType)(body.joinDoorType);
         const joinGiveback = (0, join_giveback_prefs_1.normalizeJoinGivebackMode)(body.joinGivebackMode);
@@ -819,16 +847,13 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
                 joinCampaignSlug,
                 row.id,
             ]);
-            const { rows: locCount } = await pool_1.pool.query("SELECT COUNT(*) AS c FROM business_locations WHERE business_id = $1", [row.id]);
-            if (Number(locCount[0]?.c ?? 0) === 0) {
-                await pool_1.pool.query(`INSERT INTO business_locations (business_id, location_name, city, state)
-           VALUES ($1, $2, $3, $4)`, [
-                    row.id,
-                    body.locationName?.trim() || "Main Location",
-                    body.city?.trim() || "TBD",
-                    body.state?.trim() || "TBD",
-                ]);
-            }
+            await writePrimaryLocation({
+                businessId: row.id,
+                locationName: body.locationName?.trim() || "Main Location",
+                city: body.city?.trim() || "TBD",
+                state: body.state?.trim() || "TBD",
+                reservationUrl,
+            });
             const { rows: updated } = await pool_1.pool.query("SELECT * FROM businesses WHERE id = $1", [row.id]);
             const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [row.id]);
             res.json({ action: "claimed", business: mapBusiness(updated[0], locations) });
@@ -856,13 +881,13 @@ exports.profilesRouter.post("/businesses/claim", async (req, res) => {
             Boolean(body.supportsServiceGiveback),
             Boolean(body.supportsGuestBartending),
         ]);
-        await pool_1.pool.query(`INSERT INTO business_locations (business_id, location_name, city, state)
-       VALUES ($1, $2, $3, $4)`, [
-            result[0].id,
-            body.locationName?.trim() || "Main Location",
-            body.city?.trim() || "TBD",
-            body.state?.trim() || "TBD",
-        ]);
+        await writePrimaryLocation({
+            businessId: result[0].id,
+            locationName: body.locationName?.trim() || "Main Location",
+            city: body.city?.trim() || "TBD",
+            state: body.state?.trim() || "TBD",
+            reservationUrl,
+        });
         const { rows: created } = await pool_1.pool.query("SELECT * FROM businesses WHERE id = $1", [result[0].id]);
         const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1", [result[0].id]);
         res.status(201).json({ action: "created", business: mapBusiness(created[0], locations) });
@@ -886,6 +911,7 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
         const authUser = await (0, auth_1.resolveAuthUser)((0, auth_1.bearerToken)(req));
         const requestedByUserId = authUser?.id ?? null;
         const email = body.contactEmail.trim().toLowerCase();
+        const reservationUrl = reservationUrlFromBody(body.reservationUrl);
         const requesterEmailDomain = emailDomain(email);
         const providedDomain = websiteDomain(body.website);
         const relationship = body.relationship?.trim() || null;
@@ -999,16 +1025,13 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
                 joinCampaignSlug,
                 biz.id,
             ]);
-            const { rows: locCount } = await pool_1.pool.query("SELECT COUNT(*) AS c FROM business_locations WHERE business_id = $1", [biz.id]);
-            if (Number(locCount[0]?.c ?? 0) === 0) {
-                await pool_1.pool.query(`INSERT INTO business_locations (business_id, location_name, city, state)
-           VALUES ($1, $2, $3, $4)`, [
-                    biz.id,
-                    body.locationName?.trim() || "Main Location",
-                    body.city?.trim() || "TBD",
-                    body.state?.trim() || "TBD",
-                ]);
-            }
+            await writePrimaryLocation({
+                businessId: biz.id,
+                locationName: body.locationName?.trim() || "Main Location",
+                city: body.city?.trim() || "TBD",
+                state: body.state?.trim() || "TBD",
+                reservationUrl,
+            });
             if (riskLevel === "medium") {
                 await logBusinessAccessRequest({
                     organizationId: biz.id,
@@ -1070,13 +1093,13 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
             Boolean(body.supportsServiceGiveback),
             Boolean(body.supportsGuestBartending),
         ]);
-        await pool_1.pool.query(`INSERT INTO business_locations (business_id, location_name, city, state)
-       VALUES ($1, $2, $3, $4)`, [
-            result[0].id,
-            body.locationName?.trim() || "Main Location",
-            body.city?.trim() || "TBD",
-            body.state?.trim() || "TBD",
-        ]);
+        await writePrimaryLocation({
+            businessId: result[0].id,
+            locationName: body.locationName?.trim() || "Main Location",
+            city: body.city?.trim() || "TBD",
+            state: body.state?.trim() || "TBD",
+            reservationUrl,
+        });
         if (riskLevel === "medium") {
             await logBusinessAccessRequest({
                 organizationId: result[0].id,

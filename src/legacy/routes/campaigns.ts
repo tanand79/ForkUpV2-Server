@@ -66,6 +66,12 @@ type LocationRow = QueryResultRow & {
   reservation_url: string | null;
   acceptance_status: string;
   method_type: MethodType;
+  /** Additive: venue profile fields from businesses / locations. */
+  website?: string | null;
+  description?: string | null;
+  logo_url?: string | null;
+  address?: string | null;
+  zip?: string | null;
 };
 
 function toDateInput(value: string | Date | null): Date | null {
@@ -104,7 +110,18 @@ function participationMethodLabel(methodType: MethodType): string {
   return labels[methodType];
 }
 
-function mapLocation(row: LocationRow): ParticipatingLocation {
+async function mapLocation(row: LocationRow): Promise<ParticipatingLocation> {
+  const website =
+    (typeof row.website === "string" && row.website.trim()) ||
+    null;
+  const description =
+    (typeof row.description === "string" && row.description.trim()) ||
+    null;
+  const address =
+    (typeof row.address === "string" && row.address.trim()) || null;
+  const zip = (typeof row.zip === "string" && row.zip.trim()) || null;
+  const logoUrl = await resolveStoredImageUrl(row.logo_url ?? null);
+
   return {
     businessId: row.business_id,
     locationId: row.location_id,
@@ -120,6 +137,11 @@ function mapLocation(row: LocationRow): ParticipatingLocation {
     cta: ctaForMethod(row.method_type, row.reservation_url),
     reservationUrl: row.reservation_url,
     acceptanceStatus: row.acceptance_status,
+    website,
+    description,
+    logoUrl: logoUrl || null,
+    address,
+    zip,
   };
 }
 
@@ -225,7 +247,12 @@ async function fetchAcceptedLocations(campaignId: number): Promise<Participating
        cbl.participation_hours,
        bl.reservation_url,
        cbl.acceptance_status,
-       cm.method_type
+       cm.method_type,
+       COALESCE(NULLIF(TRIM(b.website), ''), NULLIF(TRIM(bl.website_url), '')) AS website,
+       NULLIF(TRIM(b.description), '') AS description,
+       b.logo_url,
+       bl.address,
+       bl.zip
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN business_locations bl ON bl.id = cbl.location_id
@@ -235,7 +262,7 @@ async function fetchAcceptedLocations(campaignId: number): Promise<Participating
      ORDER BY b.business_name, bl.location_name`,
     [campaignId],
   );
-  return rows.map(mapLocation);
+  return Promise.all(rows.map(mapLocation));
 }
 
 async function fetchLocationCount(campaignId: number): Promise<number> {

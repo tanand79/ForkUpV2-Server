@@ -6,6 +6,7 @@ export interface SuggestedImage {
     caption?: string | null;
 }
 export declare function looksLikeLogoUrl(url: string): boolean;
+export declare function looksLikeDecorativeAssetUrl(url: string): boolean;
 export declare function photoCoverRank(url: string): number;
 export declare function normalizeInstagramUrl(handleOrUrl: string): string | null;
 export declare function normalizeFacebookUrl(url: string): string | null;

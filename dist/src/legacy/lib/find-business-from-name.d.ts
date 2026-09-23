@@ -1,4 +1,5 @@
 import { type JoinDoorType } from "./join-door-type";
+import { type VenuePageCopy } from "./venue-page-extract";
 export type FindBusinessChecks = {
     websiteFound: boolean;
     logoFound: boolean;
@@ -21,9 +22,14 @@ export type FindBusinessFromNameResult = {
         city: string;
         state: string;
         address?: string;
+        reservationUrl?: string;
     }>;
+    reservationUrl: string | null;
+    bookingPlatform: string | null;
     logoUrl: string | null;
     imageUrls: string[];
+    discountHours: VenuePageCopy["discountHours"] | null;
+    eligibleWindow: string;
     checks: FindBusinessChecks;
     locationSourceUrl: string | null;
     joinDoorType: JoinDoorType | null;

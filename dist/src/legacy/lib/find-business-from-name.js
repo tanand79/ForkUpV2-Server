@@ -3,8 +3,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.findBusinessFromName = findBusinessFromName;
 const ai_chat_1 = require("./ai-chat");
 const suggest_social_images_1 = require("./suggest-social-images");
+const business_venue_images_1 = require("./business-venue-images");
 const business_website_location_1 = require("./business-website-location");
 const join_door_type_1 = require("./join-door-type");
+const venue_page_extract_1 = require("./venue-page-extract");
 function normalizeWebsite(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -78,6 +80,11 @@ async function findBusinessFromName(input) {
             pageText: "",
             sourceUrl: null,
             websiteFound: false,
+            reservationUrl: null,
+            bookingPlatform: null,
+            bookingLabel: null,
+            aboutHint: "",
+            hoursText: "",
         };
     if ((0, business_website_location_1.isEmptyLocationValue)(city) && hints.city)
         city = hints.city;
@@ -85,12 +92,33 @@ async function findBusinessFromName(input) {
         state = hints.state;
     const address = hints.address;
     const zip = hints.zip;
-    const imageSuggestions = website
-        ? await (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 6 })
-        : [];
-    const imageUrls = imageSuggestions.map((img) => img.url).filter(Boolean);
+    const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
+        website ? (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
+        website
+            ? (0, business_venue_images_1.scrapeBusinessVenueImages)({
+                websiteUrl: website,
+                reservationUrl: hints.reservationUrl,
+                limit: 14,
+            })
+            : Promise.resolve([]),
+        hints.pageText || hints.aboutHint || hints.hoursText
+            ? (0, venue_page_extract_1.extractVenueCopyFromPage)(hints.pageText || hints.hoursText || hints.aboutHint, {
+                aboutHint: hints.aboutHint,
+                hoursText: hints.hoursText,
+            })
+            : Promise.resolve(null),
+    ]);
+    if (pageCopy?.about)
+        about = pageCopy.about;
+    else if (!about && hints.aboutHint)
+        about = hints.aboutHint;
+    const mergedImages = [
+        ...venuePhotos,
+        ...imageSuggestions.map((img) => img.url).filter(Boolean),
+    ].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
+    const imageUrls = [...new Set(mergedImages)];
     const logoCandidate = imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null;
-    const photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u));
+    const photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
     const locationFound = Boolean(city || state || address);
     const checks = {
         websiteFound: hints.websiteFound || Boolean(website),
@@ -105,6 +133,7 @@ async function findBusinessFromName(input) {
                 city,
                 state,
                 ...(address ? { address } : {}),
+                ...(hints.reservationUrl ? { reservationUrl: hints.reservationUrl } : {}),
             },
         ]
         : [];
@@ -120,8 +149,12 @@ async function findBusinessFromName(input) {
         address,
         zip,
         locations,
+        reservationUrl: hints.reservationUrl,
+        bookingPlatform: hints.bookingPlatform,
         logoUrl: logoCandidate,
         imageUrls,
+        discountHours: pageCopy?.discountHours ?? null,
+        eligibleWindow: pageCopy?.eligibleWindow ?? "",
         checks,
         locationSourceUrl: hints.sourceUrl,
         joinDoorType,

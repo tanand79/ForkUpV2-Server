@@ -8,14 +8,17 @@
  * Outputs: confirmation payload (name, website, city/state/address, images, checks).
  *
  * Changelog (D1): Added — name → website (AI) + scrape + social/website images.
+ * Changelog: Include a booking-platform URL when the business site links one.
  */
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
-import { looksLikeLogoUrl, suggestSocialImages } from "./suggest-social-images";
+import { looksLikeDecorativeAssetUrl, looksLikeLogoUrl, suggestSocialImages } from "./suggest-social-images";
+import { scrapeBusinessVenueImages } from "./business-venue-images";
 import {
   isEmptyLocationValue,
   scrapeBusinessLocationHints,
 } from "./business-website-location";
 import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
+import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extract";
 
 export type FindBusinessChecks = {
   websiteFound: boolean;
@@ -40,9 +43,16 @@ export type FindBusinessFromNameResult = {
     city: string;
     state: string;
     address?: string;
+    reservationUrl?: string;
   }>;
+  reservationUrl: string | null;
+  bookingPlatform: string | null;
   logoUrl: string | null;
   imageUrls: string[];
+  /** Weekday labels taken from the public site. Null when the page listed none. */
+  discountHours: VenuePageCopy["discountHours"] | null;
+  /** Time range from the site, when one was stated. */
+  eligibleWindow: string;
   checks: FindBusinessChecks;
   locationSourceUrl: string | null;
   joinDoorType: JoinDoorType | null;
@@ -133,6 +143,11 @@ export async function findBusinessFromName(input: {
         pageText: "",
         sourceUrl: null,
         websiteFound: false,
+        reservationUrl: null,
+        bookingPlatform: null,
+        bookingLabel: null,
+        aboutHint: "",
+        hoursText: "",
       };
 
   if (isEmptyLocationValue(city) && hints.city) city = hints.city;
@@ -140,13 +155,34 @@ export async function findBusinessFromName(input: {
   const address = hints.address;
   const zip = hints.zip;
 
-  const imageSuggestions = website
-    ? await suggestSocialImages({ websiteUrl: website, limit: 6 })
-    : [];
-  const imageUrls = imageSuggestions.map((img) => img.url).filter(Boolean);
+  const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
+    website ? suggestSocialImages({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
+    website
+      ? scrapeBusinessVenueImages({
+          websiteUrl: website,
+          reservationUrl: hints.reservationUrl,
+          limit: 14,
+        })
+      : Promise.resolve([]),
+    hints.pageText || hints.aboutHint || hints.hoursText
+      ? extractVenueCopyFromPage(hints.pageText || hints.hoursText || hints.aboutHint, {
+          aboutHint: hints.aboutHint,
+          hoursText: hints.hoursText,
+        })
+      : Promise.resolve(null),
+  ]);
+  if (pageCopy?.about) about = pageCopy.about;
+  else if (!about && hints.aboutHint) about = hints.aboutHint;
+  const mergedImages = [
+    ...venuePhotos,
+    ...imageSuggestions.map((img) => img.url).filter(Boolean),
+  ].filter((u) => u && !looksLikeDecorativeAssetUrl(u));
+  const imageUrls = [...new Set(mergedImages)];
   const logoCandidate =
     imageUrls.find((u) => looksLikeLogoUrl(u)) ?? imageUrls[0] ?? null;
-  const photoUrls = imageUrls.filter((u) => !looksLikeLogoUrl(u));
+  const photoUrls = imageUrls.filter(
+    (u) => !looksLikeLogoUrl(u) && !looksLikeDecorativeAssetUrl(u),
+  );
 
   const locationFound = Boolean(city || state || address);
   const checks: FindBusinessChecks = {
@@ -164,6 +200,7 @@ export async function findBusinessFromName(input: {
             city,
             state,
             ...(address ? { address } : {}),
+            ...(hints.reservationUrl ? { reservationUrl: hints.reservationUrl } : {}),
           },
         ]
       : [];
@@ -180,8 +217,12 @@ export async function findBusinessFromName(input: {
     address,
     zip,
     locations,
+    reservationUrl: hints.reservationUrl,
+    bookingPlatform: hints.bookingPlatform,
     logoUrl: logoCandidate,
     imageUrls,
+    discountHours: pageCopy?.discountHours ?? null,
+    eligibleWindow: pageCopy?.eligibleWindow ?? "",
     checks,
     locationSourceUrl: hints.sourceUrl,
     joinDoorType,

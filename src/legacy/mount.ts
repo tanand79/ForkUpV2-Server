@@ -14,6 +14,8 @@ import { suggestCampaignGoalRouter } from "./routes/suggest-campaign-goal";
 import { generateOrganizationDraftRouter } from "./routes/generate-organization-draft";
 import { generateBusinessDraftRouter } from "./routes/generate-business-draft";
 import { findBusinessProfileRouter } from "./routes/find-business-profile";
+import { businessVenueImagesRouter } from "./routes/business-venue-images";
+import { venuePhotoProxyRouter } from "./routes/venue-photo-proxy";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
 import { authRouter } from "./routes/auth";
@@ -133,6 +135,10 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", generateBusinessDraftRouter);
   /** Pass D1: name → website/location/photos for restaurant & local Join Us. */
   app.use("/api", findBusinessProfileRouter);
+  /** Venue gallery refresh (Resy + site photos) for join profile. */
+  app.use("/api", businessVenueImagesRouter);
+  /** Same-origin proxy for Resy CDN gallery images. */
+  app.use("/api", venuePhotoProxyRouter);
   app.use("/api/campaign-ai", campaignAiRouter);
   app.use("/api/ai-campaign-flow", aiCampaignFlowRouter);
   app.use("/api/fundraiser", fundraiserRouter);

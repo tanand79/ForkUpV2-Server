@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.looksLikeLogoUrl = looksLikeLogoUrl;
+exports.looksLikeDecorativeAssetUrl = looksLikeDecorativeAssetUrl;
 exports.photoCoverRank = photoCoverRank;
 exports.normalizeInstagramUrl = normalizeInstagramUrl;
 exports.normalizeFacebookUrl = normalizeFacebookUrl;
@@ -30,12 +31,33 @@ function looksLikeLogoUrl(url) {
         return true;
     return /logo|icon|favicon|avatar|profile[_-]?pic|wordmark|seal|badge|sprite|emoji|brand[_-]?mark|webclip|apple[_-]?touch/i.test(raw);
 }
+function looksLikeDecorativeAssetUrl(url) {
+    const raw = (url || "").trim();
+    if (!raw)
+        return false;
+    if (/paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox/i.test(raw)) {
+        return true;
+    }
+    if (/\.png(\?|$)/i.test(raw) &&
+        /(?:^|[\/_\-])(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)(?:aj|[_\-.]|$)/i.test(raw)) {
+        return true;
+    }
+    if (/\.png(\?|$)/i.test(raw) &&
+        /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|menu\.png/i.test(raw)) {
+        return true;
+    }
+    return false;
+}
 function photoCoverRank(url) {
     const raw = (url || "").trim();
     if (!raw)
         return 999;
+    if (looksLikeDecorativeAssetUrl(raw))
+        return 200;
     if (looksLikeLogoUrl(raw))
         return 100;
+    if (/image\.resy\.com|images\.resy\.com/i.test(raw))
+        return 0;
     if (/hero|photo|portrait|team|gallery|donate|people|event|bg[-_]|[_-]bg|shoelace/i.test(raw)) {
         return 0;
     }

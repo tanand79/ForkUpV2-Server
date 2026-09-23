@@ -1,8 +1,10 @@
+import { type VenuePageCopy } from "./venue-page-extract";
 export type BusinessLocationDraft = {
     locationName: string;
     city: string;
     state: string;
     address?: string;
+    reservationUrl?: string;
 };
 export type BusinessDraftFromWebsite = {
     website: string;
@@ -14,7 +16,11 @@ export type BusinessDraftFromWebsite = {
     city: string;
     state: string;
     locations: BusinessLocationDraft[];
+    reservationUrl: string | null;
+    bookingPlatform: string | null;
     imageUrls: string[];
+    discountHours: VenuePageCopy["discountHours"] | null;
+    eligibleWindow: string;
     supportsDineAndDonate: boolean;
     supportsShopAndDonate: boolean;
     supportsServiceGiveback: boolean;

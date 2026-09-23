@@ -20,6 +20,8 @@ const suggest_campaign_goal_1 = require("./routes/suggest-campaign-goal");
 const generate_organization_draft_1 = require("./routes/generate-organization-draft");
 const generate_business_draft_1 = require("./routes/generate-business-draft");
 const find_business_profile_1 = require("./routes/find-business-profile");
+const business_venue_images_1 = require("./routes/business-venue-images");
+const venue_photo_proxy_1 = require("./routes/venue-photo-proxy");
 const receipts_1 = require("./routes/receipts");
 const uploads_1 = require("./routes/uploads");
 const auth_1 = require("./routes/auth");
@@ -111,6 +113,8 @@ function mountLegacyApi(app) {
     app.use("/api", generate_organization_draft_1.generateOrganizationDraftRouter);
     app.use("/api", generate_business_draft_1.generateBusinessDraftRouter);
     app.use("/api", find_business_profile_1.findBusinessProfileRouter);
+    app.use("/api", business_venue_images_1.businessVenueImagesRouter);
+    app.use("/api", venue_photo_proxy_1.venuePhotoProxyRouter);
     app.use("/api/campaign-ai", campaign_ai_1.campaignAiRouter);
     app.use("/api/ai-campaign-flow", ai_campaign_flow_1.aiCampaignFlowRouter);
     app.use("/api/fundraiser", fundraiser_1.fundraiserRouter);
