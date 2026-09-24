@@ -47,6 +47,45 @@ function originOf(website) {
         return null;
     }
 }
+function preferWwwOrigin(origin) {
+    try {
+        const u = new URL(origin);
+        if (!/^www\./i.test(u.hostname)) {
+            u.hostname = `www.${u.hostname}`;
+        }
+        return `${u.protocol}//${u.host}`;
+    }
+    catch {
+        return origin;
+    }
+}
+function apexOrigin(origin) {
+    try {
+        const u = new URL(origin);
+        u.hostname = u.hostname.replace(/^www\./i, "");
+        return `${u.protocol}//${u.host}`;
+    }
+    catch {
+        return origin;
+    }
+}
+async function fetchHomepageHtml(website) {
+    const rawOrigin = originOf(website);
+    if (!rawOrigin)
+        return { html: null, origin: "", pageUrl: website };
+    const www = preferWwwOrigin(rawOrigin);
+    const apex = apexOrigin(rawOrigin);
+    const candidates = www.toLowerCase() === apex.toLowerCase()
+        ? [www]
+        : [www, apex];
+    for (const origin of candidates) {
+        const pageUrl = `${origin}/`;
+        const html = await fetchHtml(pageUrl);
+        if (html)
+            return { html, origin, pageUrl };
+    }
+    return { html: null, origin: www, pageUrl: `${www}/` };
+}
 async function fetchHtml(url) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -263,64 +302,8 @@ function preferHigherRes(a, b) {
     };
     return score(a) >= score(b) ? a : b;
 }
-async function scrapeBusinessVenueImages(input) {
-    const limit = Math.min(20, Math.max(4, input.limit ?? DEFAULT_LIMIT));
-    const website = normalizeWebsiteUrl(input.websiteUrl);
-    if (!website)
-        return [];
-    const origin = originOf(website);
-    if (!origin)
-        return [];
-    const urls = [website];
-    for (const path of PHOTO_PATHS) {
-        if (path === "/")
-            continue;
-        urls.push(`${origin}${path}`);
-        if (!path.endsWith("/"))
-            urls.push(`${origin}${path}/`);
-    }
-    const seedHtml = await fetchHtml(website);
-    if (seedHtml) {
-        urls.push(...discoverPhotoPageLinks(origin, seedHtml));
-        const booking = input.reservationUrl?.trim() ||
-            (0, booking_platform_links_1.extractBookingPlatformLink)(seedHtml)?.url ||
-            null;
-        if (booking)
-            urls.push(booking);
-    }
-    else if (input.reservationUrl?.trim()) {
-        urls.push(input.reservationUrl.trim());
-    }
-    const bookingUrl = input.reservationUrl?.trim() ||
-        (seedHtml ? (0, booking_platform_links_1.extractBookingPlatformLink)(seedHtml)?.url : null) ||
-        null;
-    const bookingPhotos = await fetchBookingPlatformVenueImages(bookingUrl);
-    const uniquePages = [...new Set(urls)].slice(0, MAX_PAGES);
-    const byKey = new Map();
-    const ingest = (img) => {
-        if (!img || (0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(img))
-            return;
-        const key = imageDedupeKey(img);
-        const prev = byKey.get(key);
-        byKey.set(key, prev ? preferHigherRes(prev, img) : img);
-    };
-    for (const img of bookingPhotos)
-        ingest(img);
-    const hasBookingGallery = bookingPhotos.length >= 3;
-    for (const pageUrl of uniquePages) {
-        const html = pageUrl === website ? seedHtml : await fetchHtml(pageUrl);
-        if (!html)
-            continue;
-        const fromExtract = (0, suggest_social_images_1.extractImageUrlsFromHtml)(html, pageUrl);
-        const fromLazy = extractLazyImageUrls(html, pageUrl);
-        for (const img of [...fromExtract, ...fromLazy]) {
-            if (hasBookingGallery && /\.png(\?|$)/i.test(img) && !/image\.resy\.com/i.test(img)) {
-                continue;
-            }
-            ingest(img);
-        }
-    }
-    let ranked = [...byKey.values()]
+function rankVenueImageUrls(urls) {
+    return [...urls]
         .filter((u) => !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u))
         .sort((a, b) => {
         const logoA = (0, suggest_social_images_1.looksLikeLogoUrl)(a) ? 1 : 0;
@@ -337,6 +320,87 @@ async function scrapeBusinessVenueImages(input) {
             return jpgA - jpgB;
         return (0, suggest_social_images_1.photoCoverRank)(a) - (0, suggest_social_images_1.photoCoverRank)(b);
     });
+}
+function proxyResyUrls(urls) {
+    return urls.map((url) => /image\.resy\.com/i.test(url)
+        ? `/api/venue-photo-proxy?url=${encodeURIComponent(url)}`
+        : url);
+}
+async function scrapeBusinessVenueImages(input) {
+    const limit = Math.min(20, Math.max(4, input.limit ?? DEFAULT_LIMIT));
+    const website = normalizeWebsiteUrl(input.websiteUrl);
+    if (!website)
+        return [];
+    const home = await fetchHomepageHtml(website);
+    const origin = home.origin || preferWwwOrigin(originOf(website) || "");
+    if (!origin)
+        return [];
+    const seedHtml = home.html;
+    const seedPageUrl = home.pageUrl || `${origin}/`;
+    const urls = [seedPageUrl];
+    for (const path of PHOTO_PATHS) {
+        if (path === "/")
+            continue;
+        urls.push(`${origin}${path}`);
+        if (!path.endsWith("/"))
+            urls.push(`${origin}${path}/`);
+    }
+    if (seedHtml) {
+        urls.push(...discoverPhotoPageLinks(origin, seedHtml));
+        const booking = input.reservationUrl?.trim() ||
+            (0, booking_platform_links_1.extractBookingPlatformLink)(seedHtml)?.url ||
+            null;
+        if (booking)
+            urls.push(booking);
+    }
+    else if (input.reservationUrl?.trim()) {
+        urls.push(input.reservationUrl.trim());
+    }
+    const bookingUrl = input.reservationUrl?.trim() ||
+        (seedHtml ? (0, booking_platform_links_1.extractBookingPlatformLink)(seedHtml)?.url : null) ||
+        null;
+    const bookingPhotos = await fetchBookingPlatformVenueImages(bookingUrl);
+    const byKey = new Map();
+    const ingest = (img) => {
+        if (!img || (0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(img))
+            return;
+        const key = imageDedupeKey(img);
+        const prev = byKey.get(key);
+        byKey.set(key, prev ? preferHigherRes(prev, img) : img);
+    };
+    for (const img of bookingPhotos)
+        ingest(img);
+    if (bookingPhotos.length >= Math.min(limit, 6)) {
+        const bookingOnly = rankVenueImageUrls([...byKey.values()]).filter((u) => /image\.resy\.com/i.test(u));
+        return proxyResyUrls(bookingOnly.slice(0, limit));
+    }
+    const hasBookingGallery = bookingPhotos.length >= 3;
+    const uniquePages = [...new Set(urls)].slice(0, MAX_PAGES);
+    const PAGE_CONCURRENCY = 4;
+    const ingestPage = (pageUrl, html) => {
+        if (!html)
+            return;
+        const fromExtract = (0, suggest_social_images_1.extractImageUrlsFromHtml)(html, pageUrl);
+        const fromLazy = extractLazyImageUrls(html, pageUrl);
+        for (const img of [...fromExtract, ...fromLazy]) {
+            if (hasBookingGallery &&
+                /\.png(\?|$)/i.test(img) &&
+                !/image\.resy\.com/i.test(img)) {
+                continue;
+            }
+            ingest(img);
+        }
+    };
+    ingestPage(seedPageUrl, seedHtml);
+    const remaining = uniquePages.filter((u) => u !== seedPageUrl && u !== website && u !== `${origin}/`);
+    for (let i = 0; i < remaining.length; i += PAGE_CONCURRENCY) {
+        if (byKey.size >= limit)
+            break;
+        const batch = remaining.slice(i, i + PAGE_CONCURRENCY);
+        const htmls = await Promise.all(batch.map((pageUrl) => fetchHtml(pageUrl)));
+        batch.forEach((pageUrl, idx) => ingestPage(pageUrl, htmls[idx] ?? null));
+    }
+    let ranked = rankVenueImageUrls([...byKey.values()]);
     const bookingOnly = ranked.filter((u) => /image\.resy\.com/i.test(u));
     if (bookingOnly.length >= 4) {
         ranked = [
@@ -344,8 +408,6 @@ async function scrapeBusinessVenueImages(input) {
             ...ranked.filter((u) => !/image\.resy\.com/i.test(u) && /\.(jpe?g|webp)(\?|$)/i.test(u)),
         ];
     }
-    return ranked.slice(0, limit).map((url) => /image\.resy\.com/i.test(url)
-        ? `/api/venue-photo-proxy?url=${encodeURIComponent(url)}`
-        : url);
+    return proxyResyUrls(ranked.slice(0, limit));
 }
 //# sourceMappingURL=business-venue-images.js.map

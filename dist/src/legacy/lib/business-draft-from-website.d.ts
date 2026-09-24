@@ -21,6 +21,11 @@ export type BusinessDraftFromWebsite = {
     imageUrls: string[];
     discountHours: VenuePageCopy["discountHours"] | null;
     eligibleWindow: string;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    youtubeUrl: string | null;
+    tiktokUrl: string | null;
     supportsDineAndDonate: boolean;
     supportsShopAndDonate: boolean;
     supportsServiceGiveback: boolean;
@@ -29,4 +34,8 @@ export type BusinessDraftFromWebsite = {
     confirmationStatus: "AI Draft" | string;
     provider: string;
 };
-export declare function generateBusinessDraftFromWebsite(websiteInput: string): Promise<BusinessDraftFromWebsite>;
+export declare function generateBusinessDraftFromWebsite(websiteInput: string, near?: {
+    nearZip?: string;
+    city?: string;
+    state?: string;
+}): Promise<BusinessDraftFromWebsite>;

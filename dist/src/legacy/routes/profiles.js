@@ -12,6 +12,11 @@ const guest_business_claim_1 = require("../lib/guest-business-claim");
 const booking_platform_links_1 = require("../lib/booking-platform-links");
 const invite_sender_1 = require("../lib/invite-sender");
 exports.profilesRouter = (0, express_1.Router)();
+const DIRECTORY_HIDDEN_SEED_SLUGS = [
+    "olive-and-oak",
+    "harbor-coffee",
+    "farm-table",
+];
 function slugify(name) {
     return name
         .toLowerCase()
@@ -650,6 +655,46 @@ exports.profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
         res.status(500).json({ error: "Failed to process claim or access request" });
     }
 });
+function parseGalleryImageUrls(raw) {
+    if (!raw)
+        return [];
+    let value = raw;
+    if (typeof raw === "string") {
+        try {
+            value = JSON.parse(raw);
+        }
+        catch {
+            return [];
+        }
+    }
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((u) => typeof u === "string" && u.trim().length > 0);
+}
+function businessDirectoryFlags(claimStatus, accessRequestStatus) {
+    const awaitingVerification = claimStatus === "needs_review" || accessRequestStatus === "pending";
+    const inviteable = !awaitingVerification &&
+        (claimStatus === "claimed" || claimStatus === "verified");
+    return { awaitingVerification, inviteable };
+}
+async function loadLatestBusinessAccessStatuses(businessIds) {
+    const map = new Map();
+    if (businessIds.length === 0)
+        return map;
+    const { rows } = await pool_1.pool.query(`SELECT DISTINCT ON (organization_id) organization_id, status
+     FROM organization_access_requests
+     WHERE organization_type = 'business' AND organization_id = ANY($1::int[])
+     ORDER BY organization_id, id DESC`, [businessIds]);
+    for (const row of rows) {
+        const id = Number(row.organization_id);
+        const status = row.status;
+        if (Number.isFinite(id) &&
+            (status === "pending" || status === "approved" || status === "denied")) {
+            map.set(id, status);
+        }
+    }
+    return map;
+}
 function mapBusiness(row, locations = []) {
     return {
         id: row.id,
@@ -1138,6 +1183,135 @@ exports.profilesRouter.post("/businesses/claim-request", async (req, res) => {
         res.status(500).json({ error: "Failed to process business claim or access request" });
     }
 });
+exports.profilesRouter.get("/businesses/directory", async (req, res) => {
+    try {
+        const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+        const origin = (0, geo_distance_1.parseLatLng)(req.query.lat, req.query.lng);
+        const radiusMiles = (0, geo_distance_1.parseRadiusMiles)(req.query.radiusMiles);
+        const limitRaw = Number(req.query.limit);
+        const limit = Number.isFinite(limitRaw)
+            ? Math.min(48, Math.max(1, Math.floor(limitRaw)))
+            : 24;
+        const params = [];
+        let where = `WHERE b.claim_status NOT IN ('unclaimed', 'archived')
+      AND b.business_status <> 'archived'
+      AND bl.active_status = TRUE
+      AND b.slug <> ALL($1::text[])`;
+        params.push([...DIRECTORY_HIDDEN_SEED_SLUGS]);
+        if (q) {
+            const like = `%${q}%`;
+            params.push(like, like, like);
+            where += ` AND (b.business_name ILIKE $${params.length - 2}
+        OR bl.city ILIKE $${params.length - 1}
+        OR bl.location_name ILIKE $${params.length})`;
+        }
+        const { rows } = await pool_1.pool.query(`SELECT
+         b.id,
+         b.business_name,
+         b.slug,
+         b.business_type,
+         b.website,
+         b.business_status,
+         b.claim_status,
+         b.profile_status,
+         b.supports_dine_and_donate,
+         b.supports_shop_and_donate,
+         b.supports_service_giveback,
+         b.supports_guest_bartending,
+         NULLIF(TRIM(b.facebook_url), '') AS facebook_url,
+         NULLIF(TRIM(b.instagram_url), '') AS instagram_url,
+         NULLIF(TRIM(b.linkedin_url), '') AS linkedin_url,
+         NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
+         NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
+         NULLIF(TRIM(b.venue_email), '') AS venue_email,
+         b.venue_gallery_urls,
+         bl.id AS location_id,
+         bl.location_name,
+         bl.city,
+         bl.state,
+         bl.latitude,
+         bl.longitude
+       FROM businesses b
+       JOIN business_locations bl ON bl.business_id = b.id
+       ${where}
+       ORDER BY b.business_name, bl.location_name`, params);
+        const grouped = new Map();
+        for (const row of rows) {
+            const nearby = (0, geo_distance_1.nearbyKeepDecision)(origin, row.latitude, row.longitude, radiusMiles, { requireCoordinates: true });
+            if (!nearby.keep)
+                continue;
+            if (!grouped.has(row.id)) {
+                grouped.set(row.id, {
+                    id: row.id,
+                    businessName: row.business_name,
+                    slug: row.slug,
+                    businessType: row.business_type,
+                    website: row.website,
+                    businessStatus: row.business_status,
+                    claimStatus: row.claim_status,
+                    facebookUrl: typeof row.facebook_url === "string" ? row.facebook_url : null,
+                    instagramUrl: typeof row.instagram_url === "string" ? row.instagram_url : null,
+                    linkedinUrl: typeof row.linkedin_url === "string" ? row.linkedin_url : null,
+                    tiktokUrl: typeof row.tiktok_url === "string" ? row.tiktok_url : null,
+                    contactPhone: typeof row.contact_phone === "string" ? row.contact_phone : null,
+                    venueEmail: typeof row.venue_email === "string" ? row.venue_email : null,
+                    galleryImageUrls: parseGalleryImageUrls(row.venue_gallery_urls),
+                    capabilities: {
+                        dineAndDonate: Boolean(row.supports_dine_and_donate),
+                        shopAndDonate: Boolean(row.supports_shop_and_donate),
+                        serviceGiveback: Boolean(row.supports_service_giveback),
+                        guestBartending: Boolean(row.supports_guest_bartending),
+                    },
+                    locations: [],
+                    _nearestMiles: null,
+                });
+            }
+            const entry = grouped.get(row.id);
+            entry.locations.push({
+                id: row.location_id,
+                locationName: row.location_name,
+                city: row.city,
+                state: row.state,
+                distanceMiles: nearby.distanceMiles,
+            });
+            if (nearby.distanceMiles != null) {
+                if (entry._nearestMiles == null || nearby.distanceMiles < entry._nearestMiles) {
+                    entry._nearestMiles = nearby.distanceMiles;
+                }
+            }
+        }
+        const sorted = [...grouped.values()].sort((a, b) => {
+            if (origin) {
+                const da = a._nearestMiles;
+                const db = b._nearestMiles;
+                if (da != null && db != null && da !== db)
+                    return da - db;
+                if (da != null && db == null)
+                    return -1;
+                if (da == null && db != null)
+                    return 1;
+            }
+            return a.businessName.localeCompare(b.businessName);
+        });
+        const sliced = sorted.slice(0, limit);
+        const accessById = await loadLatestBusinessAccessStatuses(sliced.map((b) => b.id));
+        const payload = sliced.map(({ _nearestMiles: _drop, ...rest }) => {
+            const accessRequestStatus = accessById.get(rest.id) ?? null;
+            const flags = businessDirectoryFlags(rest.claimStatus, accessRequestStatus);
+            return {
+                ...rest,
+                accessRequestStatus,
+                awaitingVerification: flags.awaitingVerification,
+                inviteable: flags.inviteable,
+            };
+        });
+        res.json(payload);
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch business directory" });
+    }
+});
 exports.profilesRouter.get("/businesses/:slug", async (req, res) => {
     try {
         const { rows: bizRows } = await pool_1.pool.query("SELECT * FROM businesses WHERE slug = $1 LIMIT 1", [req.params.slug]);
@@ -1147,6 +1321,11 @@ exports.profilesRouter.get("/businesses/:slug", async (req, res) => {
         }
         const biz = bizRows[0];
         const { rows: locations } = await pool_1.pool.query("SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name", [biz.id]);
+        const accessById = await loadLatestBusinessAccessStatuses([Number(biz.id)]);
+        const accessRequestStatus = accessById.get(Number(biz.id)) ?? null;
+        const claimStatus = String(biz.claim_status ?? "unclaimed");
+        const businessStatus = String(biz.business_status ?? "preloaded");
+        const flags = businessDirectoryFlags(claimStatus, accessRequestStatus);
         res.json({
             id: biz.id,
             businessName: biz.business_name,
@@ -1154,7 +1333,19 @@ exports.profilesRouter.get("/businesses/:slug", async (req, res) => {
             businessType: biz.business_type,
             website: biz.website,
             contactEmail: biz.contact_email,
+            facebookUrl: biz.facebook_url ?? null,
+            instagramUrl: biz.instagram_url ?? null,
+            linkedinUrl: biz.linkedin_url ?? null,
+            tiktokUrl: biz.tiktok_url ?? null,
+            contactPhone: biz.contact_phone ?? null,
+            venueEmail: biz.venue_email ?? null,
+            galleryImageUrls: parseGalleryImageUrls(biz.venue_gallery_urls),
             profileStatus: biz.profile_status ?? biz.business_status,
+            claimStatus,
+            businessStatus,
+            accessRequestStatus,
+            awaitingVerification: flags.awaitingVerification,
+            inviteable: flags.inviteable,
             locations: locations.map((l) => ({
                 id: l.id,
                 locationName: l.location_name,

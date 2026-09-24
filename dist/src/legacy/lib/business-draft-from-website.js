@@ -6,6 +6,7 @@ const suggest_social_images_1 = require("./suggest-social-images");
 const business_venue_images_1 = require("./business-venue-images");
 const business_website_location_1 = require("./business-website-location");
 const venue_page_extract_1 = require("./venue-page-extract");
+const geo_distance_1 = require("./geo-distance");
 function normalizeWebsiteInput(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -29,12 +30,15 @@ function suggestNameFromHost(website) {
         return "";
     }
 }
-async function generateBusinessDraftFromWebsite(websiteInput) {
+async function generateBusinessDraftFromWebsite(websiteInput, near) {
     const website = normalizeWebsiteInput(websiteInput);
     if (!website || website.length > 2048) {
         throw new Error("A valid website URL is required.");
     }
-    const locationHints = await (0, business_website_location_1.scrapeBusinessLocationHints)(website);
+    const [locationHints, social] = await Promise.all([
+        (0, business_website_location_1.scrapeBusinessLocationHints)(website),
+        (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website),
+    ]);
     const [imageSuggestions, venuePhotos] = await Promise.all([
         (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }),
         (0, business_venue_images_1.scrapeBusinessVenueImages)({
@@ -50,9 +54,39 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         ]),
     ].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
     const fallbackName = suggestNameFromHost(website);
+    const nearZip = (near?.nearZip || "").replace(/\D/g, "").slice(0, 5);
+    const nearCity = (near?.city || "").trim();
+    const nearState = (near?.state || "").trim().toUpperCase().slice(0, 2);
+    async function resolveNearbyIfNeeded(businessName, cityIn, stateIn, addressIn) {
+        let city = cityIn;
+        let state = stateIn;
+        let address = addressIn;
+        if (city && state && address)
+            return { city, state, address };
+        if (nearZip.length !== 5 && !(nearCity && nearState)) {
+            return { city, state, address };
+        }
+        const nearby = await (0, geo_distance_1.searchNamedBusinessNear)(businessName || fallbackName, {
+            zip: nearZip,
+            city: nearCity || city,
+            state: nearState || state,
+        });
+        if (!nearby)
+            return { city, state, address };
+        return {
+            city: nearby.city || city,
+            state: nearby.state || state,
+            address: nearby.address || address,
+        };
+    }
     if ((0, ai_chat_1.aiProviderName)() === "none") {
-        const city = locationHints.city;
-        const state = locationHints.state;
+        let city = locationHints.city;
+        let state = locationHints.state;
+        let address = locationHints.address || "";
+        const resolved = await resolveNearbyIfNeeded(fallbackName, city, state, address);
+        city = resolved.city;
+        state = resolved.state;
+        address = resolved.address;
         const pageCopy = locationHints.pageText || locationHints.aboutHint || locationHints.hoursText
             ? await (0, venue_page_extract_1.extractVenueCopyFromPage)(locationHints.pageText || locationHints.hoursText || locationHints.aboutHint, {
                 aboutHint: locationHints.aboutHint,
@@ -64,17 +98,17 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
             businessName: fallbackName,
             businessType: "Restaurant",
             about: pageCopy?.about || locationHints.aboutHint || "",
-            contactEmail: "",
-            phone: "",
+            contactEmail: social.email || "",
+            phone: social.phone || "",
             city,
             state,
             locations: fallbackName
                 ? [
                     withReservation({
-                        locationName: "Main Location",
+                        locationName: city ? `${fallbackName} — ${city}` : "Main Location",
                         city,
                         state,
-                        ...(locationHints.address ? { address: locationHints.address } : {}),
+                        ...(address ? { address } : {}),
                     }, locationHints.reservationUrl),
                 ]
                 : [],
@@ -83,6 +117,11 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
             imageUrls,
             discountHours: pageCopy?.discountHours ?? null,
             eligibleWindow: pageCopy?.eligibleWindow ?? "",
+            facebookUrl: social.facebookUrl,
+            instagramUrl: social.instagramUrl,
+            linkedinUrl: social.linkedinUrl,
+            youtubeUrl: social.youtubeUrl,
+            tiktokUrl: social.tiktokUrl,
             supportsDineAndDonate: true,
             supportsShopAndDonate: false,
             supportsServiceGiveback: false,
@@ -194,6 +233,25 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
     }
     const pageCopy = await pageCopyPromise;
     const aboutFromPage = pageCopy?.about?.trim() || locationHints.aboutHint?.trim() || "";
+    let address = locationHints.address || locations[0]?.address || "";
+    const nearbyResolved = await resolveNearbyIfNeeded(businessName, city, state, address);
+    city = nearbyResolved.city;
+    state = nearbyResolved.state;
+    address = nearbyResolved.address;
+    if (locations[0]) {
+        if (!locations[0].city)
+            locations[0].city = city;
+        if (!locations[0].state)
+            locations[0].state = state;
+        if (!locations[0].address && address)
+            locations[0].address = address;
+        if (city) {
+            locations[0].locationName =
+                locations[0].locationName === "Main Location"
+                    ? `${businessName} — ${city}`
+                    : locations[0].locationName;
+        }
+    }
     const missingFields = [];
     if (!businessName)
         missingFields.push("Business name");
@@ -208,14 +266,19 @@ async function generateBusinessDraftFromWebsite(websiteInput) {
         about: aboutFromPage || str("about"),
         discountHours: pageCopy?.discountHours ?? null,
         eligibleWindow: pageCopy?.eligibleWindow ?? "",
-        contactEmail: str("contactEmail"),
-        phone: str("phone"),
+        contactEmail: str("contactEmail") || social.email || "",
+        phone: str("phone") || social.phone || "",
         city,
         state,
         locations,
         reservationUrl: locationHints.reservationUrl,
         bookingPlatform: locationHints.bookingPlatform,
         imageUrls,
+        facebookUrl: social.facebookUrl,
+        instagramUrl: social.instagramUrl,
+        linkedinUrl: social.linkedinUrl,
+        youtubeUrl: social.youtubeUrl,
+        tiktokUrl: social.tiktokUrl,
         supportsDineAndDonate: bool("supportsDineAndDonate", true),
         supportsShopAndDonate: bool("supportsShopAndDonate", false),
         supportsServiceGiveback: bool("supportsServiceGiveback", false),

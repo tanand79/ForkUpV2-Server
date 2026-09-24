@@ -23,6 +23,18 @@ export interface ParticipatingLocation {
     cta: ParticipationCta;
     reservationUrl: string | null;
     acceptanceStatus: string;
+    website?: string | null;
+    description?: string | null;
+    logoUrl?: string | null;
+    address?: string | null;
+    zip?: string | null;
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    tiktokUrl?: string | null;
+    contactEmail?: string | null;
+    contactPhone?: string | null;
+    galleryImageUrls?: string[];
 }
 export interface ParticipationRequest {
     firstName: string;

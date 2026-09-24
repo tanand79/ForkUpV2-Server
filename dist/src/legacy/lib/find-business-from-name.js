@@ -5,8 +5,10 @@ const ai_chat_1 = require("./ai-chat");
 const suggest_social_images_1 = require("./suggest-social-images");
 const business_venue_images_1 = require("./business-venue-images");
 const business_website_location_1 = require("./business-website-location");
-const join_door_type_1 = require("./join-door-type");
 const venue_page_extract_1 = require("./venue-page-extract");
+const join_door_type_1 = require("./join-door-type");
+const geo_distance_1 = require("./geo-distance");
+const persist_business_public_links_1 = require("./persist-business-public-links");
 function normalizeWebsite(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -19,6 +21,11 @@ function suggestHostName(name) {
         .replace(/[^a-z0-9]+/g, "")
         .slice(0, 40);
 }
+function cleanNearZip(raw) {
+    if (typeof raw !== "string")
+        return "";
+    return raw.replace(/\D/g, "").slice(0, 5);
+}
 async function findBusinessFromName(input) {
     const businessName = input.businessName.trim();
     if (!businessName || businessName.length > 200) {
@@ -26,18 +33,34 @@ async function findBusinessFromName(input) {
     }
     const joinDoorType = (0, join_door_type_1.normalizeJoinDoorType)(input.joinDoorType);
     const doorLabel = joinDoorType === "local" ? "local business" : "restaurant";
-    let website = "";
+    const nearZip = cleanNearZip(input.nearZip);
+    const nearCity = typeof input.city === "string" ? input.city.trim() : "";
+    const nearState = typeof input.state === "string"
+        ? input.state.trim().toUpperCase().slice(0, 2)
+        : "";
+    const knownWebsite = typeof input.website === "string" ? normalizeWebsite(input.website) : "";
+    const businessIdRaw = Number(input.businessId);
+    const businessId = Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
+    let website = knownWebsite;
     let about = "";
     let contactEmail = "";
     let phone = "";
     let city = "";
     let state = "";
+    let aiAddress = "";
+    let aiZip = "";
     let businessType = joinDoorType === "local" ? "Local Business" : "Restaurant";
-    if ((0, ai_chat_1.aiProviderName)() !== "none") {
+    if (!website && (0, ai_chat_1.aiProviderName)() !== "none") {
+        const nearHint = nearZip.length === 5
+            ? `Near US ZIP ${nearZip}. Return the specific store location closest to that ZIP (street address, city, state, zip) — not corporate HQ.`
+            : nearCity || nearState
+                ? `Near ${[nearCity, nearState].filter(Boolean).join(", ")}. Return the specific store closest to that area.`
+                : "If this is a chain, prefer a well-known flagship or leave city/state empty rather than inventing an address.";
         const system = [
             `You help ForkUp find a public ${doorLabel} website from a business name.`,
-            "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state.",
+            "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state, address, zip.",
             "website must be the official public homepage URL when reasonably known; otherwise guess the most likely official site.",
+            nearHint,
             "Never invent private emails or phones. Leave unknown fields as empty strings.",
             "Do not use placeholder phrases like 'Not provided on the website'.",
         ].join("\n");
@@ -61,6 +84,8 @@ async function findBusinessFromName(input) {
             city = (0, business_website_location_1.isEmptyLocationValue)(str("city")) ? "" : str("city");
             state = (0, business_website_location_1.isEmptyLocationValue)(str("state")) ? "" : str("state");
             businessType = str("businessType") || businessType;
+            aiAddress = (0, business_website_location_1.isEmptyLocationValue)(str("address")) ? "" : str("address");
+            aiZip = cleanNearZip(str("zip"));
         }
         catch {
         }
@@ -70,28 +95,59 @@ async function findBusinessFromName(input) {
         if (hostGuess)
             website = `https://www.${hostGuess}.com`;
     }
-    const hints = website
-        ? await (0, business_website_location_1.scrapeBusinessLocationHints)(website)
-        : {
-            address: "",
-            city: "",
-            state: "",
-            zip: "",
-            pageText: "",
-            sourceUrl: null,
-            websiteFound: false,
-            reservationUrl: null,
-            bookingPlatform: null,
-            bookingLabel: null,
-            aboutHint: "",
-            hoursText: "",
-        };
+    const emptyHints = {
+        address: "",
+        city: "",
+        state: "",
+        zip: "",
+        pageText: "",
+        sourceUrl: null,
+        websiteFound: false,
+        reservationUrl: null,
+        bookingPlatform: null,
+        bookingLabel: null,
+        aboutHint: "",
+        hoursText: "",
+    };
+    const emptySocial = {
+        facebookUrl: null,
+        instagramUrl: null,
+        linkedinUrl: null,
+        youtubeUrl: null,
+        tiktokUrl: null,
+        phone: null,
+        email: null,
+    };
+    const [hints, social] = await Promise.all([
+        website ? (0, business_website_location_1.scrapeBusinessLocationHints)(website) : Promise.resolve(emptyHints),
+        website ? (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website) : Promise.resolve(emptySocial),
+    ]);
     if ((0, business_website_location_1.isEmptyLocationValue)(city) && hints.city)
         city = hints.city;
     if ((0, business_website_location_1.isEmptyLocationValue)(state) && hints.state)
         state = hints.state;
-    const address = hints.address;
-    const zip = hints.zip;
+    let address = hints.address || aiAddress;
+    let zip = hints.zip || aiZip || nearZip;
+    const needsNearby = (!city && !state && !address) ||
+        nearZip.length === 5 ||
+        Boolean(nearCity && nearState);
+    if (needsNearby && (nearZip.length === 5 || nearCity || nearState)) {
+        const nearby = await (0, geo_distance_1.searchNamedBusinessNear)(businessName, {
+            zip: nearZip || zip,
+            city: nearCity || city,
+            state: nearState || state,
+        });
+        if (nearby) {
+            if (nearby.address)
+                address = nearby.address;
+            if (nearby.city)
+                city = nearby.city;
+            if (nearby.state)
+                state = nearby.state;
+            if (nearby.zip)
+                zip = nearby.zip;
+        }
+    }
     const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
         website ? (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
         website
@@ -112,6 +168,21 @@ async function findBusinessFromName(input) {
         about = pageCopy.about;
     else if (!about && hints.aboutHint)
         about = hints.aboutHint;
+    if (!phone && social.phone)
+        phone = social.phone;
+    if (!contactEmail && social.email)
+        contactEmail = social.email;
+    if (businessId) {
+        await (0, persist_business_public_links_1.persistBusinessPublicLinks)(businessId, {
+            website: website || null,
+            facebookUrl: social.facebookUrl,
+            instagramUrl: social.instagramUrl,
+            linkedinUrl: social.linkedinUrl,
+            tiktokUrl: social.tiktokUrl,
+            phone: social.phone,
+            venueEmail: social.email,
+        });
+    }
     const mergedImages = [
         ...venuePhotos,
         ...imageSuggestions.map((img) => img.url).filter(Boolean),
@@ -119,6 +190,9 @@ async function findBusinessFromName(input) {
     const imageUrls = [...new Set(mergedImages)];
     const logoCandidate = imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null;
     const photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
+    if (businessId && photoUrls.length > 0) {
+        await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, photoUrls);
+    }
     const locationFound = Boolean(city || state || address);
     const checks = {
         websiteFound: hints.websiteFound || Boolean(website),
@@ -155,6 +229,11 @@ async function findBusinessFromName(input) {
         imageUrls,
         discountHours: pageCopy?.discountHours ?? null,
         eligibleWindow: pageCopy?.eligibleWindow ?? "",
+        facebookUrl: social.facebookUrl,
+        instagramUrl: social.instagramUrl,
+        linkedinUrl: social.linkedinUrl,
+        youtubeUrl: social.youtubeUrl,
+        tiktokUrl: social.tiktokUrl,
         checks,
         locationSourceUrl: hints.sourceUrl,
         joinDoorType,

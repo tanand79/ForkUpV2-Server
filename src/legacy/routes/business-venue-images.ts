@@ -5,14 +5,38 @@
  * running the full AI business draft. Used by join profile to refresh stale
  * session drafts that only have a handful of site photos.
  *
- * Request: { websiteUrl: string, reservationUrl?: string | null }
- * Response: { imageUrls: string[], reservationUrl: string | null }
+ * Request: { websiteUrl: string, reservationUrl?: string | null, businessId?: number }
+ * Response: { imageUrls: string[], reservationUrl: string | null, coverUrl?: string | null }
+ *
+ * Changelog: Do not call scrapeBusinessLocationHints here — that multi-page crawl
+ * blocked the gallery spinner for tens of seconds. Booking links are taken from
+ * the request or discovered inside scrapeBusinessVenueImages from homepage HTML.
+ * Additive: optional businessId persists gallery URLs (null-only) for fast reopen.
+ * Additive: when businessId already has venue_gallery_urls, return DB cache — no scrape.
+ * Additive: cached path also returns businesses.venue_cover_url as coverUrl.
  */
 import { Router } from "express";
+import { pool } from "../db/pool";
 import { scrapeBusinessVenueImages } from "../lib/business-venue-images";
-import { scrapeBusinessLocationHints } from "../lib/business-website-location";
+import { persistBusinessGalleryUrls } from "../lib/persist-business-public-links";
 
 export const businessVenueImagesRouter = Router();
+
+function parseStoredGallery(raw: unknown): string[] {
+  if (!raw) return [];
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (u): u is string => typeof u === "string" && u.trim().length > 0,
+  );
+}
 
 businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
   try {
@@ -22,26 +46,53 @@ businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
       res.status(400).json({ error: "websiteUrl is required." });
       return;
     }
-    let reservationUrl =
+    const reservationUrl =
       typeof req.body?.reservationUrl === "string"
         ? req.body.reservationUrl.trim()
         : "";
-    if (!reservationUrl) {
+    const businessIdRaw = Number(req.body?.businessId);
+    const businessId =
+      Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
+
+    // Instant path: gallery already stored — never re-scrape on every open.
+    if (businessId) {
       try {
-        const hints = await scrapeBusinessLocationHints(websiteUrl);
-        reservationUrl = hints.reservationUrl?.trim() || "";
+        const { rows } = await pool.query<{
+          venue_gallery_urls: unknown;
+          venue_cover_url: string | null;
+        }>(
+          `SELECT venue_gallery_urls, venue_cover_url FROM businesses WHERE id = $1 LIMIT 1`,
+          [businessId],
+        );
+        const cached = parseStoredGallery(rows[0]?.venue_gallery_urls);
+        if (cached.length > 0) {
+          const coverUrl = rows[0]?.venue_cover_url?.trim() || null;
+          res.json({
+            imageUrls: cached,
+            reservationUrl: reservationUrl || null,
+            coverUrl,
+          });
+          return;
+        }
       } catch {
-        /* keep empty — scrape may still find booking link from homepage HTML */
+        /* fall through to scrape */
       }
     }
+
     const imageUrls = await scrapeBusinessVenueImages({
       websiteUrl,
       reservationUrl: reservationUrl || null,
       limit: 16,
     });
+
+    if (businessId && imageUrls.length > 0) {
+      void persistBusinessGalleryUrls(businessId, imageUrls);
+    }
+
     res.json({
       imageUrls,
       reservationUrl: reservationUrl || null,
+      coverUrl: null,
     });
   } catch (err) {
     console.error(err);

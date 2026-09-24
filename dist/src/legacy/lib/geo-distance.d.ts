@@ -26,3 +26,15 @@ export declare function reverseGeocodeUs(latitude: number, longitude: number): P
     state: string | null;
     zip: string | null;
 } | null>;
+export type NamedBusinessPlace = {
+    address: string;
+    city: string;
+    state: string;
+    zip: string;
+    displayName: string;
+};
+export declare function searchNamedBusinessNear(businessName: string, near: {
+    zip?: string;
+    city?: string;
+    state?: string;
+}): Promise<NamedBusinessPlace | null>;

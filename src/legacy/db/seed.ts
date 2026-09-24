@@ -211,6 +211,13 @@ export const LIVE_SEED_CAMPAIGN_SLUGS = [
   "greenleaf-food-bank",
 ] as const;
 
+/** Demo seed business slugs — kept in DB for showcase campaigns; hide from public directory. */
+export const SEED_BUSINESS_SLUGS = [
+  "olive-and-oak",
+  "harbor-coffee",
+  "farm-table",
+] as const;
+
 /** Known historical demo campaign slugs (for optional cleanup). */
 export const DEMO_CAMPAIGN_SLUGS = [
   "sovana-dine-and-donate-spring",

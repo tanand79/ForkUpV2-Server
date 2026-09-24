@@ -45,7 +45,35 @@ function participationMethodLabel(methodType) {
     };
     return labels[methodType];
 }
-function mapLocation(row) {
+async function mapLocation(row) {
+    const website = (typeof row.website === "string" && row.website.trim()) ||
+        null;
+    const description = (typeof row.description === "string" && row.description.trim()) ||
+        null;
+    const address = (typeof row.address === "string" && row.address.trim()) || null;
+    const zip = (typeof row.zip === "string" && row.zip.trim()) || null;
+    const logoUrl = await (0, s3_1.resolveStoredImageUrl)(row.logo_url ?? null);
+    const facebookUrl = (typeof row.facebook_url === "string" && row.facebook_url.trim()) || null;
+    const instagramUrl = (typeof row.instagram_url === "string" && row.instagram_url.trim()) || null;
+    const linkedinUrl = (typeof row.linkedin_url === "string" && row.linkedin_url.trim()) || null;
+    const tiktokUrl = (typeof row.tiktok_url === "string" && row.tiktok_url.trim()) || null;
+    const contactEmail = (typeof row.venue_email === "string" && row.venue_email.trim()) || null;
+    const contactPhone = (typeof row.contact_phone === "string" && row.contact_phone.trim()) || null;
+    let galleryImageUrls = [];
+    if (Array.isArray(row.venue_gallery_urls)) {
+        galleryImageUrls = row.venue_gallery_urls.filter((u) => typeof u === "string" && u.trim().length > 0);
+    }
+    else if (typeof row.venue_gallery_urls === "string") {
+        try {
+            const parsed = JSON.parse(row.venue_gallery_urls);
+            if (Array.isArray(parsed)) {
+                galleryImageUrls = parsed.filter((u) => typeof u === "string" && u.trim().length > 0);
+            }
+        }
+        catch {
+            galleryImageUrls = [];
+        }
+    }
     return {
         businessId: row.business_id,
         locationId: row.location_id,
@@ -61,6 +89,18 @@ function mapLocation(row) {
         cta: ctaForMethod(row.method_type, row.reservation_url),
         reservationUrl: row.reservation_url,
         acceptanceStatus: row.acceptance_status,
+        website,
+        description,
+        logoUrl: logoUrl || null,
+        address,
+        zip,
+        facebookUrl,
+        instagramUrl,
+        linkedinUrl,
+        tiktokUrl,
+        contactEmail,
+        contactPhone,
+        galleryImageUrls,
     };
 }
 async function mapListItem(row, locationCount) {
@@ -126,7 +166,19 @@ async function fetchAcceptedLocations(campaignId) {
        cbl.participation_hours,
        bl.reservation_url,
        cbl.acceptance_status,
-       cm.method_type
+       cm.method_type,
+       COALESCE(NULLIF(TRIM(b.website), ''), NULLIF(TRIM(bl.website_url), '')) AS website,
+       NULLIF(TRIM(b.description), '') AS description,
+       b.logo_url,
+       bl.address,
+       bl.zip,
+       NULLIF(TRIM(b.facebook_url), '') AS facebook_url,
+       NULLIF(TRIM(b.instagram_url), '') AS instagram_url,
+       NULLIF(TRIM(b.linkedin_url), '') AS linkedin_url,
+       NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
+       NULLIF(TRIM(b.venue_email), '') AS venue_email,
+       NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
+       b.venue_gallery_urls
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN business_locations bl ON bl.id = cbl.location_id
@@ -134,7 +186,7 @@ async function fetchAcceptedLocations(campaignId) {
      WHERE cbl.campaign_id = $1
        AND cbl.acceptance_status IN ('accepted', 'live', 'completed')
      ORDER BY b.business_name, bl.location_name`, [campaignId]);
-    return rows.map(mapLocation);
+    return Promise.all(rows.map(mapLocation));
 }
 async function fetchLocationCount(campaignId) {
     const { rows: rows } = await pool_1.pool.query(`SELECT COUNT(*) AS count FROM campaign_business_locations

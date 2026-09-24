@@ -10,6 +10,7 @@ exports.geocodeUsZip = geocodeUsZip;
 exports.resolveUsZip = resolveUsZip;
 exports.geocodeUsCityState = geocodeUsCityState;
 exports.reverseGeocodeUs = reverseGeocodeUs;
+exports.searchNamedBusinessNear = searchNamedBusinessNear;
 exports.DEFAULT_NEARBY_RADIUS_MILES = 50;
 function parseLatLng(latRaw, lngRaw) {
     const latitude = typeof latRaw === "number"
@@ -249,6 +250,71 @@ async function reverseGeocodeUsBigDataCloud(latitude, longitude) {
             state,
             zip: data.postcode?.replace(/\D/g, "").slice(0, 5) || null,
         };
+    }
+    catch {
+        return null;
+    }
+}
+async function searchNamedBusinessNear(businessName, near) {
+    const name = businessName.trim();
+    if (!name || name.length > 200)
+        return null;
+    let zip = (near.zip || "").replace(/\D/g, "").slice(0, 5);
+    let city = (near.city || "").trim();
+    let state = (near.state || "").trim().toUpperCase().slice(0, 2);
+    if (zip.length === 5 && (!city || !state)) {
+        const place = await resolveUsZip(zip);
+        if (place) {
+            city = city || place.city || "";
+            state = state || place.state || "";
+        }
+    }
+    const where = zip.length === 5
+        ? zip
+        : [city, state].filter(Boolean).join(", ") || "";
+    if (!where)
+        return null;
+    try {
+        const url = new URL("https://nominatim.openstreetmap.org/search");
+        url.searchParams.set("format", "json");
+        url.searchParams.set("addressdetails", "1");
+        url.searchParams.set("limit", "5");
+        url.searchParams.set("countrycodes", "us");
+        url.searchParams.set("q", `${name}, ${where}, USA`);
+        const res = await fetch(url.toString(), {
+            headers: {
+                "User-Agent": "ForkUp/1.0 (business join nearby; contact support@forkup.app)",
+                Accept: "application/json",
+            },
+            signal: AbortSignal.timeout(8000),
+        });
+        if (!res.ok)
+            return null;
+        const data = (await res.json());
+        for (const hit of data) {
+            const addr = hit.address;
+            if (!addr)
+                continue;
+            const road = [addr.house_number, addr.road].filter(Boolean).join(" ").trim();
+            const hitCity = addr.city || addr.town || addr.village || addr.hamlet || addr.municipality || "";
+            const iso = (addr["ISO3166-2-lvl4"] || "").toUpperCase();
+            const hitState = /^US-[A-Z]{2}$/.test(iso)
+                ? iso.slice(3)
+                : (addr.state || "").length === 2
+                    ? addr.state.toUpperCase()
+                    : state;
+            const hitZip = (addr.postcode || zip || "").replace(/\D/g, "").slice(0, 5);
+            if (!road && !hitCity)
+                continue;
+            return {
+                address: road,
+                city: hitCity || city,
+                state: hitState || state,
+                zip: hitZip.length === 5 ? hitZip : zip,
+                displayName: (hit.display_name || name).trim(),
+            };
+        }
+        return null;
     }
     catch {
         return null;

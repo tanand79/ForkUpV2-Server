@@ -25,6 +25,18 @@ function normalizeWebsiteUrl(raw) {
         return "";
     return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
+function preferWwwUrl(website) {
+    try {
+        const u = new URL(normalizeWebsiteUrl(website));
+        if (!u.hostname.startsWith("www.")) {
+            u.hostname = `www.${u.hostname}`;
+        }
+        return u.toString();
+    }
+    catch {
+        return website;
+    }
+}
 function originOf(website) {
     try {
         const u = new URL(normalizeWebsiteUrl(website));
@@ -286,11 +298,17 @@ async function scrapeBusinessLocationHints(websiteInput) {
     const website = normalizeWebsiteUrl(websiteInput);
     if (!website)
         return empty;
-    const origin = originOf(website);
+    const wwwWebsite = preferWwwUrl(website);
+    let seedHtml = await fetchHtml(wwwWebsite);
+    let activeWebsite = wwwWebsite;
+    if (!seedHtml && wwwWebsite !== website) {
+        seedHtml = await fetchHtml(website);
+        activeWebsite = website;
+    }
+    const origin = originOf(activeWebsite);
     if (!origin)
         return empty;
-    const seedHtml = await fetchHtml(website);
-    const urls = [website];
+    const urls = [activeWebsite];
     if (seedHtml) {
         urls.push(...discoverLocationLinks(origin, seedHtml));
     }
@@ -316,7 +334,7 @@ async function scrapeBusinessLocationHints(websiteInput) {
             bestAbout = { score: metaScore + 5, text: meta };
     }
     for (const url of uniqueUrls) {
-        const html = url === website ? seedHtml : await fetchHtml(url);
+        const html = url === activeWebsite ? seedHtml : await fetchHtml(url);
         if (!html)
             continue;
         anyOk = true;

@@ -1,5 +1,5 @@
-import { type JoinDoorType } from "./join-door-type";
 import { type VenuePageCopy } from "./venue-page-extract";
+import { type JoinDoorType } from "./join-door-type";
 export type FindBusinessChecks = {
     websiteFound: boolean;
     logoFound: boolean;
@@ -30,6 +30,11 @@ export type FindBusinessFromNameResult = {
     imageUrls: string[];
     discountHours: VenuePageCopy["discountHours"] | null;
     eligibleWindow: string;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    youtubeUrl: string | null;
+    tiktokUrl: string | null;
     checks: FindBusinessChecks;
     locationSourceUrl: string | null;
     joinDoorType: JoinDoorType | null;
@@ -39,4 +44,9 @@ export type FindBusinessFromNameResult = {
 export declare function findBusinessFromName(input: {
     businessName: string;
     joinDoorType?: unknown;
+    nearZip?: unknown;
+    city?: unknown;
+    state?: unknown;
+    website?: unknown;
+    businessId?: unknown;
 }): Promise<FindBusinessFromNameResult>;

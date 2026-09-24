@@ -4,21 +4,34 @@
  * Purpose: Support mockup Step 1 “Find My Restaurant/Business” — AI suggests a
  * website from the name, then real HTML scrape fills location + photo checks.
  *
- * Inputs: businessName, optional joinDoorType (restaurant | local).
- * Outputs: confirmation payload (name, website, city/state/address, images, checks).
+ * Inputs: businessName, optional joinDoorType (restaurant | local),
+ *         optional nearZip / city / state for nearby store resolution.
+ * Outputs: confirmation payload (name, website, city/state/address, images,
+ *          social links, checks).
  *
  * Changelog (D1): Added — name → website (AI) + scrape + social/website images.
  * Changelog: Include a booking-platform URL when the business site links one.
+ * Changelog: Nearby ZIP/city resolves a specific store (not “Location to confirm”);
+ *            discover Facebook / Instagram / LinkedIn / YouTube from the site.
+ * Changelog: Optional website override — prefer known DB URL over AI host guess.
+ * Changelog: Optional businessId — persist discovered public social/contact into businesses.
  */
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
-import { looksLikeDecorativeAssetUrl, looksLikeLogoUrl, suggestSocialImages } from "./suggest-social-images";
+import {
+  discoverSocialLinksFromWebsite,
+  looksLikeDecorativeAssetUrl,
+  looksLikeLogoUrl,
+  suggestSocialImages,
+} from "./suggest-social-images";
 import { scrapeBusinessVenueImages } from "./business-venue-images";
 import {
   isEmptyLocationValue,
   scrapeBusinessLocationHints,
 } from "./business-website-location";
-import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
 import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extract";
+import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
+import { searchNamedBusinessNear } from "./geo-distance";
+import { persistBusinessPublicLinks, persistBusinessGalleryUrls } from "./persist-business-public-links";
 
 export type FindBusinessChecks = {
   websiteFound: boolean;
@@ -53,6 +66,12 @@ export type FindBusinessFromNameResult = {
   discountHours: VenuePageCopy["discountHours"] | null;
   /** Time range from the site, when one was stated. */
   eligibleWindow: string;
+  /** Additive: public social profile URLs discovered from the website. */
+  facebookUrl: string | null;
+  instagramUrl: string | null;
+  linkedinUrl: string | null;
+  youtubeUrl: string | null;
+  tiktokUrl: string | null;
   checks: FindBusinessChecks;
   locationSourceUrl: string | null;
   joinDoorType: JoinDoorType | null;
@@ -73,12 +92,25 @@ function suggestHostName(name: string): string {
     .slice(0, 40);
 }
 
+function cleanNearZip(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw.replace(/\D/g, "").slice(0, 5);
+}
+
 /**
  * Resolve a reviewable business “we found you” card from a typed name.
  */
 export async function findBusinessFromName(input: {
   businessName: string;
   joinDoorType?: unknown;
+  /** US ZIP — prefer a store near this area (NPO-style nearby). */
+  nearZip?: unknown;
+  city?: unknown;
+  state?: unknown;
+  /** Known public website (from DB / campaign card) — skip AI host guess when set. */
+  website?: unknown;
+  /** When set, persist discovered public social/contact onto this business (null-only). */
+  businessId?: unknown;
 }): Promise<FindBusinessFromNameResult> {
   const businessName = input.businessName.trim();
   if (!businessName || businessName.length > 200) {
@@ -86,20 +118,40 @@ export async function findBusinessFromName(input: {
   }
   const joinDoorType = normalizeJoinDoorType(input.joinDoorType);
   const doorLabel = joinDoorType === "local" ? "local business" : "restaurant";
+  const nearZip = cleanNearZip(input.nearZip);
+  const nearCity = typeof input.city === "string" ? input.city.trim() : "";
+  const nearState =
+    typeof input.state === "string"
+      ? input.state.trim().toUpperCase().slice(0, 2)
+      : "";
+  const knownWebsite =
+    typeof input.website === "string" ? normalizeWebsite(input.website) : "";
+  const businessIdRaw = Number(input.businessId);
+  const businessId =
+    Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
 
-  let website = "";
+  let website = knownWebsite;
   let about = "";
   let contactEmail = "";
   let phone = "";
   let city = "";
   let state = "";
+  let aiAddress = "";
+  let aiZip = "";
   let businessType = joinDoorType === "local" ? "Local Business" : "Restaurant";
 
-  if (aiProviderName() !== "none") {
+  if (!website && aiProviderName() !== "none") {
+    const nearHint =
+      nearZip.length === 5
+        ? `Near US ZIP ${nearZip}. Return the specific store location closest to that ZIP (street address, city, state, zip) — not corporate HQ.`
+        : nearCity || nearState
+          ? `Near ${[nearCity, nearState].filter(Boolean).join(", ")}. Return the specific store closest to that area.`
+          : "If this is a chain, prefer a well-known flagship or leave city/state empty rather than inventing an address.";
     const system = [
       `You help ForkUp find a public ${doorLabel} website from a business name.`,
-      "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state.",
+      "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state, address, zip.",
       "website must be the official public homepage URL when reasonably known; otherwise guess the most likely official site.",
+      nearHint,
       "Never invent private emails or phones. Leave unknown fields as empty strings.",
       "Do not use placeholder phrases like 'Not provided on the website'.",
     ].join("\n");
@@ -123,6 +175,8 @@ export async function findBusinessFromName(input: {
       city = isEmptyLocationValue(str("city")) ? "" : str("city");
       state = isEmptyLocationValue(str("state")) ? "" : str("state");
       businessType = str("businessType") || businessType;
+      aiAddress = isEmptyLocationValue(str("address")) ? "" : str("address");
+      aiZip = cleanNearZip(str("zip"));
     } catch {
       /* scrape may still help if we can guess a host */
     }
@@ -133,27 +187,59 @@ export async function findBusinessFromName(input: {
     if (hostGuess) website = `https://www.${hostGuess}.com`;
   }
 
-  const hints = website
-    ? await scrapeBusinessLocationHints(website)
-    : {
-        address: "",
-        city: "",
-        state: "",
-        zip: "",
-        pageText: "",
-        sourceUrl: null,
-        websiteFound: false,
-        reservationUrl: null,
-        bookingPlatform: null,
-        bookingLabel: null,
-        aboutHint: "",
-        hoursText: "",
-      };
+  const emptyHints = {
+    address: "",
+    city: "",
+    state: "",
+    zip: "",
+    pageText: "",
+    sourceUrl: null as string | null,
+    websiteFound: false,
+    reservationUrl: null as string | null,
+    bookingPlatform: null as string | null,
+    bookingLabel: null as string | null,
+    aboutHint: "",
+    hoursText: "",
+  };
+  const emptySocial = {
+    facebookUrl: null as string | null,
+    instagramUrl: null as string | null,
+    linkedinUrl: null as string | null,
+    youtubeUrl: null as string | null,
+    tiktokUrl: null as string | null,
+    phone: null as string | null,
+    email: null as string | null,
+  };
+
+  // Social in parallel with location — do not wait for a hung apex crawl first.
+  const [hints, social] = await Promise.all([
+    website ? scrapeBusinessLocationHints(website) : Promise.resolve(emptyHints),
+    website ? discoverSocialLinksFromWebsite(website) : Promise.resolve(emptySocial),
+  ]);
 
   if (isEmptyLocationValue(city) && hints.city) city = hints.city;
   if (isEmptyLocationValue(state) && hints.state) state = hints.state;
-  const address = hints.address;
-  const zip = hints.zip;
+  let address = hints.address || aiAddress;
+  let zip = hints.zip || aiZip || nearZip;
+
+  // Chain HQ sites often have no store address — resolve a nearby place like NPO ZIP search.
+  const needsNearby =
+    (!city && !state && !address) ||
+    nearZip.length === 5 ||
+    Boolean(nearCity && nearState);
+  if (needsNearby && (nearZip.length === 5 || nearCity || nearState)) {
+    const nearby = await searchNamedBusinessNear(businessName, {
+      zip: nearZip || zip,
+      city: nearCity || city,
+      state: nearState || state,
+    });
+    if (nearby) {
+      if (nearby.address) address = nearby.address;
+      if (nearby.city) city = nearby.city;
+      if (nearby.state) state = nearby.state;
+      if (nearby.zip) zip = nearby.zip;
+    }
+  }
 
   const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
     website ? suggestSocialImages({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
@@ -173,6 +259,21 @@ export async function findBusinessFromName(input: {
   ]);
   if (pageCopy?.about) about = pageCopy.about;
   else if (!about && hints.aboutHint) about = hints.aboutHint;
+  if (!phone && social.phone) phone = social.phone;
+  if (!contactEmail && social.email) contactEmail = social.email;
+
+  if (businessId) {
+    await persistBusinessPublicLinks(businessId, {
+      website: website || null,
+      facebookUrl: social.facebookUrl,
+      instagramUrl: social.instagramUrl,
+      linkedinUrl: social.linkedinUrl,
+      tiktokUrl: social.tiktokUrl,
+      phone: social.phone,
+      venueEmail: social.email,
+    });
+  }
+
   const mergedImages = [
     ...venuePhotos,
     ...imageSuggestions.map((img) => img.url).filter(Boolean),
@@ -183,6 +284,10 @@ export async function findBusinessFromName(input: {
   const photoUrls = imageUrls.filter(
     (u) => !looksLikeLogoUrl(u) && !looksLikeDecorativeAssetUrl(u),
   );
+
+  if (businessId && photoUrls.length > 0) {
+    await persistBusinessGalleryUrls(businessId, photoUrls);
+  }
 
   const locationFound = Boolean(city || state || address);
   const checks: FindBusinessChecks = {
@@ -223,6 +328,11 @@ export async function findBusinessFromName(input: {
     imageUrls,
     discountHours: pageCopy?.discountHours ?? null,
     eligibleWindow: pageCopy?.eligibleWindow ?? "",
+    facebookUrl: social.facebookUrl,
+    instagramUrl: social.instagramUrl,
+    linkedinUrl: social.linkedinUrl,
+    youtubeUrl: social.youtubeUrl,
+    tiktokUrl: social.tiktokUrl,
     checks,
     locationSourceUrl: hints.sourceUrl,
     joinDoorType,

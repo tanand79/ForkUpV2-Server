@@ -67,6 +67,51 @@ function originOf(website: string): string | null {
   }
 }
 
+/** Prefer www host for restaurant sites (apex often hangs or redirects slowly). */
+function preferWwwOrigin(origin: string): string {
+  try {
+    const u = new URL(origin);
+    if (!/^www\./i.test(u.hostname)) {
+      u.hostname = `www.${u.hostname}`;
+    }
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return origin;
+  }
+}
+
+function apexOrigin(origin: string): string {
+  try {
+    const u = new URL(origin);
+    u.hostname = u.hostname.replace(/^www\./i, "");
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return origin;
+  }
+}
+
+/** Homepage HTML: try www first, then apex — never wait on a dead apex alone. */
+async function fetchHomepageHtml(website: string): Promise<{
+  html: string | null;
+  origin: string;
+  pageUrl: string;
+}> {
+  const rawOrigin = originOf(website);
+  if (!rawOrigin) return { html: null, origin: "", pageUrl: website };
+  const www = preferWwwOrigin(rawOrigin);
+  const apex = apexOrigin(rawOrigin);
+  const candidates =
+    www.toLowerCase() === apex.toLowerCase()
+      ? [www]
+      : [www, apex];
+  for (const origin of candidates) {
+    const pageUrl = `${origin}/`;
+    const html = await fetchHtml(pageUrl);
+    if (html) return { html, origin, pageUrl };
+  }
+  return { html: null, origin: www, pageUrl: `${www}/` };
+}
+
 async function fetchHtml(url: string): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -304,6 +349,31 @@ function preferHigherRes(a: string, b: string): string {
  * Collect venue gallery photos from the business site (and booking page when linked).
  * Works for any restaurant / local business URL — not Sovana-specific.
  */
+function rankVenueImageUrls(urls: string[]): string[] {
+  return [...urls]
+    .filter((u) => !looksLikeDecorativeAssetUrl(u))
+    .sort((a, b) => {
+      const logoA = looksLikeLogoUrl(a) ? 1 : 0;
+      const logoB = looksLikeLogoUrl(b) ? 1 : 0;
+      if (logoA !== logoB) return logoA - logoB;
+      const resyA = /image\.resy\.com/i.test(a) ? 0 : 1;
+      const resyB = /image\.resy\.com/i.test(b) ? 0 : 1;
+      if (resyA !== resyB) return resyA - resyB;
+      const jpgA = /\.(jpe?g|webp)(\?|$)|\/jpe?g(?:\/|$)/i.test(a) ? 0 : 1;
+      const jpgB = /\.(jpe?g|webp)(\?|$)|\/jpe?g(?:\/|$)/i.test(b) ? 0 : 1;
+      if (jpgA !== jpgB) return jpgA - jpgB;
+      return photoCoverRank(a) - photoCoverRank(b);
+    });
+}
+
+function proxyResyUrls(urls: string[]): string[] {
+  return urls.map((url) =>
+    /image\.resy\.com/i.test(url)
+      ? `/api/venue-photo-proxy?url=${encodeURIComponent(url)}`
+      : url,
+  );
+}
+
 export async function scrapeBusinessVenueImages(input: {
   websiteUrl: string;
   reservationUrl?: string | null;
@@ -312,17 +382,21 @@ export async function scrapeBusinessVenueImages(input: {
   const limit = Math.min(20, Math.max(4, input.limit ?? DEFAULT_LIMIT));
   const website = normalizeWebsiteUrl(input.websiteUrl);
   if (!website) return [];
-  const origin = originOf(website);
+
+  const home = await fetchHomepageHtml(website);
+  const origin = home.origin || preferWwwOrigin(originOf(website) || "");
   if (!origin) return [];
 
-  const urls: string[] = [website];
+  const seedHtml = home.html;
+  const seedPageUrl = home.pageUrl || `${origin}/`;
+
+  const urls: string[] = [seedPageUrl];
   for (const path of PHOTO_PATHS) {
     if (path === "/") continue;
     urls.push(`${origin}${path}`);
     if (!path.endsWith("/")) urls.push(`${origin}${path}/`);
   }
 
-  const seedHtml = await fetchHtml(website);
   if (seedHtml) {
     urls.push(...discoverPhotoPageLinks(origin, seedHtml));
     const booking =
@@ -340,7 +414,6 @@ export async function scrapeBusinessVenueImages(input: {
     null;
   const bookingPhotos = await fetchBookingPlatformVenueImages(bookingUrl);
 
-  const uniquePages = [...new Set(urls)].slice(0, MAX_PAGES);
   const byKey = new Map<string, string>();
 
   const ingest = (img: string) => {
@@ -353,51 +426,64 @@ export async function scrapeBusinessVenueImages(input: {
   // Booking galleries first (Resy carousel) — real venue photos.
   for (const img of bookingPhotos) ingest(img);
 
+  // Fast path: enough booking photos → skip multi-page site crawl (global).
+  if (bookingPhotos.length >= Math.min(limit, 6)) {
+    const bookingOnly = rankVenueImageUrls([...byKey.values()]).filter((u) =>
+      /image\.resy\.com/i.test(u),
+    );
+    return proxyResyUrls(bookingOnly.slice(0, limit));
+  }
+
   // When Resy (or another booking gallery) already gave real photos, skip
   // mixing in site PNG ornaments that look like "photos" by pixel size.
   const hasBookingGallery = bookingPhotos.length >= 3;
 
-  for (const pageUrl of uniquePages) {
-    const html = pageUrl === website ? seedHtml : await fetchHtml(pageUrl);
-    if (!html) continue;
+  const uniquePages = [...new Set(urls)].slice(0, MAX_PAGES);
+  const PAGE_CONCURRENCY = 4;
+
+  const ingestPage = (pageUrl: string, html: string | null) => {
+    if (!html) return;
     const fromExtract = extractImageUrlsFromHtml(html, pageUrl);
     const fromLazy = extractLazyImageUrls(html, pageUrl);
     for (const img of [...fromExtract, ...fromLazy]) {
-      if (hasBookingGallery && /\.png(\?|$)/i.test(img) && !/image\.resy\.com/i.test(img)) {
+      if (
+        hasBookingGallery &&
+        /\.png(\?|$)/i.test(img) &&
+        !/image\.resy\.com/i.test(img)
+      ) {
         continue;
       }
       ingest(img);
     }
+  };
+
+  // Seed page already fetched — ingest without a second round-trip.
+  ingestPage(seedPageUrl, seedHtml);
+
+  const remaining = uniquePages.filter(
+    (u) => u !== seedPageUrl && u !== website && u !== `${origin}/`,
+  );
+
+  for (let i = 0; i < remaining.length; i += PAGE_CONCURRENCY) {
+    if (byKey.size >= limit) break;
+    const batch = remaining.slice(i, i + PAGE_CONCURRENCY);
+    const htmls = await Promise.all(batch.map((pageUrl) => fetchHtml(pageUrl)));
+    batch.forEach((pageUrl, idx) => ingestPage(pageUrl, htmls[idx] ?? null));
   }
 
-  let ranked = [...byKey.values()]
-    .filter((u) => !looksLikeDecorativeAssetUrl(u))
-    .sort((a, b) => {
-      const logoA = looksLikeLogoUrl(a) ? 1 : 0;
-      const logoB = looksLikeLogoUrl(b) ? 1 : 0;
-      if (logoA !== logoB) return logoA - logoB;
-      const resyA = /image\.resy\.com/i.test(a) ? 0 : 1;
-      const resyB = /image\.resy\.com/i.test(b) ? 0 : 1;
-      if (resyA !== resyB) return resyA - resyB;
-      const jpgA = /\.(jpe?g|webp)(\?|$)|\/jpe?g(?:\/|$)/i.test(a) ? 0 : 1;
-      const jpgB = /\.(jpe?g|webp)(\?|$)|\/jpe?g(?:\/|$)/i.test(b) ? 0 : 1;
-      if (jpgA !== jpgB) return jpgA - jpgB;
-      return photoCoverRank(a) - photoCoverRank(b);
-    });
+  let ranked = rankVenueImageUrls([...byKey.values()]);
 
   // Prefer the booking carousel when it has a full set.
   const bookingOnly = ranked.filter((u) => /image\.resy\.com/i.test(u));
   if (bookingOnly.length >= 4) {
     ranked = [
       ...bookingOnly,
-      ...ranked.filter((u) => !/image\.resy\.com/i.test(u) && /\.(jpe?g|webp)(\?|$)/i.test(u)),
+      ...ranked.filter(
+        (u) => !/image\.resy\.com/i.test(u) && /\.(jpe?g|webp)(\?|$)/i.test(u),
+      ),
     ];
   }
 
   // Same-origin proxy so the browser gallery can render Resy CDN photos.
-  return ranked.slice(0, limit).map((url) =>
-    /image\.resy\.com/i.test(url)
-      ? `/api/venue-photo-proxy?url=${encodeURIComponent(url)}`
-      : url,
-  );
+  return proxyResyUrls(ranked.slice(0, limit));
 }

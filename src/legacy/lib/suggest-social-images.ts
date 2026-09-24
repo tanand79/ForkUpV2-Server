@@ -458,27 +458,53 @@ async function collectFromPage(
   }
 }
 
-/** Try both www and apex host when scraping a website. */
+/** Try www host first — many restaurant CDNs hang on apex (e.g. Sovana Bistro). */
 function websiteUrlVariants(url: string): string[] {
   try {
     const u = new URL(url);
     const host = u.hostname;
-    const variants = [u.toString()];
+    const www = new URL(url);
+    const apex = new URL(url);
     if (host.startsWith("www.")) {
-      u.hostname = host.slice(4);
-      variants.push(u.toString());
-    } else {
-      u.hostname = `www.${host}`;
-      variants.push(u.toString());
+      apex.hostname = host.slice(4);
+      return [...new Set([www.toString(), apex.toString()])];
     }
-    return [...new Set(variants)];
+    www.hostname = `www.${host}`;
+    return [...new Set([www.toString(), u.toString()])];
   } catch {
     return [url];
   }
 }
 
 /**
- * Extract public Facebook / Instagram / LinkedIn / YouTube profile URLs from page HTML.
+ * Normalize TikTok profile URL (@handle or /@handle).
+ * Inputs: raw href. Outputs: https://www.tiktok.com/@handle or null.
+ */
+export function normalizeTikTokUrl(url: string): string | null {
+  const raw = url.trim();
+  if (!raw || raw === "#" || raw.startsWith("#")) return null;
+  try {
+    let withProto = raw;
+    if (!/^https?:\/\//i.test(withProto)) {
+      if (raw.startsWith("@")) withProto = `https://www.tiktok.com/${raw}`;
+      else if (/^tiktok\.com/i.test(raw)) withProto = `https://${raw}`;
+      else return null;
+    }
+    const u = new URL(withProto);
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    if (host !== "tiktok.com" && host !== "vm.tiktok.com") return null;
+    const path = u.pathname.replace(/\/+$/, "") || "";
+    const handleMatch = path.match(/^\/@([A-Za-z0-9._]+)/);
+    if (handleMatch) return `https://www.tiktok.com/@${handleMatch[1]}`;
+    if (path.startsWith("/@")) return `https://www.tiktok.com${path}`;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract public Facebook / Instagram / LinkedIn / YouTube / TikTok profile URLs from page HTML.
  * Purpose: Prefill Connect Social when the organizer did not type links.
  * Inputs: raw HTML string. Outputs: normalized social URLs (null when missing).
  */
@@ -487,11 +513,13 @@ export function extractSocialLinksFromHtml(html: string): {
   instagramUrl: string | null;
   linkedinUrl: string | null;
   youtubeUrl: string | null;
+  tiktokUrl: string | null;
 } {
   let facebookUrl: string | null = null;
   let instagramUrl: string | null = null;
   let linkedinUrl: string | null = null;
   let youtubeUrl: string | null = null;
+  let tiktokUrl: string | null = null;
 
   const candidates: string[] = [];
   const hrefRe = /href=["']([^"']+)["']/gi;
@@ -501,7 +529,7 @@ export function extractSocialLinksFromHtml(html: string): {
   }
   // Catch bare social URLs that are not wrapped in href (JSON-LD / scripts).
   const bareRe =
-    /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be)\/[^\s"'<>]+/gi;
+    /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
   while ((m = bareRe.exec(html)) !== null) {
     if (m[0]) candidates.push(m[0].replace(/[),.;]+$/, ""));
   }
@@ -529,40 +557,208 @@ export function extractSocialLinksFromHtml(html: string): {
       const yt = normalizeYouTubeUrl(raw);
       if (yt) youtubeUrl = yt;
     }
-    if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl) break;
+    if (!tiktokUrl) {
+      const tt = normalizeTikTokUrl(raw);
+      if (tt) tiktokUrl = tt;
+    }
+    if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl && tiktokUrl) break;
   }
 
-  return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl };
+  return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl, tiktokUrl };
+}
+
+/** Paths that often list phone / email (mailto) when the homepage footer does not. */
+const CONTACT_PATHS = [
+  "/contact",
+  "/contact-us",
+  "/location",
+  "/locations",
+  "/about",
+  "/about-us",
+  "/hours",
+];
+
+function originHost(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeEmailFromMailto(href: string): string | null {
+  const raw = href.replace(/^mailto:/i, "").split("?")[0]?.trim() || "";
+  if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return null;
+  if (/\.(png|jpe?g|gif|webp|svg)$/i.test(raw)) return null;
+  if (/example\.com|sentry\.|wixpress|noreply@/i.test(raw)) return null;
+  return raw;
+}
+
+/** Prefer tel: hrefs — avoid matching Facebook page IDs as phone numbers. */
+function normalizePhoneFromTel(href: string): string | null {
+  const raw = href.replace(/^tel:/i, "").trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15) return null;
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)})${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `(${digits.slice(1, 4)})${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  return raw;
 }
 
 /**
- * Fetch the org website and discover social profile links from public HTML.
- * Inputs: website URL. Outputs: facebook/instagram/linkedin/youtube URLs or nulls.
+ * Extract public phone / email from page HTML (mailto: / tel: preferred).
+ * Inputs: raw HTML. Outputs: normalized phone/email or nulls.
+ */
+export function extractContactFromHtml(html: string): {
+  phone: string | null;
+  email: string | null;
+} {
+  let phone: string | null = null;
+  let email: string | null = null;
+  const hrefRe = /href=["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = hrefRe.exec(html)) !== null) {
+    if (!m[1]) continue;
+    const raw = decodeHtmlEntities(m[1].trim());
+    if (!phone && /^tel:/i.test(raw)) {
+      const p = normalizePhoneFromTel(raw);
+      if (p) phone = p;
+    }
+    if (!email && /^mailto:/i.test(raw)) {
+      const e = normalizeEmailFromMailto(raw);
+      if (e) email = e;
+    }
+    if (phone && email) break;
+  }
+  if (!email) {
+    const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+    for (const candidate of emails) {
+      const e = normalizeEmailFromMailto(`mailto:${candidate}`);
+      if (e) {
+        email = e;
+        break;
+      }
+    }
+  }
+  return { phone, email };
+}
+
+/** Same-site hrefs that often hold mailto / hours / address. */
+function discoverContactPageLinks(origin: string, html: string): string[] {
+  const out: string[] = [];
+  const hrefRe = /href=["']([^"']+)["']/gi;
+  let m: RegExpExecArray | null;
+  while ((m = hrefRe.exec(html)) !== null) {
+    if (!m[1]) continue;
+    try {
+      const abs = new URL(decodeHtmlEntities(m[1].trim()), origin).toString();
+      if (!abs.startsWith(origin)) continue;
+      if (/\/(location|locations|contact|about|hours|find-?us|visit)/i.test(abs)) {
+        out.push(abs.replace(/\/+$/, "") + "/");
+        out.push(abs);
+      }
+    } catch {
+      /* skip bad href */
+    }
+  }
+  return [...new Set(out)].slice(0, 8);
+}
+
+/**
+ * Fetch the org website and discover social + contact links from public HTML.
+ * Inputs: website URL.
+ * Outputs: facebook/instagram/linkedin/youtube/tiktok + phone/email (null when missing).
  */
 export async function discoverSocialLinksFromWebsite(websiteUrl: string): Promise<{
   facebookUrl: string | null;
   instagramUrl: string | null;
   linkedinUrl: string | null;
   youtubeUrl: string | null;
+  tiktokUrl: string | null;
+  phone: string | null;
+  email: string | null;
 }> {
   const empty = {
     facebookUrl: null as string | null,
     instagramUrl: null as string | null,
     linkedinUrl: null as string | null,
     youtubeUrl: null as string | null,
+    tiktokUrl: null as string | null,
+    phone: null as string | null,
+    email: null as string | null,
   };
   const normalized = normalizeWebsiteUrl(websiteUrl);
   if (!normalized) return empty;
 
-  for (const variant of websiteUrlVariants(normalized)) {
-    const html = await fetchHtml(variant);
+  const variants = websiteUrlVariants(normalized);
+  // Parallel — do not wait for a hung apex host before trying www.
+  const htmls = await Promise.all(variants.map((v) => fetchHtml(v)));
+
+  let facebookUrl: string | null = null;
+  let instagramUrl: string | null = null;
+  let linkedinUrl: string | null = null;
+  let youtubeUrl: string | null = null;
+  let tiktokUrl: string | null = null;
+  let phone: string | null = null;
+  let email: string | null = null;
+  let workingOrigin: string | null = null;
+  const linkedContactPages: string[] = [];
+
+  for (let i = 0; i < htmls.length; i++) {
+    const html = htmls[i];
     if (!html) continue;
+    if (!workingOrigin) workingOrigin = originHost(variants[i]!);
+    if (workingOrigin) {
+      linkedContactPages.push(...discoverContactPageLinks(workingOrigin, html));
+    }
     const found = extractSocialLinksFromHtml(html);
-    if (found.facebookUrl || found.instagramUrl || found.linkedinUrl || found.youtubeUrl) {
-      return found;
+    if (!facebookUrl && found.facebookUrl) facebookUrl = found.facebookUrl;
+    if (!instagramUrl && found.instagramUrl) instagramUrl = found.instagramUrl;
+    if (!linkedinUrl && found.linkedinUrl) linkedinUrl = found.linkedinUrl;
+    if (!youtubeUrl && found.youtubeUrl) youtubeUrl = found.youtubeUrl;
+    if (!tiktokUrl && found.tiktokUrl) tiktokUrl = found.tiktokUrl;
+    const contact = extractContactFromHtml(html);
+    if (!phone && contact.phone) phone = contact.phone;
+    if (!email && contact.email) email = contact.email;
+  }
+
+  // Email/phone often live on /contact or nested /location/... pages (e.g. The Pear).
+  if (workingOrigin && (!phone || !email)) {
+    const pathUrls = CONTACT_PATHS.flatMap((path) => [
+      `${workingOrigin}${path}`,
+      `${workingOrigin}${path}/`,
+    ]);
+    const extraUrls = [...new Set([...linkedContactPages, ...pathUrls])].slice(0, 10);
+    const extraHtmls = await Promise.all(extraUrls.map((u) => fetchHtml(u)));
+    for (const html of extraHtmls) {
+      if (!html) continue;
+      const found = extractSocialLinksFromHtml(html);
+      if (!facebookUrl && found.facebookUrl) facebookUrl = found.facebookUrl;
+      if (!instagramUrl && found.instagramUrl) instagramUrl = found.instagramUrl;
+      if (!linkedinUrl && found.linkedinUrl) linkedinUrl = found.linkedinUrl;
+      if (!youtubeUrl && found.youtubeUrl) youtubeUrl = found.youtubeUrl;
+      if (!tiktokUrl && found.tiktokUrl) tiktokUrl = found.tiktokUrl;
+      const contact = extractContactFromHtml(html);
+      if (!phone && contact.phone) phone = contact.phone;
+      if (!email && contact.email) email = contact.email;
+      if (phone && email && facebookUrl && instagramUrl) break;
     }
   }
-  return empty;
+
+  return {
+    facebookUrl,
+    instagramUrl,
+    linkedinUrl,
+    youtubeUrl,
+    tiktokUrl,
+    phone,
+    email,
+  };
 }
 
 /**

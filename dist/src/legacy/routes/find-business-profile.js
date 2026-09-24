@@ -14,6 +14,11 @@ exports.findBusinessProfileRouter.post("/find-business-profile", async (req, res
         const result = await (0, find_business_from_name_1.findBusinessFromName)({
             businessName,
             joinDoorType: req.body?.joinDoorType,
+            nearZip: req.body?.nearZip,
+            city: req.body?.city,
+            state: req.body?.state,
+            website: req.body?.website,
+            businessId: req.body?.businessId,
         });
         res.json(result);
     }

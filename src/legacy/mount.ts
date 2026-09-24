@@ -15,6 +15,8 @@ import { generateOrganizationDraftRouter } from "./routes/generate-organization-
 import { generateBusinessDraftRouter } from "./routes/generate-business-draft";
 import { findBusinessProfileRouter } from "./routes/find-business-profile";
 import { businessVenueImagesRouter } from "./routes/business-venue-images";
+import { businessVenueGalleryRouter } from "./routes/business-venue-gallery";
+import { businessVenueLinksRouter } from "./routes/business-venue-links";
 import { venuePhotoProxyRouter } from "./routes/venue-photo-proxy";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
@@ -137,6 +139,10 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", findBusinessProfileRouter);
   /** Venue gallery refresh (Resy + site photos) for join profile. */
   app.use("/api", businessVenueImagesRouter);
+  /** Business-owned gallery uploads + cover selection (durable). */
+  app.use("/api", businessVenueGalleryRouter);
+  /** Business-owned social / contact link edits (durable overwrite). */
+  app.use("/api", businessVenueLinksRouter);
   /** Same-origin proxy for Resy CDN gallery images. */
   app.use("/api", venuePhotoProxyRouter);
   app.use("/api/campaign-ai", campaignAiRouter);

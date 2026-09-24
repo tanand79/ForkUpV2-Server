@@ -14,17 +14,26 @@ export declare function normalizeLinkedInUrl(url: string): string | null;
 export declare function normalizeYouTubeUrl(url: string): string | null;
 export declare function normalizeWebsiteUrl(url: string): string | null;
 export declare function extractImageUrlsFromHtml(html: string, pageUrl: string): string[];
+export declare function normalizeTikTokUrl(url: string): string | null;
 export declare function extractSocialLinksFromHtml(html: string): {
     facebookUrl: string | null;
     instagramUrl: string | null;
     linkedinUrl: string | null;
     youtubeUrl: string | null;
+    tiktokUrl: string | null;
+};
+export declare function extractContactFromHtml(html: string): {
+    phone: string | null;
+    email: string | null;
 };
 export declare function discoverSocialLinksFromWebsite(websiteUrl: string): Promise<{
     facebookUrl: string | null;
     instagramUrl: string | null;
     linkedinUrl: string | null;
     youtubeUrl: string | null;
+    tiktokUrl: string | null;
+    phone: string | null;
+    email: string | null;
 }>;
 export declare function suggestSocialImages(input: {
     facebookUrl?: string;

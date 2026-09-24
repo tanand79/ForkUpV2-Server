@@ -58,6 +58,19 @@ function normalizeWebsiteUrl(raw: string): string {
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
+/** Prefer www — apex hosts often hang (BentoBox / restaurant CDNs). */
+function preferWwwUrl(website: string): string {
+  try {
+    const u = new URL(normalizeWebsiteUrl(website));
+    if (!u.hostname.startsWith("www.")) {
+      u.hostname = `www.${u.hostname}`;
+    }
+    return u.toString();
+  } catch {
+    return website;
+  }
+}
+
 function originOf(website: string): string | null {
   try {
     const u = new URL(normalizeWebsiteUrl(website));
@@ -354,11 +367,19 @@ export async function scrapeBusinessLocationHints(
   const website = normalizeWebsiteUrl(websiteInput);
   if (!website) return empty;
 
-  const origin = originOf(website);
+  // Seed from www first — apex often aborts after FETCH_TIMEOUT_MS.
+  const wwwWebsite = preferWwwUrl(website);
+  let seedHtml = await fetchHtml(wwwWebsite);
+  let activeWebsite = wwwWebsite;
+  if (!seedHtml && wwwWebsite !== website) {
+    seedHtml = await fetchHtml(website);
+    activeWebsite = website;
+  }
+
+  const origin = originOf(activeWebsite);
   if (!origin) return empty;
 
-  const seedHtml = await fetchHtml(website);
-  const urls: string[] = [website];
+  const urls: string[] = [activeWebsite];
   if (seedHtml) {
     urls.push(...discoverLocationLinks(origin, seedHtml));
   }
@@ -392,7 +413,7 @@ export async function scrapeBusinessLocationHints(
   }
 
   for (const url of uniqueUrls) {
-    const html = url === website ? seedHtml : await fetchHtml(url);
+    const html = url === activeWebsite ? seedHtml : await fetchHtml(url);
     if (!html) continue;
     anyOk = true;
     const found = extractBookingPlatformLink(html);

@@ -23,6 +23,13 @@ import {
 
 export const profilesRouter = Router();
 
+/** Demo seed businesses (seed.ts) — omit from public homepage directory only. */
+const DIRECTORY_HIDDEN_SEED_SLUGS = [
+  "olive-and-oak",
+  "harbor-coffee",
+  "farm-table",
+] as const;
+
 type NonprofitRow = QueryResultRow & {
   id: number;
   organization_name: string;
@@ -930,6 +937,63 @@ type BusinessRow = QueryResultRow & {
   supports_guest_bartending: boolean;
 };
 
+/** Parse businesses.venue_gallery_urls JSONB into a string list. */
+function parseGalleryImageUrls(raw: unknown): string[] {
+  if (!raw) return [];
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
+}
+
+/**
+ * Homepage / directory invite gates (Pass A).
+ * Pending = claim needs_review OR latest access request still pending.
+ * Inviteable = claimed|verified and not awaiting verification.
+ */
+function businessDirectoryFlags(
+  claimStatus: string,
+  accessRequestStatus: string | null | undefined,
+): { awaitingVerification: boolean; inviteable: boolean } {
+  const awaitingVerification =
+    claimStatus === "needs_review" || accessRequestStatus === "pending";
+  const inviteable =
+    !awaitingVerification &&
+    (claimStatus === "claimed" || claimStatus === "verified");
+  return { awaitingVerification, inviteable };
+}
+
+async function loadLatestBusinessAccessStatuses(
+  businessIds: number[],
+): Promise<Map<number, "pending" | "approved" | "denied">> {
+  const map = new Map<number, "pending" | "approved" | "denied">();
+  if (businessIds.length === 0) return map;
+  const { rows } = await pool.query<QueryResultRow>(
+    `SELECT DISTINCT ON (organization_id) organization_id, status
+     FROM organization_access_requests
+     WHERE organization_type = 'business' AND organization_id = ANY($1::int[])
+     ORDER BY organization_id, id DESC`,
+    [businessIds],
+  );
+  for (const row of rows) {
+    const id = Number(row.organization_id);
+    const status = row.status;
+    if (
+      Number.isFinite(id) &&
+      (status === "pending" || status === "approved" || status === "denied")
+    ) {
+      map.set(id, status);
+    }
+  }
+  return map;
+}
+
 function mapBusiness(row: BusinessRow, locations: QueryResultRow[] = []) {
   return {
     id: row.id,
@@ -1605,6 +1669,206 @@ profilesRouter.post("/businesses/claim-request", async (req, res) => {
   }
 });
 
+/**
+ * Public homepage business directory (near Live Campaigns).
+ * GET /api/profiles/businesses/directory
+ * query: q?, lat?, lng?, radiusMiles?, limit? (default 24, max 48)
+ *
+ * Hides unclaimed + archived. Does not return contact emails.
+ * awaitingVerification / inviteable drive blur vs Invite CTA on the web.
+ * Registered before /businesses/:slug so "directory" is not treated as a slug.
+ */
+profilesRouter.get("/businesses/directory", async (req, res) => {
+  try {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const origin = parseLatLng(req.query.lat, req.query.lng);
+    const radiusMiles = parseRadiusMiles(req.query.radiusMiles);
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(48, Math.max(1, Math.floor(limitRaw)))
+      : 24;
+
+    const params: Array<string | number | string[]> = [];
+    let where = `WHERE b.claim_status NOT IN ('unclaimed', 'archived')
+      AND b.business_status <> 'archived'
+      AND bl.active_status = TRUE
+      AND b.slug <> ALL($1::text[])`;
+    params.push([...DIRECTORY_HIDDEN_SEED_SLUGS]);
+    if (q) {
+      const like = `%${q}%`;
+      params.push(like, like, like);
+      where += ` AND (b.business_name ILIKE $${params.length - 2}
+        OR bl.city ILIKE $${params.length - 1}
+        OR bl.location_name ILIKE $${params.length})`;
+    }
+
+    const { rows } = await pool.query<
+      BusinessRow & {
+        location_id: number;
+        location_name: string;
+        city: string | null;
+        state: string | null;
+        latitude: number | null;
+        longitude: number | null;
+      }
+    >(
+      `SELECT
+         b.id,
+         b.business_name,
+         b.slug,
+         b.business_type,
+         b.website,
+         b.business_status,
+         b.claim_status,
+         b.profile_status,
+         b.supports_dine_and_donate,
+         b.supports_shop_and_donate,
+         b.supports_service_giveback,
+         b.supports_guest_bartending,
+         NULLIF(TRIM(b.facebook_url), '') AS facebook_url,
+         NULLIF(TRIM(b.instagram_url), '') AS instagram_url,
+         NULLIF(TRIM(b.linkedin_url), '') AS linkedin_url,
+         NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
+         NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
+         NULLIF(TRIM(b.venue_email), '') AS venue_email,
+         b.venue_gallery_urls,
+         bl.id AS location_id,
+         bl.location_name,
+         bl.city,
+         bl.state,
+         bl.latitude,
+         bl.longitude
+       FROM businesses b
+       JOIN business_locations bl ON bl.business_id = b.id
+       ${where}
+       ORDER BY b.business_name, bl.location_name`,
+      params,
+    );
+
+    type DirEntry = {
+      id: number;
+      businessName: string;
+      slug: string;
+      businessType: string | null;
+      website: string | null;
+      businessStatus: string;
+      claimStatus: string;
+      facebookUrl: string | null;
+      instagramUrl: string | null;
+      linkedinUrl: string | null;
+      tiktokUrl: string | null;
+      contactPhone: string | null;
+      venueEmail: string | null;
+      galleryImageUrls: string[];
+      capabilities: {
+        dineAndDonate: boolean;
+        shopAndDonate: boolean;
+        serviceGiveback: boolean;
+        guestBartending: boolean;
+      };
+      locations: {
+        id: number;
+        locationName: string;
+        city: string | null;
+        state: string | null;
+        distanceMiles: number | null;
+      }[];
+      _nearestMiles: number | null;
+    };
+
+    const grouped = new Map<number, DirEntry>();
+
+    for (const row of rows) {
+      // Match live campaigns: when a location filter is active, drop unmapped
+      // rows so distant seed businesses (NULL coords) do not appear for Boston, etc.
+      const nearby = nearbyKeepDecision(
+        origin,
+        row.latitude,
+        row.longitude,
+        radiusMiles,
+        { requireCoordinates: true },
+      );
+      if (!nearby.keep) continue;
+
+      if (!grouped.has(row.id)) {
+        grouped.set(row.id, {
+          id: row.id,
+          businessName: row.business_name,
+          slug: row.slug,
+          businessType: row.business_type,
+          website: row.website,
+          businessStatus: row.business_status,
+          claimStatus: row.claim_status,
+          facebookUrl:
+            typeof row.facebook_url === "string" ? row.facebook_url : null,
+          instagramUrl:
+            typeof row.instagram_url === "string" ? row.instagram_url : null,
+          linkedinUrl:
+            typeof row.linkedin_url === "string" ? row.linkedin_url : null,
+          tiktokUrl: typeof row.tiktok_url === "string" ? row.tiktok_url : null,
+          contactPhone:
+            typeof row.contact_phone === "string" ? row.contact_phone : null,
+          venueEmail:
+            typeof row.venue_email === "string" ? row.venue_email : null,
+          galleryImageUrls: parseGalleryImageUrls(row.venue_gallery_urls),
+          capabilities: {
+            dineAndDonate: Boolean(row.supports_dine_and_donate),
+            shopAndDonate: Boolean(row.supports_shop_and_donate),
+            serviceGiveback: Boolean(row.supports_service_giveback),
+            guestBartending: Boolean(row.supports_guest_bartending),
+          },
+          locations: [],
+          _nearestMiles: null,
+        });
+      }
+
+      const entry = grouped.get(row.id)!;
+      entry.locations.push({
+        id: row.location_id,
+        locationName: row.location_name,
+        city: row.city,
+        state: row.state,
+        distanceMiles: nearby.distanceMiles,
+      });
+      if (nearby.distanceMiles != null) {
+        if (entry._nearestMiles == null || nearby.distanceMiles < entry._nearestMiles) {
+          entry._nearestMiles = nearby.distanceMiles;
+        }
+      }
+    }
+
+    const sorted = [...grouped.values()].sort((a, b) => {
+      if (origin) {
+        const da = a._nearestMiles;
+        const db = b._nearestMiles;
+        if (da != null && db != null && da !== db) return da - db;
+        if (da != null && db == null) return -1;
+        if (da == null && db != null) return 1;
+      }
+      return a.businessName.localeCompare(b.businessName);
+    });
+
+    const sliced = sorted.slice(0, limit);
+    const accessById = await loadLatestBusinessAccessStatuses(sliced.map((b) => b.id));
+
+    const payload = sliced.map(({ _nearestMiles: _drop, ...rest }) => {
+      const accessRequestStatus = accessById.get(rest.id) ?? null;
+      const flags = businessDirectoryFlags(rest.claimStatus, accessRequestStatus);
+      return {
+        ...rest,
+        accessRequestStatus,
+        awaitingVerification: flags.awaitingVerification,
+        inviteable: flags.inviteable,
+      };
+    });
+
+    res.json(payload);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch business directory" });
+  }
+});
+
 profilesRouter.get("/businesses/:slug", async (req, res) => {
   try {
     const { rows: bizRows } = await pool.query<QueryResultRow>(
@@ -1620,6 +1884,11 @@ profilesRouter.get("/businesses/:slug", async (req, res) => {
       "SELECT * FROM business_locations WHERE business_id = $1 ORDER BY location_name",
       [biz.id],
     );
+    const accessById = await loadLatestBusinessAccessStatuses([Number(biz.id)]);
+    const accessRequestStatus = accessById.get(Number(biz.id)) ?? null;
+    const claimStatus = String(biz.claim_status ?? "unclaimed");
+    const businessStatus = String(biz.business_status ?? "preloaded");
+    const flags = businessDirectoryFlags(claimStatus, accessRequestStatus);
     res.json({
       id: biz.id,
       businessName: biz.business_name,
@@ -1627,7 +1896,20 @@ profilesRouter.get("/businesses/:slug", async (req, res) => {
       businessType: biz.business_type,
       website: biz.website,
       contactEmail: biz.contact_email,
+      facebookUrl: biz.facebook_url ?? null,
+      instagramUrl: biz.instagram_url ?? null,
+      linkedinUrl: biz.linkedin_url ?? null,
+      tiktokUrl: biz.tiktok_url ?? null,
+      contactPhone: biz.contact_phone ?? null,
+      venueEmail: biz.venue_email ?? null,
+      galleryImageUrls: parseGalleryImageUrls(biz.venue_gallery_urls),
       profileStatus: biz.profile_status ?? biz.business_status,
+      // Additive (Pass A): homepage profile banner + invite gates
+      claimStatus,
+      businessStatus,
+      accessRequestStatus,
+      awaitingVerification: flags.awaitingVerification,
+      inviteable: flags.inviteable,
       locations: locations.map((l) => ({
         id: l.id,
         locationName: l.location_name,

@@ -72,6 +72,13 @@ type LocationRow = QueryResultRow & {
   logo_url?: string | null;
   address?: string | null;
   zip?: string | null;
+  facebook_url?: string | null;
+  instagram_url?: string | null;
+  linkedin_url?: string | null;
+  tiktok_url?: string | null;
+  venue_email?: string | null;
+  contact_phone?: string | null;
+  venue_gallery_urls?: unknown;
 };
 
 function toDateInput(value: string | Date | null): Date | null {
@@ -121,6 +128,35 @@ async function mapLocation(row: LocationRow): Promise<ParticipatingLocation> {
     (typeof row.address === "string" && row.address.trim()) || null;
   const zip = (typeof row.zip === "string" && row.zip.trim()) || null;
   const logoUrl = await resolveStoredImageUrl(row.logo_url ?? null);
+  const facebookUrl =
+    (typeof row.facebook_url === "string" && row.facebook_url.trim()) || null;
+  const instagramUrl =
+    (typeof row.instagram_url === "string" && row.instagram_url.trim()) || null;
+  const linkedinUrl =
+    (typeof row.linkedin_url === "string" && row.linkedin_url.trim()) || null;
+  const tiktokUrl =
+    (typeof row.tiktok_url === "string" && row.tiktok_url.trim()) || null;
+  const contactEmail =
+    (typeof row.venue_email === "string" && row.venue_email.trim()) || null;
+  const contactPhone =
+    (typeof row.contact_phone === "string" && row.contact_phone.trim()) || null;
+  let galleryImageUrls: string[] = [];
+  if (Array.isArray(row.venue_gallery_urls)) {
+    galleryImageUrls = row.venue_gallery_urls.filter(
+      (u): u is string => typeof u === "string" && u.trim().length > 0,
+    );
+  } else if (typeof row.venue_gallery_urls === "string") {
+    try {
+      const parsed = JSON.parse(row.venue_gallery_urls) as unknown;
+      if (Array.isArray(parsed)) {
+        galleryImageUrls = parsed.filter(
+          (u): u is string => typeof u === "string" && u.trim().length > 0,
+        );
+      }
+    } catch {
+      galleryImageUrls = [];
+    }
+  }
 
   return {
     businessId: row.business_id,
@@ -142,6 +178,13 @@ async function mapLocation(row: LocationRow): Promise<ParticipatingLocation> {
     logoUrl: logoUrl || null,
     address,
     zip,
+    facebookUrl,
+    instagramUrl,
+    linkedinUrl,
+    tiktokUrl,
+    contactEmail,
+    contactPhone,
+    galleryImageUrls,
   };
 }
 
@@ -252,7 +295,14 @@ async function fetchAcceptedLocations(campaignId: number): Promise<Participating
        NULLIF(TRIM(b.description), '') AS description,
        b.logo_url,
        bl.address,
-       bl.zip
+       bl.zip,
+       NULLIF(TRIM(b.facebook_url), '') AS facebook_url,
+       NULLIF(TRIM(b.instagram_url), '') AS instagram_url,
+       NULLIF(TRIM(b.linkedin_url), '') AS linkedin_url,
+       NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
+       NULLIF(TRIM(b.venue_email), '') AS venue_email,
+       NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
+       b.venue_gallery_urls
      FROM campaign_business_locations cbl
      JOIN businesses b ON b.id = cbl.business_id
      JOIN business_locations bl ON bl.id = cbl.location_id

@@ -9,7 +9,9 @@ exports.normalizeLinkedInUrl = normalizeLinkedInUrl;
 exports.normalizeYouTubeUrl = normalizeYouTubeUrl;
 exports.normalizeWebsiteUrl = normalizeWebsiteUrl;
 exports.extractImageUrlsFromHtml = extractImageUrlsFromHtml;
+exports.normalizeTikTokUrl = normalizeTikTokUrl;
 exports.extractSocialLinksFromHtml = extractSocialLinksFromHtml;
+exports.extractContactFromHtml = extractContactFromHtml;
 exports.discoverSocialLinksFromWebsite = discoverSocialLinksFromWebsite;
 exports.suggestSocialImages = suggestSocialImages;
 const DEFAULT_LIMIT = 6;
@@ -412,19 +414,47 @@ function websiteUrlVariants(url) {
     try {
         const u = new URL(url);
         const host = u.hostname;
-        const variants = [u.toString()];
+        const www = new URL(url);
+        const apex = new URL(url);
         if (host.startsWith("www.")) {
-            u.hostname = host.slice(4);
-            variants.push(u.toString());
+            apex.hostname = host.slice(4);
+            return [...new Set([www.toString(), apex.toString()])];
         }
-        else {
-            u.hostname = `www.${host}`;
-            variants.push(u.toString());
-        }
-        return [...new Set(variants)];
+        www.hostname = `www.${host}`;
+        return [...new Set([www.toString(), u.toString()])];
     }
     catch {
         return [url];
+    }
+}
+function normalizeTikTokUrl(url) {
+    const raw = url.trim();
+    if (!raw || raw === "#" || raw.startsWith("#"))
+        return null;
+    try {
+        let withProto = raw;
+        if (!/^https?:\/\//i.test(withProto)) {
+            if (raw.startsWith("@"))
+                withProto = `https://www.tiktok.com/${raw}`;
+            else if (/^tiktok\.com/i.test(raw))
+                withProto = `https://${raw}`;
+            else
+                return null;
+        }
+        const u = new URL(withProto);
+        const host = u.hostname.replace(/^www\./, "").toLowerCase();
+        if (host !== "tiktok.com" && host !== "vm.tiktok.com")
+            return null;
+        const path = u.pathname.replace(/\/+$/, "") || "";
+        const handleMatch = path.match(/^\/@([A-Za-z0-9._]+)/);
+        if (handleMatch)
+            return `https://www.tiktok.com/@${handleMatch[1]}`;
+        if (path.startsWith("/@"))
+            return `https://www.tiktok.com${path}`;
+        return null;
+    }
+    catch {
+        return null;
     }
 }
 function extractSocialLinksFromHtml(html) {
@@ -432,6 +462,7 @@ function extractSocialLinksFromHtml(html) {
     let instagramUrl = null;
     let linkedinUrl = null;
     let youtubeUrl = null;
+    let tiktokUrl = null;
     const candidates = [];
     const hrefRe = /href=["']([^"']+)["']/gi;
     let m;
@@ -439,7 +470,7 @@ function extractSocialLinksFromHtml(html) {
         if (m[1])
             candidates.push(decodeHtmlEntities(m[1].trim()));
     }
-    const bareRe = /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be)\/[^\s"'<>]+/gi;
+    const bareRe = /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
     while ((m = bareRe.exec(html)) !== null) {
         if (m[0])
             candidates.push(m[0].replace(/[),.;]+$/, ""));
@@ -468,10 +499,113 @@ function extractSocialLinksFromHtml(html) {
             if (yt)
                 youtubeUrl = yt;
         }
-        if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl)
+        if (!tiktokUrl) {
+            const tt = normalizeTikTokUrl(raw);
+            if (tt)
+                tiktokUrl = tt;
+        }
+        if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl && tiktokUrl)
             break;
     }
-    return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl };
+    return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl, tiktokUrl };
+}
+const CONTACT_PATHS = [
+    "/contact",
+    "/contact-us",
+    "/location",
+    "/locations",
+    "/about",
+    "/about-us",
+    "/hours",
+];
+function originHost(url) {
+    try {
+        const u = new URL(url);
+        return `${u.protocol}//${u.host}`;
+    }
+    catch {
+        return null;
+    }
+}
+function normalizeEmailFromMailto(href) {
+    const raw = href.replace(/^mailto:/i, "").split("?")[0]?.trim() || "";
+    if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw))
+        return null;
+    if (/\.(png|jpe?g|gif|webp|svg)$/i.test(raw))
+        return null;
+    if (/example\.com|sentry\.|wixpress|noreply@/i.test(raw))
+        return null;
+    return raw;
+}
+function normalizePhoneFromTel(href) {
+    const raw = href.replace(/^tel:/i, "").trim();
+    if (!raw)
+        return null;
+    const digits = raw.replace(/\D/g, "");
+    if (digits.length < 10 || digits.length > 15)
+        return null;
+    if (digits.length === 10) {
+        return `(${digits.slice(0, 3)})${digits.slice(3, 6)}-${digits.slice(6)}`;
+    }
+    if (digits.length === 11 && digits.startsWith("1")) {
+        return `(${digits.slice(1, 4)})${digits.slice(4, 7)}-${digits.slice(7)}`;
+    }
+    return raw;
+}
+function extractContactFromHtml(html) {
+    let phone = null;
+    let email = null;
+    const hrefRe = /href=["']([^"']+)["']/gi;
+    let m;
+    while ((m = hrefRe.exec(html)) !== null) {
+        if (!m[1])
+            continue;
+        const raw = decodeHtmlEntities(m[1].trim());
+        if (!phone && /^tel:/i.test(raw)) {
+            const p = normalizePhoneFromTel(raw);
+            if (p)
+                phone = p;
+        }
+        if (!email && /^mailto:/i.test(raw)) {
+            const e = normalizeEmailFromMailto(raw);
+            if (e)
+                email = e;
+        }
+        if (phone && email)
+            break;
+    }
+    if (!email) {
+        const emails = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
+        for (const candidate of emails) {
+            const e = normalizeEmailFromMailto(`mailto:${candidate}`);
+            if (e) {
+                email = e;
+                break;
+            }
+        }
+    }
+    return { phone, email };
+}
+function discoverContactPageLinks(origin, html) {
+    const out = [];
+    const hrefRe = /href=["']([^"']+)["']/gi;
+    let m;
+    while ((m = hrefRe.exec(html)) !== null) {
+        if (!m[1])
+            continue;
+        try {
+            const abs = new URL(decodeHtmlEntities(m[1].trim()), origin).toString();
+            if (!abs.startsWith(origin))
+                continue;
+            if (/\/(location|locations|contact|about|hours|find-?us|visit)/i.test(abs)) {
+                out.push(abs.replace(/\/+$/, "") + "/");
+                out.push(abs);
+            }
+        }
+        catch {
+        }
+    }
+    return [...new Set(out)].slice(0, 8);
 }
 async function discoverSocialLinksFromWebsite(websiteUrl) {
     const empty = {
@@ -479,20 +613,89 @@ async function discoverSocialLinksFromWebsite(websiteUrl) {
         instagramUrl: null,
         linkedinUrl: null,
         youtubeUrl: null,
+        tiktokUrl: null,
+        phone: null,
+        email: null,
     };
     const normalized = normalizeWebsiteUrl(websiteUrl);
     if (!normalized)
         return empty;
-    for (const variant of websiteUrlVariants(normalized)) {
-        const html = await fetchHtml(variant);
+    const variants = websiteUrlVariants(normalized);
+    const htmls = await Promise.all(variants.map((v) => fetchHtml(v)));
+    let facebookUrl = null;
+    let instagramUrl = null;
+    let linkedinUrl = null;
+    let youtubeUrl = null;
+    let tiktokUrl = null;
+    let phone = null;
+    let email = null;
+    let workingOrigin = null;
+    const linkedContactPages = [];
+    for (let i = 0; i < htmls.length; i++) {
+        const html = htmls[i];
         if (!html)
             continue;
+        if (!workingOrigin)
+            workingOrigin = originHost(variants[i]);
+        if (workingOrigin) {
+            linkedContactPages.push(...discoverContactPageLinks(workingOrigin, html));
+        }
         const found = extractSocialLinksFromHtml(html);
-        if (found.facebookUrl || found.instagramUrl || found.linkedinUrl || found.youtubeUrl) {
-            return found;
+        if (!facebookUrl && found.facebookUrl)
+            facebookUrl = found.facebookUrl;
+        if (!instagramUrl && found.instagramUrl)
+            instagramUrl = found.instagramUrl;
+        if (!linkedinUrl && found.linkedinUrl)
+            linkedinUrl = found.linkedinUrl;
+        if (!youtubeUrl && found.youtubeUrl)
+            youtubeUrl = found.youtubeUrl;
+        if (!tiktokUrl && found.tiktokUrl)
+            tiktokUrl = found.tiktokUrl;
+        const contact = extractContactFromHtml(html);
+        if (!phone && contact.phone)
+            phone = contact.phone;
+        if (!email && contact.email)
+            email = contact.email;
+    }
+    if (workingOrigin && (!phone || !email)) {
+        const pathUrls = CONTACT_PATHS.flatMap((path) => [
+            `${workingOrigin}${path}`,
+            `${workingOrigin}${path}/`,
+        ]);
+        const extraUrls = [...new Set([...linkedContactPages, ...pathUrls])].slice(0, 10);
+        const extraHtmls = await Promise.all(extraUrls.map((u) => fetchHtml(u)));
+        for (const html of extraHtmls) {
+            if (!html)
+                continue;
+            const found = extractSocialLinksFromHtml(html);
+            if (!facebookUrl && found.facebookUrl)
+                facebookUrl = found.facebookUrl;
+            if (!instagramUrl && found.instagramUrl)
+                instagramUrl = found.instagramUrl;
+            if (!linkedinUrl && found.linkedinUrl)
+                linkedinUrl = found.linkedinUrl;
+            if (!youtubeUrl && found.youtubeUrl)
+                youtubeUrl = found.youtubeUrl;
+            if (!tiktokUrl && found.tiktokUrl)
+                tiktokUrl = found.tiktokUrl;
+            const contact = extractContactFromHtml(html);
+            if (!phone && contact.phone)
+                phone = contact.phone;
+            if (!email && contact.email)
+                email = contact.email;
+            if (phone && email && facebookUrl && instagramUrl)
+                break;
         }
     }
-    return empty;
+    return {
+        facebookUrl,
+        instagramUrl,
+        linkedinUrl,
+        youtubeUrl,
+        tiktokUrl,
+        phone,
+        email,
+    };
 }
 function suggestedSourceForPlatform(platform) {
     if (platform === "facebook")

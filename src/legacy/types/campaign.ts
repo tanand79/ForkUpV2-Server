@@ -46,6 +46,15 @@ export interface ParticipatingLocation {
   logoUrl?: string | null;
   address?: string | null;
   zip?: string | null;
+  facebookUrl?: string | null;
+  instagramUrl?: string | null;
+  linkedinUrl?: string | null;
+  tiktokUrl?: string | null;
+  /** Public venue mailto from businesses.venue_email. */
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  /** Cached public gallery from businesses.venue_gallery_urls. */
+  galleryImageUrls?: string[];
 }
 
 export interface ParticipationRequest {
