@@ -22,6 +22,7 @@
     "src/legacy/db/migrate-venue-gallery-urls.ts",
     "src/legacy/db/migrate-venue-cover-url.ts",
     "src/legacy/db/migrate-nonprofit-gallery.ts",
+    "src/legacy/db/run-nonprofit-gallery-production.ts",
     "src/legacy/db/migrate-campaign-images-url-width.ts",
     "src/legacy/db/migrate-payouts.ts",
     "src/legacy/db/migrate-automation.ts",
