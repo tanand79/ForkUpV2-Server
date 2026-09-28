@@ -21,6 +21,17 @@ export type NonprofitProfileDto = {
    * Used so requesters see denied/approved even when verification_status is still needs_review.
    */
   accessRequestStatus?: "pending" | "approved" | "denied" | null;
+  /** Additive: location for org profile header. */
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  logoUrl?: string | null;
+  description?: string | null;
+  facebookUrl?: string | null;
+  instagramUrl?: string | null;
+  linkedinUrl?: string | null;
+  tiktokUrl?: string | null;
+  youtubeUrl?: string | null;
 };
 
 export type BusinessProfileDto = {
@@ -103,6 +114,16 @@ function mapNonprofitRow(np: QueryResultRow): NonprofitProfileDto {
     claimStatus: np.claim_status,
     profileStatus: np.profile_status ?? "preloaded",
     verified: np.verification_status === "verified",
+    city: np.city ?? null,
+    state: np.state ?? null,
+    zip: np.zip ?? null,
+    logoUrl: np.logo_url ?? null,
+    description: np.description ?? null,
+    facebookUrl: np.facebook_url ?? null,
+    instagramUrl: np.instagram_url ?? null,
+    linkedinUrl: np.linkedin_url ?? null,
+    tiktokUrl: np.tiktok_url ?? null,
+    youtubeUrl: np.youtube_url ?? null,
   };
 }
 

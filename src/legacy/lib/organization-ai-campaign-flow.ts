@@ -32,6 +32,11 @@ import {
   discoverSocialLinksFromWebsite,
   type SuggestedImage,
 } from "./suggest-social-images";
+import {
+  fillNonprofitPublicProfileNullOnly,
+  mergeNonprofitGalleryUrls,
+  persistNonprofitCoverUrl,
+} from "./persist-nonprofit-public-links";
 
 const SESSION_TTL_DAYS = 7;
 const FETCH_TIMEOUT_MS = 8_000;
@@ -813,6 +818,35 @@ export async function runOrganizationAiCampaignFlow(
           i,
         ],
       );
+    }
+
+    // Additive: null-only fill nonprofit profile so View profile shows AI finds.
+    if (sources.nonprofitId) {
+      try {
+        await fillNonprofitPublicProfileNullOnly(sources.nonprofitId, {
+          website: sources.website,
+          facebookUrl: sources.facebookUrl,
+          instagramUrl: sources.instagramUrl,
+          linkedinUrl: sources.linkedinUrl,
+          youtubeUrl: sources.youtubeUrl,
+          city: sources.city,
+          state: sources.state,
+          about: mission,
+          mission,
+        });
+        const imageUrls = images
+          .map((img) => (typeof img.url === "string" ? img.url.trim() : ""))
+          .filter(Boolean);
+        if (imageUrls.length > 0) {
+          await mergeNonprofitGalleryUrls(sources.nonprofitId, imageUrls);
+          await persistNonprofitCoverUrl(sources.nonprofitId, imageUrls[0]!);
+        }
+      } catch (persistErr) {
+        console.error(
+          "nonprofit profile null-only persist after AI analyze failed:",
+          persistErr,
+        );
+      }
     }
 
     const loaded = await getAnalysisSessionByToken(sessionToken);

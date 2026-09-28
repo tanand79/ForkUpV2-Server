@@ -2,6 +2,7 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
 } from "@aws-sdk/client-bedrock-runtime";
+import { DEFAULT_BEDROCK_MODEL_ID } from "./bedrock-model-catalog";
 import { resolveUserBedrockModelId } from "./user-ai-settings";
 
 /**
@@ -54,15 +55,11 @@ export function aiProviderName(): "bedrock" | "lovable" | "none" {
 }
 
 function bedrockModelId(): string {
-  return (
-    process.env.BEDROCK_MODEL_ID?.trim() ||
-    // Amazon Nova Lite — fast/cheap default for drafts (Nick V2 direction).
-    "amazon.nova-lite-v1:0"
-  );
+  return process.env.BEDROCK_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID;
 }
 
 function bedrockReceiptModelId(): string {
-  return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+  return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID;
 }
 
 function mediaTypeToBedrockFormat(mediaType: string): "jpeg" | "png" | "webp" | "gif" {

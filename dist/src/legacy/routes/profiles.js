@@ -23,12 +23,29 @@ function slugify(name) {
         .replace(/[^\w]+/g, "-")
         .replace(/^-|-$/g, "");
 }
+function parseNonprofitGalleryImageUrls(raw) {
+    if (!raw)
+        return [];
+    let value = raw;
+    if (typeof raw === "string") {
+        try {
+            value = JSON.parse(raw);
+        }
+        catch {
+            return [];
+        }
+    }
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((u) => typeof u === "string" && u.trim().length > 0);
+}
 function mapNonprofit(row) {
     return {
         id: row.id,
         organizationName: row.organization_name,
         slug: row.slug,
         mission: row.mission,
+        description: row.description ?? null,
         website: row.website,
         contactName: row.contact_name,
         contactEmail: row.contact_email,
@@ -45,6 +62,13 @@ function mapNonprofit(row) {
         profileStatus: row.profile_status ?? "preloaded",
         verified: row.verification_status === "verified",
         logoUrl: row.logo_url ?? null,
+        facebookUrl: row.facebook_url ?? null,
+        instagramUrl: row.instagram_url ?? null,
+        linkedinUrl: row.linkedin_url ?? null,
+        tiktokUrl: row.tiktok_url ?? null,
+        youtubeUrl: row.youtube_url ?? null,
+        galleryImageUrls: parseNonprofitGalleryImageUrls(row.gallery_urls),
+        coverUrl: row.cover_url ?? null,
     };
 }
 exports.profilesRouter.get("/nonprofits/readiness", async (req, res) => {

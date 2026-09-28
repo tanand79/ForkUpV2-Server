@@ -251,10 +251,10 @@ exports.superadminRouter.post("/change-password", async (req, res) => {
 exports.superadminRouter.get("/settings/ai", async (_req, res) => {
     try {
         const settings = await (0, platform_settings_1.getPlatformSettings)(["ai_model_id", "receipt_ai_model_id"]);
-        const selected = settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+        const selected = settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID;
         const selectedReceipt = settings.receipt_ai_model_id ||
             process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
-            "amazon.nova-lite-v1:0";
+            bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID;
         const pricing = await (0, bedrock_pricing_1.getBedrockLivePricing)(AI_MODELS);
         res.json({
             selectedModelId: selected,
@@ -297,10 +297,10 @@ exports.superadminRouter.put("/settings/ai", async (req, res) => {
         const settings = await (0, platform_settings_1.getPlatformSettings)(["ai_model_id", "receipt_ai_model_id"]);
         res.json({
             success: true,
-            selectedModelId: settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0",
+            selectedModelId: settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID,
             selectedReceiptModelId: settings.receipt_ai_model_id ||
                 process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
-                "amazon.nova-lite-v1:0",
+                bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID,
         });
     }
     catch (err) {

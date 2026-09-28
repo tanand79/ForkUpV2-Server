@@ -13,6 +13,7 @@ const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
 const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
 const known_organization_profiles_1 = require("./known-organization-profiles");
 const suggest_social_images_1 = require("./suggest-social-images");
+const persist_nonprofit_public_links_1 = require("./persist-nonprofit-public-links");
 const SESSION_TTL_DAYS = 7;
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
@@ -554,6 +555,31 @@ async function runOrganizationAiCampaignFlow(input) {
                 }),
                 i,
             ]);
+        }
+        if (sources.nonprofitId) {
+            try {
+                await (0, persist_nonprofit_public_links_1.fillNonprofitPublicProfileNullOnly)(sources.nonprofitId, {
+                    website: sources.website,
+                    facebookUrl: sources.facebookUrl,
+                    instagramUrl: sources.instagramUrl,
+                    linkedinUrl: sources.linkedinUrl,
+                    youtubeUrl: sources.youtubeUrl,
+                    city: sources.city,
+                    state: sources.state,
+                    about: mission,
+                    mission,
+                });
+                const imageUrls = images
+                    .map((img) => (typeof img.url === "string" ? img.url.trim() : ""))
+                    .filter(Boolean);
+                if (imageUrls.length > 0) {
+                    await (0, persist_nonprofit_public_links_1.mergeNonprofitGalleryUrls)(sources.nonprofitId, imageUrls);
+                    await (0, persist_nonprofit_public_links_1.persistNonprofitCoverUrl)(sources.nonprofitId, imageUrls[0]);
+                }
+            }
+            catch (persistErr) {
+                console.error("nonprofit profile null-only persist after AI analyze failed:", persistErr);
+            }
         }
         const loaded = await getAnalysisSessionByToken(sessionToken);
         if (!loaded) {

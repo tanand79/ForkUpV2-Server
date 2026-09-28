@@ -148,6 +148,18 @@ export function userBelongsToBusiness(user: AuthUser, businessId: number): boole
   );
 }
 
+/** True when user is a member of the given nonprofit org. */
+export function userBelongsToNonprofit(
+  user: AuthUser,
+  nonprofitId: number,
+): boolean {
+  if (user.isPlatformAdmin) return true;
+  return user.organizations.some(
+    (o) =>
+      o.organizationType === "nonprofit" && o.organizationId === nonprofitId,
+  );
+}
+
 /** True when user may manage the campaign nonprofit (member, creator, or admin). */
 export async function userMayManageCampaignNonprofit(
   user: AuthUser,

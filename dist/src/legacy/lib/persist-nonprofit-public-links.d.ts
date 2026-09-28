@@ -1,0 +1,32 @@
+export type NonprofitPublicLinksUpdate = {
+    website?: string | null;
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    tiktokUrl?: string | null;
+    youtubeUrl?: string | null;
+    phone?: string | null;
+    contactEmail?: string | null;
+    about?: string | null;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
+    organizationName?: string | null;
+};
+export declare function fillNonprofitPublicProfileNullOnly(nonprofitId: number, fill: {
+    website?: string | null;
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    youtubeUrl?: string | null;
+    city?: string | null;
+    state?: string | null;
+    about?: string | null;
+    mission?: string | null;
+    logoUrl?: string | null;
+}): Promise<void>;
+export declare function parseNonprofitGalleryUrls(raw: unknown): string[];
+export declare function updateNonprofitPublicLinks(nonprofitId: number, links: NonprofitPublicLinksUpdate): Promise<NonprofitPublicLinksUpdate | null>;
+export declare function mergeNonprofitGalleryUrls(nonprofitId: number, urls: string[]): Promise<string[]>;
+export declare function replaceNonprofitGalleryUrls(nonprofitId: number, urls: string[]): Promise<string[]>;
+export declare function persistNonprofitCoverUrl(nonprofitId: number, coverUrl: string | null | undefined): Promise<string | null>;

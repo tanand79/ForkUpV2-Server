@@ -36,6 +36,7 @@ type NonprofitRow = QueryResultRow & {
   slug: string;
   logo_url?: string | null;
   mission: string | null;
+  description?: string | null;
   website: string | null;
   contact_name: string | null;
   contact_email: string | null;
@@ -50,6 +51,13 @@ type NonprofitRow = QueryResultRow & {
   verification_status: string;
   claim_status: string;
   profile_status: string | null;
+  facebook_url?: string | null;
+  instagram_url?: string | null;
+  linkedin_url?: string | null;
+  tiktok_url?: string | null;
+  youtube_url?: string | null;
+  gallery_urls?: unknown;
+  cover_url?: string | null;
 };
 
 function slugify(name: string): string {
@@ -59,12 +67,30 @@ function slugify(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
+function parseNonprofitGalleryImageUrls(raw: unknown): string[] {
+  if (!raw) return [];
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (u): u is string => typeof u === "string" && u.trim().length > 0,
+  );
+}
+
 function mapNonprofit(row: NonprofitRow) {
   return {
     id: row.id,
     organizationName: row.organization_name,
     slug: row.slug,
     mission: row.mission,
+    /** Additive: longer about copy when description is set. */
+    description: row.description ?? null,
     website: row.website,
     contactName: row.contact_name,
     contactEmail: row.contact_email,
@@ -82,6 +108,14 @@ function mapNonprofit(row: NonprofitRow) {
     profileStatus: row.profile_status ?? "preloaded",
     verified: row.verification_status === "verified",
     logoUrl: row.logo_url ?? null,
+    /** Additive: public social / contact for org profile. */
+    facebookUrl: row.facebook_url ?? null,
+    instagramUrl: row.instagram_url ?? null,
+    linkedinUrl: row.linkedin_url ?? null,
+    tiktokUrl: row.tiktok_url ?? null,
+    youtubeUrl: row.youtube_url ?? null,
+    galleryImageUrls: parseNonprofitGalleryImageUrls(row.gallery_urls),
+    coverUrl: row.cover_url ?? null,
   };
 }
 

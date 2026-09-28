@@ -22,7 +22,7 @@ function mapParticipant(row: QueryResultRow, campaignSlug: string) {
     status: row.status,
     personalShareLink: row.personal_share_link,
     trackingCode: code,
-    shareUrl: code ? `/campaign/${campaignSlug}?ref=${code}` : null,
+    shareUrl: code ? `/campaign/${encodeURIComponent(campaignSlug)}/?ref=${code}` : null,
     leaderboardEnabled: Boolean(row.leaderboard_enabled),
     businessId: row.business_id,
     locationId: row.location_id,
@@ -108,7 +108,7 @@ participantsRouter.post("/", async (req, res) => {
     const methodId = await methodIdForType(campaignId, methodType);
 
     const code = trackingCode();
-    const sharePath = `/campaign/${slug}?ref=${code}`;
+    const sharePath = `/campaign/${encodeURIComponent(slug)}/?ref=${code}`;
 
     const { rows: result } = await pool.query<{ id: number }>(
       `INSERT INTO campaign_participants (

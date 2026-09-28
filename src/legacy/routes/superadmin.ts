@@ -87,7 +87,11 @@ import {
 } from "../lib/platform-settings";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 import { getBedrockLivePricing } from "../lib/bedrock-pricing";
-import { BEDROCK_MODEL_CATALOG, isAllowedBedrockModel } from "../lib/bedrock-model-catalog";
+import {
+  BEDROCK_MODEL_CATALOG,
+  DEFAULT_BEDROCK_MODEL_ID,
+  isAllowedBedrockModel,
+} from "../lib/bedrock-model-catalog";
 import { toDateOnlyString } from "../lib/date-only";
 import { promoteCampaignAfterForkupApproval } from "../lib/campaign-go-live-from-review";
 
@@ -389,11 +393,11 @@ superadminRouter.get("/settings/ai", async (_req, res) => {
   try {
     const settings = await getPlatformSettings(["ai_model_id", "receipt_ai_model_id"]);
     const selected =
-      settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+      settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID;
     const selectedReceipt =
       settings.receipt_ai_model_id ||
       process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
-      "amazon.nova-lite-v1:0";
+      DEFAULT_BEDROCK_MODEL_ID;
     // Live AWS Price List rates when credentials allow; else hardcoded fallbacks.
     const pricing = await getBedrockLivePricing(AI_MODELS);
     res.json({
@@ -439,11 +443,11 @@ superadminRouter.put("/settings/ai", async (req, res) => {
     res.json({
       success: true,
       selectedModelId:
-        settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0",
+        settings.ai_model_id || process.env.BEDROCK_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID,
       selectedReceiptModelId:
         settings.receipt_ai_model_id ||
         process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() ||
-        "amazon.nova-lite-v1:0",
+        DEFAULT_BEDROCK_MODEL_ID,
     });
   } catch (err) {
     console.error(err);

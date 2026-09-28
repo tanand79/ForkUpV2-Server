@@ -40,6 +40,16 @@ function mapNonprofitRow(np) {
         claimStatus: np.claim_status,
         profileStatus: np.profile_status ?? "preloaded",
         verified: np.verification_status === "verified",
+        city: np.city ?? null,
+        state: np.state ?? null,
+        zip: np.zip ?? null,
+        logoUrl: np.logo_url ?? null,
+        description: np.description ?? null,
+        facebookUrl: np.facebook_url ?? null,
+        instagramUrl: np.instagram_url ?? null,
+        linkedinUrl: np.linkedin_url ?? null,
+        tiktokUrl: np.tiktok_url ?? null,
+        youtubeUrl: np.youtube_url ?? null,
     };
 }
 async function loadBusinessById(businessId) {

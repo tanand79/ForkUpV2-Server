@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.userBelongsToBusiness = userBelongsToBusiness;
+exports.userBelongsToNonprofit = userBelongsToNonprofit;
 exports.userMayManageCampaignNonprofit = userMayManageCampaignNonprofit;
 exports.createPartnerJoinRequest = createPartnerJoinRequest;
 exports.listPartnerJoinRequestsForCampaign = listPartnerJoinRequestsForCampaign;
@@ -88,6 +89,11 @@ function userBelongsToBusiness(user, businessId) {
     if (user.isPlatformAdmin)
         return true;
     return user.organizations.some((o) => o.organizationType === "business" && o.organizationId === businessId);
+}
+function userBelongsToNonprofit(user, nonprofitId) {
+    if (user.isPlatformAdmin)
+        return true;
+    return user.organizations.some((o) => o.organizationType === "nonprofit" && o.organizationId === nonprofitId);
 }
 async function userMayManageCampaignNonprofit(user, campaign) {
     if (user.isPlatformAdmin)

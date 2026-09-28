@@ -17,6 +17,9 @@ import { findBusinessProfileRouter } from "./routes/find-business-profile";
 import { businessVenueImagesRouter } from "./routes/business-venue-images";
 import { businessVenueGalleryRouter } from "./routes/business-venue-gallery";
 import { businessVenueLinksRouter } from "./routes/business-venue-links";
+import { nonprofitGalleryRouter } from "./routes/nonprofit-gallery";
+import { nonprofitLinksRouter } from "./routes/nonprofit-links";
+import { nonprofitOrgProfileRouter } from "./routes/nonprofit-org-profile";
 import { venuePhotoProxyRouter } from "./routes/venue-photo-proxy";
 import { receiptsRouter } from "./routes/receipts";
 import { uploadsRouter } from "./routes/uploads";
@@ -143,6 +146,12 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", businessVenueGalleryRouter);
   /** Business-owned social / contact link edits (durable overwrite). */
   app.use("/api", businessVenueLinksRouter);
+  /** NPO org profile load (about + social + gallery). */
+  app.use("/api", nonprofitOrgProfileRouter);
+  /** NPO-owned gallery uploads + cover selection (durable). */
+  app.use("/api", nonprofitGalleryRouter);
+  /** NPO-owned social / about / contact link edits (durable overwrite). */
+  app.use("/api", nonprofitLinksRouter);
   /** Same-origin proxy for Resy CDN gallery images. */
   app.use("/api", venuePhotoProxyRouter);
   app.use("/api/campaign-ai", campaignAiRouter);

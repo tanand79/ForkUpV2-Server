@@ -70,7 +70,7 @@ export const BEDROCK_MODEL_CATALOG: BedrockModelCatalogEntry[] = [
   },
 ];
 
-export const DEFAULT_BEDROCK_MODEL_ID = "amazon.nova-lite-v1:0";
+export const DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-sonnet-4-6";
 
 /** Retired models upgraded automatically to active replacements. */
 export const DEPRECATED_BEDROCK_MODELS: Record<string, string> = {

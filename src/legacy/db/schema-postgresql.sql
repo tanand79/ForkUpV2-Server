@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS nonprofits (
   linkedin_url VARCHAR(512),
   tiktok_url VARCHAR(512),
   youtube_url VARCHAR(512),
+  -- Additive: org profile gallery (mirrors businesses.venue_gallery_urls / cover).
+  gallery_urls JSONB NULL,
+  cover_url VARCHAR(2048) NULL,
   profile_status VARCHAR(20) NOT NULL DEFAULT 'preloaded'
     CHECK (profile_status IN ('preloaded', 'invited', 'claimed', 'verified', 'active', 'inactive')),
   claimed_by_user_id INTEGER,

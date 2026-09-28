@@ -1,0 +1,24 @@
+export type NonprofitOrgProfilePayload = {
+    nonprofitId: number;
+    organizationName: string;
+    slug: string;
+    about: string;
+    mission: string | null;
+    website: string | null;
+    contactName: string | null;
+    contactEmail: string | null;
+    phone: string | null;
+    causeCategory: string | null;
+    city: string | null;
+    state: string | null;
+    zip: string | null;
+    logoUrl: string | null;
+    facebookUrl: string | null;
+    instagramUrl: string | null;
+    linkedinUrl: string | null;
+    tiktokUrl: string | null;
+    youtubeUrl: string | null;
+    galleryImageUrls: string[];
+    coverUrl: string | null;
+};
+export declare function loadAndHydrateNonprofitOrgProfile(nonprofitId: number): Promise<NonprofitOrgProfilePayload | null>;

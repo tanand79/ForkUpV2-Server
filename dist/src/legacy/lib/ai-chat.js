@@ -6,6 +6,7 @@ exports.aiChatWithImages = aiChatWithImages;
 exports.aiChat = aiChat;
 exports.parseAiJson = parseAiJson;
 const client_bedrock_runtime_1 = require("@aws-sdk/client-bedrock-runtime");
+const bedrock_model_catalog_1 = require("./bedrock-model-catalog");
 const user_ai_settings_1 = require("./user-ai-settings");
 function bedrockConfigured() {
     return Boolean(process.env.AWS_ACCESS_KEY_ID?.trim() &&
@@ -23,11 +24,10 @@ function aiProviderName() {
     return "none";
 }
 function bedrockModelId() {
-    return (process.env.BEDROCK_MODEL_ID?.trim() ||
-        "amazon.nova-lite-v1:0");
+    return process.env.BEDROCK_MODEL_ID?.trim() || bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID;
 }
 function bedrockReceiptModelId() {
-    return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0";
+    return process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || bedrock_model_catalog_1.DEFAULT_BEDROCK_MODEL_ID;
 }
 function mediaTypeToBedrockFormat(mediaType) {
     const m = mediaType.toLowerCase();

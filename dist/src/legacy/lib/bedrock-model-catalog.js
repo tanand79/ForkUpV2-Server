@@ -59,7 +59,7 @@ exports.BEDROCK_MODEL_CATALOG = [
         outputPer1M: 15.0,
     },
 ];
-exports.DEFAULT_BEDROCK_MODEL_ID = "amazon.nova-lite-v1:0";
+exports.DEFAULT_BEDROCK_MODEL_ID = "anthropic.claude-sonnet-4-6";
 exports.DEPRECATED_BEDROCK_MODELS = {
     "anthropic.claude-3-haiku-20240307-v1:0": "anthropic.claude-haiku-4-5-20251001-v1:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0": "anthropic.claude-haiku-4-5-20251001-v1:0",

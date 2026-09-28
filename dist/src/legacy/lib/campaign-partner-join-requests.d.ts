@@ -27,6 +27,7 @@ export type PartnerJoinRequestDto = {
     respondedAt: string | null;
 };
 export declare function userBelongsToBusiness(user: AuthUser, businessId: number): boolean;
+export declare function userBelongsToNonprofit(user: AuthUser, nonprofitId: number): boolean;
 export declare function userMayManageCampaignNonprofit(user: AuthUser, campaign: {
     nonprofit_id: number;
     created_by_user_id: number | null;

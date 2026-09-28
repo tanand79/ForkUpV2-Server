@@ -14,6 +14,16 @@ export type NonprofitProfileDto = {
     profileStatus: string;
     verified: boolean;
     accessRequestStatus?: "pending" | "approved" | "denied" | null;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
+    logoUrl?: string | null;
+    description?: string | null;
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    tiktokUrl?: string | null;
+    youtubeUrl?: string | null;
 };
 export type BusinessProfileDto = {
     id: number;
