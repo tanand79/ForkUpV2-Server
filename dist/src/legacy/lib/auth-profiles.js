@@ -120,7 +120,10 @@ async function loadUserNonprofitProfiles(user) {
         }
     }
     if (profiles.length === 0) {
-        const { rows: rows } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE LOWER(contact_email) = $1 LIMIT 1", [user.email.toLowerCase()]);
+        const { rows: rows } = await pool_1.pool.query(`SELECT * FROM nonprofits
+       WHERE LOWER(contact_email) = $1
+         AND claim_status IN ('claimed', 'verified', 'needs_review')
+       LIMIT 1`, [user.email.toLowerCase()]);
         if (rows.length > 0) {
             const profile = mapNonprofitRow(rows[0]);
             profile.accessRequestStatus = await loadLatestAccessRequestStatus("nonprofit", Number(rows[0].id));
@@ -142,7 +145,10 @@ async function loadUserBusinessProfiles(user) {
         }
     }
     if (profiles.length === 0) {
-        const { rows: bizRows } = await pool_1.pool.query("SELECT * FROM businesses WHERE LOWER(contact_email) = $1 LIMIT 1", [user.email.toLowerCase()]);
+        const { rows: bizRows } = await pool_1.pool.query(`SELECT * FROM businesses
+       WHERE LOWER(contact_email) = $1
+         AND claim_status IN ('claimed', 'verified', 'needs_review')
+       LIMIT 1`, [user.email.toLowerCase()]);
         if (bizRows.length > 0) {
             const profile = await loadBusinessById(bizRows[0].id);
             if (profile)

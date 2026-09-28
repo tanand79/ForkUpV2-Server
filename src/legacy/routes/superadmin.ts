@@ -63,7 +63,13 @@
  *   Does not delete nonprofits, businesses, or campaigns.
  * GET     /api/superadmin/roles
  * GET     /api/superadmin/nonprofits?search&limit&offset
+ * DELETE  /api/superadmin/nonprofits/:id
+ *   Soft-archives nonprofit (claim/verification → archived), clears contact,
+ *   removes org memberships. Does not hard-delete (campaign FKs).
  * GET     /api/superadmin/businesses?search&limit&offset
+ * DELETE  /api/superadmin/businesses/:id
+ *   Soft-archives business (claim/business_status → archived), clears contact,
+ *   removes org memberships. Does not hard-delete.
  * GET     /api/superadmin/campaigns?search&status&limit&offset
  * GET     /api/superadmin/fundraisers?search&limit&offset
  * GET     /api/superadmin/donations?limit&offset
@@ -1438,8 +1444,13 @@ superadminRouter.get("/overview", async (_req, res) => {
     const [users, nonprofits, businesses, campaigns, fundraisers, donations] =
       await Promise.all([
         pool.query<QueryResultRow>(`SELECT COUNT(*)::int AS c FROM users`),
-        pool.query<QueryResultRow>(`SELECT COUNT(*)::int AS c FROM nonprofits`),
-        pool.query<QueryResultRow>(`SELECT COUNT(*)::int AS c FROM businesses`),
+        pool.query<QueryResultRow>(
+          `SELECT COUNT(*)::int AS c FROM nonprofits WHERE claim_status <> 'archived'`,
+        ),
+        pool.query<QueryResultRow>(
+          `SELECT COUNT(*)::int AS c FROM businesses
+           WHERE claim_status <> 'archived' AND business_status <> 'archived'`,
+        ),
         pool.query<QueryResultRow>(`SELECT COUNT(*)::int AS c FROM campaigns`),
         pool.query<QueryResultRow>(
           `SELECT COUNT(DISTINCT user_id)::int AS c FROM campaign_fundraisers`,
@@ -1527,12 +1538,13 @@ superadminRouter.get("/users", async (req, res) => {
  *
  * Behavior:
  * - Refuses platform admins (including the caller).
- * - Clears claim/contact refs and email-linked rows for that address.
+ * - Clears claim/contact refs and email-linked rows for that address
+ *   (contact_name, contact_email, contact_phone).
  * - Nulls non-FK user id pointers that would otherwise orphan or block.
  * - Deletes the users row (auth_sessions / organization_users cascade).
  * - If a nonprofit/business this user claimed or belonged to has no remaining
- *   members after delete, resets claim_status to unclaimed so it can be
- *   claimed again (avoids "already on ForkUp" with zero owners).
+ *   members after delete, resets claim_status to unclaimed and clears all
+ *   contact fields so invites/signup cannot reuse the deleted user.
  * - Does NOT delete nonprofits, businesses, or campaigns.
  */
 superadminRouter.delete("/users/:id", async (req, res) => {
@@ -1608,7 +1620,10 @@ superadminRouter.delete("/users/:id", async (req, res) => {
     );
     await connection.query(
       `UPDATE nonprofits
-       SET contact_email = NULL, updated_at = CURRENT_TIMESTAMP
+       SET contact_email = NULL,
+           contact_name = NULL,
+           contact_phone = NULL,
+           updated_at = CURRENT_TIMESTAMP
        WHERE contact_email ILIKE $1`,
       [email],
     );
@@ -1621,7 +1636,10 @@ superadminRouter.delete("/users/:id", async (req, res) => {
     );
     await connection.query(
       `UPDATE businesses
-       SET contact_email = NULL, updated_at = CURRENT_TIMESTAMP
+       SET contact_email = NULL,
+           contact_name = NULL,
+           contact_phone = NULL,
+           updated_at = CURRENT_TIMESTAMP
        WHERE contact_email ILIKE $1`,
       [email],
     );
@@ -1673,15 +1691,37 @@ superadminRouter.delete("/users/:id", async (req, res) => {
     await connection.query(`DELETE FROM users WHERE id = $1`, [id]);
 
     // Release claims only when the org now has zero members and no claimant.
+    // Also wipe contact fields so unclaimed orgs cannot receive invites / auto-link
+    // signup to the deleted user's name or email.
     if (nonprofitIds.length > 0) {
       await connection.query(
         `UPDATE nonprofits
          SET claim_status = 'unclaimed',
              profile_status = 'preloaded',
+             contact_name = NULL,
+             contact_email = NULL,
+             contact_phone = NULL,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ANY($1::int[])
            AND claimed_by_user_id IS NULL
            AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'nonprofit'
+               AND ou.organization_id = nonprofits.id
+           )`,
+        [nonprofitIds],
+      );
+      // Already-unclaimed orgs this user touched: still clear leftover contact.
+      await connection.query(
+        `UPDATE nonprofits
+         SET contact_name = NULL,
+             contact_email = NULL,
+             contact_phone = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status = 'unclaimed'
            AND NOT EXISTS (
              SELECT 1 FROM organization_users ou
              WHERE ou.organization_type = 'nonprofit'
@@ -1700,10 +1740,29 @@ superadminRouter.delete("/users/:id", async (req, res) => {
                WHEN business_status IN ('claimed', 'active') THEN 'preloaded'
                ELSE business_status
              END,
+             contact_name = NULL,
+             contact_email = NULL,
+             contact_phone = NULL,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ANY($1::int[])
            AND claimed_by_user_id IS NULL
            AND claim_status IN ('claimed', 'verified', 'needs_review')
+           AND NOT EXISTS (
+             SELECT 1 FROM organization_users ou
+             WHERE ou.organization_type = 'business'
+               AND ou.organization_id = businesses.id
+           )`,
+        [businessIds],
+      );
+      await connection.query(
+        `UPDATE businesses
+         SET contact_name = NULL,
+             contact_email = NULL,
+             contact_phone = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ANY($1::int[])
+           AND claimed_by_user_id IS NULL
+           AND claim_status = 'unclaimed'
            AND NOT EXISTS (
              SELECT 1 FROM organization_users ou
              WHERE ou.organization_type = 'business'
@@ -1779,13 +1838,13 @@ superadminRouter.get("/nonprofits", async (req, res) => {
   try {
     const { search, limit, offset } = parseListQuery(req);
     const params: unknown[] = [];
-    let where = "";
+    let where = `WHERE claim_status <> 'archived'`;
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
-      where = `WHERE LOWER(organization_name) LIKE $1
+      where += ` AND (LOWER(organization_name) LIKE $1
                OR LOWER(COALESCE(slug, '')) LIKE $1
                OR LOWER(COALESCE(contact_email, '')) LIKE $1
-               OR LOWER(COALESCE(ein, '')) LIKE $1`;
+               OR LOWER(COALESCE(ein, '')) LIKE $1)`;
     }
     const { rows: countRows } = await pool.query<QueryResultRow>(
       `SELECT COUNT(*)::int AS c FROM nonprofits ${where}`,
@@ -1830,6 +1889,75 @@ superadminRouter.get("/nonprofits", async (req, res) => {
 });
 
 /**
+ * DELETE /nonprofits/:id
+ * Soft-archive a nonprofit so it leaves the directory and cannot receive
+ * invites or signup auto-link. Does not hard-delete (campaign FKs RESTRICT).
+ * Response: { success, id, mode: "archived" }
+ */
+superadminRouter.delete("/nonprofits/:id", async (req, res) => {
+  const connection = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid nonprofit id" });
+      return;
+    }
+
+    await connection.query("BEGIN");
+
+    const { rows } = await connection.query<QueryResultRow>(
+      `SELECT id, claim_status FROM nonprofits WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (rows.length === 0) {
+      await connection.query("ROLLBACK");
+      res.status(404).json({ error: "Nonprofit not found" });
+      return;
+    }
+    if (String(rows[0].claim_status) === "archived") {
+      await connection.query("ROLLBACK");
+      res.status(400).json({ error: "Nonprofit is already archived" });
+      return;
+    }
+
+    await connection.query(
+      `DELETE FROM organization_users
+       WHERE organization_type = 'nonprofit' AND organization_id = $1`,
+      [id],
+    );
+
+    await connection.query(
+      `DELETE FROM organization_access_requests
+       WHERE organization_type = 'nonprofit' AND organization_id = $1`,
+      [id],
+    );
+
+    await connection.query(
+      `UPDATE nonprofits
+       SET claim_status = 'archived',
+           verification_status = 'archived',
+           profile_status = 'inactive',
+           claimed_by_user_id = NULL,
+           contact_name = NULL,
+           contact_email = NULL,
+           contact_phone = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id],
+    );
+
+    await connection.query("COMMIT");
+    res.json({ success: true, id, mode: "archived" });
+  } catch (err) {
+    await connection.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Failed to archive nonprofit" });
+  } finally {
+    connection.release();
+  }
+});
+
+/**
  * GET /businesses
  * Includes location count + ACH-on-file summary (masked last4 only).
  */
@@ -1837,12 +1965,12 @@ superadminRouter.get("/businesses", async (req, res) => {
   try {
     const { search, limit, offset } = parseListQuery(req);
     const params: unknown[] = [];
-    let where = "";
+    let where = `WHERE b.claim_status <> 'archived' AND b.business_status <> 'archived'`;
     if (search) {
       params.push(`%${search.toLowerCase()}%`);
-      where = `WHERE LOWER(b.business_name) LIKE $1
+      where += ` AND (LOWER(b.business_name) LIKE $1
                OR LOWER(COALESCE(b.slug, '')) LIKE $1
-               OR LOWER(COALESCE(b.contact_email, '')) LIKE $1`;
+               OR LOWER(COALESCE(b.contact_email, '')) LIKE $1)`;
     }
     const { rows: countRows } = await pool.query<QueryResultRow>(
       `SELECT COUNT(*)::int AS c FROM businesses b ${where}`,
@@ -1924,6 +2052,78 @@ superadminRouter.get("/businesses", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to load businesses" });
+  }
+});
+
+/**
+ * DELETE /businesses/:id
+ * Soft-archive a business so it leaves the directory and cannot receive
+ * invites or signup auto-link. Does not hard-delete (invitation FKs RESTRICT).
+ * Response: { success, id, mode: "archived" }
+ */
+superadminRouter.delete("/businesses/:id", async (req, res) => {
+  const connection = await pool.connect();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid business id" });
+      return;
+    }
+
+    await connection.query("BEGIN");
+
+    const { rows } = await connection.query<QueryResultRow>(
+      `SELECT id, claim_status, business_status FROM businesses WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (rows.length === 0) {
+      await connection.query("ROLLBACK");
+      res.status(404).json({ error: "Business not found" });
+      return;
+    }
+    if (
+      String(rows[0].claim_status) === "archived" ||
+      String(rows[0].business_status) === "archived"
+    ) {
+      await connection.query("ROLLBACK");
+      res.status(400).json({ error: "Business is already archived" });
+      return;
+    }
+
+    await connection.query(
+      `DELETE FROM organization_users
+       WHERE organization_type = 'business' AND organization_id = $1`,
+      [id],
+    );
+
+    await connection.query(
+      `DELETE FROM organization_access_requests
+       WHERE organization_type = 'business' AND organization_id = $1`,
+      [id],
+    );
+
+    await connection.query(
+      `UPDATE businesses
+       SET claim_status = 'archived',
+           business_status = 'archived',
+           profile_status = 'inactive',
+           claimed_by_user_id = NULL,
+           contact_name = NULL,
+           contact_email = NULL,
+           contact_phone = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id],
+    );
+
+    await connection.query("COMMIT");
+    res.json({ success: true, id, mode: "archived" });
+  } catch (err) {
+    await connection.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Failed to archive business" });
+  } finally {
+    connection.release();
   }
 });
 

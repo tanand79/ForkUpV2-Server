@@ -203,9 +203,14 @@ export async function loadUserNonprofitProfiles(user: AuthUser): Promise<Nonprof
     }
   }
 
+  // Email fallback only for actively claimed orgs. Unclaimed/preloaded rows must
+  // not auto-attach after a user delete left (or still has) a matching contact_email.
   if (profiles.length === 0) {
     const { rows: rows } = await pool.query<QueryResultRow>(
-      "SELECT * FROM nonprofits WHERE LOWER(contact_email) = $1 LIMIT 1",
+      `SELECT * FROM nonprofits
+       WHERE LOWER(contact_email) = $1
+         AND claim_status IN ('claimed', 'verified', 'needs_review')
+       LIMIT 1`,
       [user.email.toLowerCase()],
     );
     if (rows.length > 0) {
@@ -231,9 +236,13 @@ export async function loadUserBusinessProfiles(user: AuthUser): Promise<Business
     }
   }
 
+  // Same guard as nonprofits: never auto-populate from unclaimed contact_email.
   if (profiles.length === 0) {
     const { rows: bizRows } = await pool.query<QueryResultRow>(
-      "SELECT * FROM businesses WHERE LOWER(contact_email) = $1 LIMIT 1",
+      `SELECT * FROM businesses
+       WHERE LOWER(contact_email) = $1
+         AND claim_status IN ('claimed', 'verified', 'needs_review')
+       LIMIT 1`,
       [user.email.toLowerCase()],
     );
     if (bizRows.length > 0) {
