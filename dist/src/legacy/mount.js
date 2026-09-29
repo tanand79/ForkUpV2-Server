@@ -20,6 +20,7 @@ const suggest_campaign_goal_1 = require("./routes/suggest-campaign-goal");
 const generate_organization_draft_1 = require("./routes/generate-organization-draft");
 const generate_business_draft_1 = require("./routes/generate-business-draft");
 const find_business_profile_1 = require("./routes/find-business-profile");
+const suggest_nearby_businesses_1 = require("./routes/suggest-nearby-businesses");
 const business_venue_images_1 = require("./routes/business-venue-images");
 const business_venue_gallery_1 = require("./routes/business-venue-gallery");
 const business_venue_links_1 = require("./routes/business-venue-links");
@@ -118,6 +119,7 @@ function mountLegacyApi(app) {
     app.use("/api", generate_organization_draft_1.generateOrganizationDraftRouter);
     app.use("/api", generate_business_draft_1.generateBusinessDraftRouter);
     app.use("/api", find_business_profile_1.findBusinessProfileRouter);
+    app.use("/api", suggest_nearby_businesses_1.suggestNearbyBusinessesRouter);
     app.use("/api", business_venue_images_1.businessVenueImagesRouter);
     app.use("/api", business_venue_gallery_1.businessVenueGalleryRouter);
     app.use("/api", business_venue_links_1.businessVenueLinksRouter);

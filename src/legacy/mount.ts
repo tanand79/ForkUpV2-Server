@@ -14,6 +14,7 @@ import { suggestCampaignGoalRouter } from "./routes/suggest-campaign-goal";
 import { generateOrganizationDraftRouter } from "./routes/generate-organization-draft";
 import { generateBusinessDraftRouter } from "./routes/generate-business-draft";
 import { findBusinessProfileRouter } from "./routes/find-business-profile";
+import { suggestNearbyBusinessesRouter } from "./routes/suggest-nearby-businesses";
 import { businessVenueImagesRouter } from "./routes/business-venue-images";
 import { businessVenueGalleryRouter } from "./routes/business-venue-gallery";
 import { businessVenueLinksRouter } from "./routes/business-venue-links";
@@ -140,6 +141,8 @@ export function mountLegacyApi(app: Express) {
   app.use("/api", generateBusinessDraftRouter);
   /** Pass D1: name → website/location/photos for restaurant & local Join Us. */
   app.use("/api", findBusinessProfileRouter);
+  /** ZIP-only: AI list of nearby restaurants / local businesses to pick from. */
+  app.use("/api", suggestNearbyBusinessesRouter);
   /** Venue gallery refresh (Resy + site photos) for join profile. */
   app.use("/api", businessVenueImagesRouter);
   /** Business-owned gallery uploads + cover selection (durable). */

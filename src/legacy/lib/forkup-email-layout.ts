@@ -2,17 +2,26 @@
  * Shared ForkUp transactional email HTML shell.
  *
  * Purpose: Wrap plain-text email bodies (templates, invites, system mail)
- * in the same branded layout as guest claim emails — dark ForkUp header,
- * white card, orange CTA when a link is present.
+ * in the same branded layout as guest claim emails — white ForkUp header
+ * with logo, white card, orange CTA when a link is present.
  * Does not send mail — callers / mailer pass the returned HTML.
  *
  * When a CTA URL is extracted, that URL is removed from the body so the
  * button / copy-link block is the only place the link appears.
+ *
+ * Logo: default src is cid:FORKUP_EMAIL_LOGO_CID (mailer attaches the PNG).
+ * Override with EMAIL_LOGO_URL (https) when you prefer a hosted image.
  */
+
+import * as fs from "fs";
+import * as path from "path";
 
 function urlPattern(): RegExp {
   return /https?:\/\/[^\s<>"']+/gi;
 }
+
+/** Content-ID used by mailer SMTP inline attachment + &lt;img src="cid:…"&gt;. */
+export const FORKUP_EMAIL_LOGO_CID = "forkup-logo@forkup";
 
 export type ForkUpEmailLayoutInput = {
   subject: string;
@@ -29,6 +38,50 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/**
+ * Logo src for email HTML. Prefer EMAIL_LOGO_URL; else CID for SMTP attach.
+ */
+export function resolveEmailLogoUrl(): string {
+  const explicit = (process.env.EMAIL_LOGO_URL ?? "").trim();
+  if (explicit) return explicit;
+  return `cid:${FORKUP_EMAIL_LOGO_CID}`;
+}
+
+/**
+ * Loads the ForkUp email logo PNG from dist or src assets.
+ * Outputs: Buffer or null when the file is missing.
+ */
+export function loadForkUpEmailLogoBuffer(): Buffer | null {
+  const candidates = [
+    // nest-cli copies assets to dist/legacy/assets (not under dist/src)
+    path.join(process.cwd(), "dist", "legacy", "assets", "forkup-logo-email.png"),
+    path.join(process.cwd(), "src", "legacy", "assets", "forkup-logo-email.png"),
+    path.join(__dirname, "..", "..", "..", "legacy", "assets", "forkup-logo-email.png"),
+    path.join(__dirname, "..", "assets", "forkup-logo-email.png"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return fs.readFileSync(candidate);
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * Header cell HTML with ForkUp logo on a white bar (shared by layout + guest claim).
+ * Outputs: &lt;td&gt;…&lt;/td&gt; fragment for the branded email header row.
+ */
+export function forkUpEmailHeaderCellHtml(): string {
+  const logoUrl = escapeHtml(resolveEmailLogoUrl());
+  return `<td style="background-color:#ffffff;padding:18px 28px;border-bottom:1px solid #e5e7eb;">
+              <img src="${logoUrl}" alt="ForkUp" width="140" height="48" style="display:block;height:48px;width:auto;max-width:200px;border:0;outline:none;text-decoration:none;" />
+            </td>`;
 }
 
 /**
@@ -160,9 +213,7 @@ export function wrapForkUpEmailHtml(input: ForkUpEmailLayoutInput): string {
       <td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
           <tr>
-            <td style="background-color:#1c1917;padding:22px 28px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;letter-spacing:0.04em;color:#fafaf9;">ForkUp</p>
-            </td>
+            ${forkUpEmailHeaderCellHtml()}
           </tr>
           <tr>
             <td style="padding:32px 28px 8px;font-family:Arial,Helvetica,sans-serif;">

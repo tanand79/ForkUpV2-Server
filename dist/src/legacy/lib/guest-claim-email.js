@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.renderGuestClaimEmail = renderGuestClaimEmail;
+const forkup_email_layout_1 = require("./forkup-email-layout");
 function escapeHtml(s) {
     return s
         .replace(/&/g, "&amp;")
@@ -62,9 +63,7 @@ function renderGuestClaimEmail(input) {
       <td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
           <tr>
-            <td style="background-color:#1c1917;padding:22px 28px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;letter-spacing:0.04em;color:#fafaf9;">ForkUp</p>
-            </td>
+            ${(0, forkup_email_layout_1.forkUpEmailHeaderCellHtml)()}
           </tr>
           <tr>
             <td style="padding:32px 28px 8px;font-family:Arial,Helvetica,sans-serif;">

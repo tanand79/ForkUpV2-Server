@@ -4,6 +4,9 @@
   "sourceRoot": "src",
   "compilerOptions": {
     "deleteOutDir": true,
-    "assets": [{ "include": "legacy/db/schema.sql", "watchAssets": true }]
+    "assets": [
+      { "include": "legacy/db/schema.sql", "watchAssets": true },
+      { "include": "legacy/assets/forkup-logo-email.png", "watchAssets": true }
+    ]
   }
 }

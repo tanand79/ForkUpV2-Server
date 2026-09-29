@@ -5,6 +5,8 @@
  * Purpose: Neat ForkUp-branded transactional mail. Callers pass context;
  * this module only renders subject/body/html — mailer sends.
  */
+import { forkUpEmailHeaderCellHtml } from "./forkup-email-layout";
+
 export type GuestClaimEmailKind = "business" | "campaign";
 
 export type GuestClaimEmailInput = {
@@ -106,9 +108,7 @@ export function renderGuestClaimEmail(
       <td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
           <tr>
-            <td style="background-color:#1c1917;padding:22px 28px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;letter-spacing:0.04em;color:#fafaf9;">ForkUp</p>
-            </td>
+            ${forkUpEmailHeaderCellHtml()}
           </tr>
           <tr>
             <td style="padding:32px 28px 8px;font-family:Arial,Helvetica,sans-serif;">

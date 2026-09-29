@@ -1,7 +1,11 @@
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
 import nodemailer from "nodemailer";
 import { pool } from "../db/pool";
-import { wrapForkUpEmailHtml } from "./forkup-email-layout";
+import {
+  FORKUP_EMAIL_LOGO_CID,
+  loadForkUpEmailLogoBuffer,
+  wrapForkUpEmailHtml,
+} from "./forkup-email-layout";
 import { getPlatformSettings } from "./platform-settings";
 
 export type StakeholderRole =
@@ -340,12 +344,28 @@ async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
       typeof input.html === "string" && input.html.trim()
         ? input.html
         : undefined;
+    const logoBuf =
+      html && html.includes(`cid:${FORKUP_EMAIL_LOGO_CID}`)
+        ? loadForkUpEmailLogoBuffer()
+        : null;
+    const attachments = logoBuf
+      ? [
+          {
+            filename: "forkup-logo-email.png",
+            content: logoBuf,
+            cid: FORKUP_EMAIL_LOGO_CID,
+            contentType: "image/png",
+            contentDisposition: "inline" as const,
+          },
+        ]
+      : undefined;
     const info = await transport.sendMail({
       from: formatSmtpFrom(s.smtp_from, input.fromName),
       to: input.to,
       subject: input.subject,
       text: input.body,
       ...(html ? { html } : {}),
+      ...(attachments ? { attachments } : {}),
       ...(replyTo ? { replyTo } : {}),
     });
     const result: SendEmailResult = {

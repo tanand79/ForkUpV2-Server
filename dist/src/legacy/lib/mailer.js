@@ -206,12 +206,27 @@ async function sendViaSmtp(input) {
         const html = typeof input.html === "string" && input.html.trim()
             ? input.html
             : undefined;
+        const logoBuf = html && html.includes(`cid:${forkup_email_layout_1.FORKUP_EMAIL_LOGO_CID}`)
+            ? (0, forkup_email_layout_1.loadForkUpEmailLogoBuffer)()
+            : null;
+        const attachments = logoBuf
+            ? [
+                {
+                    filename: "forkup-logo-email.png",
+                    content: logoBuf,
+                    cid: forkup_email_layout_1.FORKUP_EMAIL_LOGO_CID,
+                    contentType: "image/png",
+                    contentDisposition: "inline",
+                },
+            ]
+            : undefined;
         const info = await transport.sendMail({
             from: formatSmtpFrom(s.smtp_from, input.fromName),
             to: input.to,
             subject: input.subject,
             text: input.body,
             ...(html ? { html } : {}),
+            ...(attachments ? { attachments } : {}),
             ...(replyTo ? { replyTo } : {}),
         });
         const result = {
