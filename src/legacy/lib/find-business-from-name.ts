@@ -31,7 +31,8 @@ import {
 import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extract";
 import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
 import { searchNamedBusinessNear } from "./geo-distance";
-import { persistBusinessPublicLinks, persistBusinessGalleryUrls } from "./persist-business-public-links";
+import { persistBusinessPublicLinks, persistBusinessGalleryUrls, replaceBusinessGalleryUrls } from "./persist-business-public-links";
+import { pool } from "../db/pool";
 
 export type FindBusinessChecks = {
   websiteFound: boolean;
@@ -97,6 +98,154 @@ function cleanNearZip(raw: unknown): string {
   return raw.replace(/\D/g, "").slice(0, 5);
 }
 
+function parseGalleryUrls(raw: unknown): string[] {
+  if (!raw) return [];
+  let value: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (u): u is string => typeof u === "string" && u.trim().length > 0,
+  );
+}
+
+/**
+ * When businessId already has website and/or gallery in DB, return that payload
+ * and skip AI + scrape. Directory View profile must not re-fire AI every open.
+ */
+async function loadHydratedBusinessFromDb(input: {
+  businessId: number;
+  businessName: string;
+  joinDoorType: JoinDoorType | null;
+}): Promise<FindBusinessFromNameResult | null> {
+  try {
+    const { rows } = await pool.query<{
+      business_name: string;
+      business_type: string | null;
+      description: string | null;
+      website: string | null;
+      facebook_url: string | null;
+      instagram_url: string | null;
+      linkedin_url: string | null;
+      tiktok_url: string | null;
+      contact_phone: string | null;
+      venue_email: string | null;
+      venue_gallery_urls: unknown;
+      join_door_type: string | null;
+      location_name: string | null;
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+      reservation_url: string | null;
+    }>(
+      `SELECT
+         b.business_name,
+         b.business_type,
+         b.description,
+         b.website,
+         b.facebook_url,
+         b.instagram_url,
+         b.linkedin_url,
+         b.tiktok_url,
+         b.contact_phone,
+         b.venue_email,
+         b.venue_gallery_urls,
+         b.join_door_type,
+         bl.location_name,
+         bl.address,
+         bl.city,
+         bl.state,
+         bl.zip,
+         bl.reservation_url
+       FROM businesses b
+       LEFT JOIN business_locations bl ON bl.business_id = b.id AND bl.active_status = TRUE
+       WHERE b.id = $1
+       ORDER BY bl.id ASC
+       LIMIT 1`,
+      [input.businessId],
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    const website = normalizeWebsite(row.website ?? "");
+    const imageUrls = parseGalleryUrls(row.venue_gallery_urls);
+    // Hydrated = gallery cached and/or official website already known.
+    if (!website && imageUrls.length === 0) return null;
+
+    const city = row.city?.trim() || "";
+    const state = row.state?.trim() || "";
+    const address = row.address?.trim() || "";
+    const zip = row.zip?.trim() || "";
+    const about = row.description?.trim() || "";
+    const phone = row.contact_phone?.trim() || "";
+    const contactEmail = row.venue_email?.trim() || "";
+    const locationFound = Boolean(city || state || address);
+    const door =
+      normalizeJoinDoorType(row.join_door_type) ?? input.joinDoorType;
+
+    return {
+      // Always keep the directory / request name — never swap to another venue.
+      businessName: input.businessName.trim() || row.business_name,
+      website,
+      businessType:
+        row.business_type?.trim() ||
+        (door === "local" ? "Local Business" : "Restaurant"),
+      about,
+      contactEmail,
+      phone,
+      city,
+      state,
+      address,
+      zip,
+      locations:
+        locationFound || input.businessName
+          ? [
+              {
+                locationName:
+                  row.location_name?.trim() ||
+                  (city ? `${input.businessName} — ${city}` : input.businessName),
+                city,
+                state,
+                ...(address ? { address } : {}),
+                ...(row.reservation_url?.trim()
+                  ? { reservationUrl: row.reservation_url.trim() }
+                  : {}),
+              },
+            ]
+          : [],
+      reservationUrl: row.reservation_url?.trim() || null,
+      bookingPlatform: null,
+      logoUrl: imageUrls.find((u) => looksLikeLogoUrl(u)) ?? imageUrls[0] ?? null,
+      imageUrls,
+      discountHours: null,
+      eligibleWindow: "",
+      facebookUrl: row.facebook_url?.trim() || null,
+      instagramUrl: row.instagram_url?.trim() || null,
+      linkedinUrl: row.linkedin_url?.trim() || null,
+      youtubeUrl: null,
+      tiktokUrl: row.tiktok_url?.trim() || null,
+      checks: {
+        websiteFound: Boolean(website),
+        logoFound: imageUrls.length > 0,
+        photosFound: imageUrls.length > 0,
+        locationFound,
+      },
+      locationSourceUrl: null,
+      joinDoorType: door,
+      confirmationStatus: "Cached",
+      provider: "database",
+    };
+  } catch (err) {
+    console.error("loadHydratedBusinessFromDb failed:", err);
+    return null;
+  }
+}
+
 /**
  * Resolve a reviewable business “we found you” card from a typed name.
  */
@@ -111,6 +260,8 @@ export async function findBusinessFromName(input: {
   website?: unknown;
   /** When set, persist discovered public social/contact onto this business (null-only). */
   businessId?: unknown;
+  /** Edit → Re-scrape: skip DB cache and replace gallery/links from a fresh AI+scrape. */
+  forceRefresh?: unknown;
 }): Promise<FindBusinessFromNameResult> {
   const businessName = input.businessName.trim();
   if (!businessName || businessName.length > 200) {
@@ -129,6 +280,17 @@ export async function findBusinessFromName(input: {
   const businessIdRaw = Number(input.businessId);
   const businessId =
     Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
+  const forceRefresh = input.forceRefresh === true;
+
+  // Hydrate-once: if this business already has website/gallery in DB, never re-run AI.
+  if (businessId && !forceRefresh) {
+    const cached = await loadHydratedBusinessFromDb({
+      businessId,
+      businessName,
+      joinDoorType,
+    });
+    if (cached) return cached;
+  }
 
   let website = knownWebsite;
   let about = "";
@@ -271,13 +433,30 @@ export async function findBusinessFromName(input: {
       tiktokUrl: social.tiktokUrl,
       phone: social.phone,
       venueEmail: social.email,
+      description: about || null,
     });
   }
 
-  const mergedImages = [
-    ...venuePhotos,
-    ...imageSuggestions.map((img) => img.url).filter(Boolean),
-  ].filter((u) => u && !looksLikeDecorativeAssetUrl(u));
+  const bookingPhotoCount = venuePhotos.filter(
+    (u) => /image\.resy\.com|\/api\/venue-photo-proxy\?/i.test(u),
+  ).length;
+  // When Resy (or proxy) already has a real gallery, do not merge website
+  // og/menu suggestions — those are mostly Bento ornament PNGs / logos.
+  const suggestionUrls =
+    bookingPhotoCount >= 3
+      ? []
+      : imageSuggestions
+          .map((img) => img.url)
+          .filter(
+            (u) =>
+              Boolean(u) &&
+              !looksLikeDecorativeAssetUrl(u) &&
+              !looksLikeLogoUrl(u) &&
+              /\.(jpe?g|webp)(\?|$)/i.test(u),
+          );
+  const mergedImages = [...venuePhotos, ...suggestionUrls].filter(
+    (u) => u && !looksLikeDecorativeAssetUrl(u) && !looksLikeLogoUrl(u),
+  );
   const imageUrls = [...new Set(mergedImages)];
   const logoCandidate =
     imageUrls.find((u) => looksLikeLogoUrl(u)) ?? imageUrls[0] ?? null;
@@ -286,7 +465,11 @@ export async function findBusinessFromName(input: {
   );
 
   if (businessId && photoUrls.length > 0) {
-    await persistBusinessGalleryUrls(businessId, photoUrls);
+    if (forceRefresh) {
+      await replaceBusinessGalleryUrls(businessId, photoUrls);
+    } else {
+      await persistBusinessGalleryUrls(businessId, photoUrls);
+    }
   }
 
   const locationFound = Boolean(city || state || address);

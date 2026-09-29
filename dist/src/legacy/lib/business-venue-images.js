@@ -5,8 +5,9 @@ const booking_platform_links_1 = require("./booking-platform-links");
 const suggest_social_images_1 = require("./suggest-social-images");
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_200_000;
-const DEFAULT_LIMIT = 14;
+const DEFAULT_LIMIT = 18;
 const MAX_PAGES = 10;
+const SITE_PHOTO_GUARANTEED = 8;
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 const RESY_PUBLIC_API_KEY = "VbWk7s3L4KiK5fzlO7JD3Q5EYolJI7n5";
 const PHOTO_PATHS = [
@@ -362,7 +363,7 @@ async function scrapeBusinessVenueImages(input) {
     const bookingPhotos = await fetchBookingPlatformVenueImages(bookingUrl);
     const byKey = new Map();
     const ingest = (img) => {
-        if (!img || (0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(img))
+        if (!img || (0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(img) || (0, suggest_social_images_1.looksLikeLogoUrl)(img))
             return;
         const key = imageDedupeKey(img);
         const prev = byKey.get(key);
@@ -370,10 +371,6 @@ async function scrapeBusinessVenueImages(input) {
     };
     for (const img of bookingPhotos)
         ingest(img);
-    if (bookingPhotos.length >= Math.min(limit, 6)) {
-        const bookingOnly = rankVenueImageUrls([...byKey.values()]).filter((u) => /image\.resy\.com/i.test(u));
-        return proxyResyUrls(bookingOnly.slice(0, limit));
-    }
     const hasBookingGallery = bookingPhotos.length >= 3;
     const uniquePages = [...new Set(urls)].slice(0, MAX_PAGES);
     const PAGE_CONCURRENCY = 4;
@@ -388,13 +385,23 @@ async function scrapeBusinessVenueImages(input) {
                 !/image\.resy\.com/i.test(img)) {
                 continue;
             }
+            if (!hasBookingGallery &&
+                /\.png(\?|$)/i.test(img) &&
+                !/image\.resy\.com/i.test(img)) {
+                continue;
+            }
             ingest(img);
         }
     };
     ingestPage(seedPageUrl, seedHtml);
-    const remaining = uniquePages.filter((u) => u !== seedPageUrl && u !== website && u !== `${origin}/`);
+    const remaining = uniquePages
+        .filter((u) => u !== seedPageUrl && u !== website && u !== `${origin}/`)
+        .sort((a, b) => {
+        const score = (u) => /about|our-story|team|gallery|photos?/i.test(u) ? 0 : 1;
+        return score(a) - score(b);
+    });
     for (let i = 0; i < remaining.length; i += PAGE_CONCURRENCY) {
-        if (byKey.size >= limit)
+        if (byKey.size >= limit + 8 && i >= PAGE_CONCURRENCY)
             break;
         const batch = remaining.slice(i, i + PAGE_CONCURRENCY);
         const htmls = await Promise.all(batch.map((pageUrl) => fetchHtml(pageUrl)));
@@ -402,12 +409,20 @@ async function scrapeBusinessVenueImages(input) {
     }
     let ranked = rankVenueImageUrls([...byKey.values()]);
     const bookingOnly = ranked.filter((u) => /image\.resy\.com/i.test(u));
-    if (bookingOnly.length >= 4) {
-        ranked = [
-            ...bookingOnly,
-            ...ranked.filter((u) => !/image\.resy\.com/i.test(u) && /\.(jpe?g|webp)(\?|$)/i.test(u)),
-        ];
+    const sitePhotos = ranked
+        .filter((u) => !/image\.resy\.com/i.test(u) &&
+        /\.(jpe?g|webp)(\?|$)/i.test(u) &&
+        !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) &&
+        !(0, suggest_social_images_1.looksLikeLogoUrl)(u))
+        .sort((a, b) => (0, suggest_social_images_1.photoCoverRank)(a) - (0, suggest_social_images_1.photoCoverRank)(b));
+    const siteKeep = sitePhotos.slice(0, SITE_PHOTO_GUARANTEED);
+    if (bookingOnly.length > 0) {
+        const bookingSlots = Math.max(0, limit - siteKeep.length);
+        ranked = [...siteKeep, ...bookingOnly.slice(0, bookingSlots)];
     }
-    return proxyResyUrls(ranked.slice(0, limit));
+    else {
+        ranked = [...siteKeep, ...ranked.filter((u) => !siteKeep.includes(u))];
+    }
+    return proxyResyUrls([...new Set(ranked)].slice(0, limit));
 }
 //# sourceMappingURL=business-venue-images.js.map

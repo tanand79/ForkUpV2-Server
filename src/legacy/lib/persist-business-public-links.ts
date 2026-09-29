@@ -19,6 +19,8 @@ export type BusinessPublicLinks = {
   phone?: string | null;
   /** Public venue mailto — not the claim/ops contact_email. */
   venueEmail?: string | null;
+  /** Maps to businesses.description (About). */
+  description?: string | null;
 };
 
 function trimOrNull(value: string | null | undefined): string | null {
@@ -44,6 +46,7 @@ export async function persistBusinessPublicLinks(
   const tiktokUrl = trimOrNull(links.tiktokUrl);
   const phone = trimOrNull(links.phone);
   const venueEmail = trimOrNull(links.venueEmail);
+  const description = trimOrNull(links.description);
 
   if (
     !website &&
@@ -52,7 +55,8 @@ export async function persistBusinessPublicLinks(
     !linkedinUrl &&
     !tiktokUrl &&
     !phone &&
-    !venueEmail
+    !venueEmail &&
+    !description
   ) {
     return;
   }
@@ -67,6 +71,7 @@ export async function persistBusinessPublicLinks(
          tiktok_url = COALESCE(NULLIF(TRIM(tiktok_url), ''), $6),
          contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
          venue_email = COALESCE(NULLIF(TRIM(venue_email), ''), $8),
+         description = COALESCE(NULLIF(TRIM(description), ''), $9),
          updated_at = NOW()
        WHERE id = $1`,
       [
@@ -78,6 +83,7 @@ export async function persistBusinessPublicLinks(
         tiktokUrl,
         phone,
         venueEmail,
+        description,
       ],
     );
   } catch (err) {
@@ -96,6 +102,7 @@ export async function persistBusinessPublicLinks(
            linkedin_url = COALESCE(NULLIF(TRIM(linkedin_url), ''), $5),
            tiktok_url = COALESCE(NULLIF(TRIM(tiktok_url), ''), $6),
            contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
+           description = COALESCE(NULLIF(TRIM(description), ''), $8),
            updated_at = NOW()
          WHERE id = $1`,
         [
@@ -106,6 +113,7 @@ export async function persistBusinessPublicLinks(
           linkedinUrl,
           tiktokUrl,
           phone,
+          description,
         ],
       );
     } catch (err2) {
@@ -249,6 +257,48 @@ export async function persistBusinessGalleryUrls(
     const message = err instanceof Error ? err.message : String(err);
     if (!/venue_gallery_urls/i.test(message)) {
       console.error("persistBusinessGalleryUrls failed:", err);
+    }
+  }
+}
+
+/**
+ * Replace venue gallery entirely (Edit → Re-scrape). Fixes broken cached URLs.
+ * Inputs: businessId, absolute image URL list (may be empty to clear).
+ */
+export async function replaceBusinessGalleryUrls(
+  businessId: number,
+  urls: string[],
+): Promise<void> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return;
+  const clean = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(0, 24);
+  try {
+    await pool.query(
+      `UPDATE businesses SET
+         venue_gallery_urls = $2::jsonb,
+         venue_cover_url = COALESCE($3, venue_cover_url),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [businessId, JSON.stringify(clean), clean[0] ?? null],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/venue_cover_url/i.test(message)) {
+      try {
+        await pool.query(
+          `UPDATE businesses SET
+             venue_gallery_urls = $2::jsonb,
+             updated_at = NOW()
+           WHERE id = $1`,
+          [businessId, JSON.stringify(clean)],
+        );
+        return;
+      } catch (err2) {
+        console.error("replaceBusinessGalleryUrls fallback failed:", err2);
+        return;
+      }
+    }
+    if (!/venue_gallery_urls/i.test(message)) {
+      console.error("replaceBusinessGalleryUrls failed:", err);
     }
   }
 }

@@ -37,15 +37,22 @@ function looksLikeDecorativeAssetUrl(url) {
     const raw = (url || "").trim();
     if (!raw)
         return false;
-    if (/paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox/i.test(raw)) {
+    if (/paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox|jackelop/i.test(raw)) {
+        return true;
+    }
+    if (/images\.getbento\.com/i.test(raw) && /\.png(\?|$)/i.test(raw)) {
         return true;
     }
     if (/\.png(\?|$)/i.test(raw) &&
-        /(?:^|[\/_\-])(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)(?:aj|[_\-.]|$)/i.test(raw)) {
+        /\/(?:media\/)?images\/\d{8,}[^/]*\.png/i.test(raw)) {
         return true;
     }
     if (/\.png(\?|$)/i.test(raw) &&
-        /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|menu\.png/i.test(raw)) {
+        /(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)/i.test(raw)) {
+        return true;
+    }
+    if (/\.png(\?|$)/i.test(raw) &&
+        /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|bwjackelop|menu\.png/i.test(raw)) {
         return true;
     }
     return false;

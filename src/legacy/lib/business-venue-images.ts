@@ -15,8 +15,10 @@ import {
 
 const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_200_000;
-const DEFAULT_LIMIT = 14;
+const DEFAULT_LIMIT = 18;
 const MAX_PAGES = 10;
+/** Always keep this many real site JPGs even when Resy fills most slots. */
+const SITE_PHOTO_GUARANTEED = 8;
 
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
@@ -417,7 +419,7 @@ export async function scrapeBusinessVenueImages(input: {
   const byKey = new Map<string, string>();
 
   const ingest = (img: string) => {
-    if (!img || looksLikeDecorativeAssetUrl(img)) return;
+    if (!img || looksLikeDecorativeAssetUrl(img) || looksLikeLogoUrl(img)) return;
     const key = imageDedupeKey(img);
     const prev = byKey.get(key);
     byKey.set(key, prev ? preferHigherRes(prev, img) : img);
@@ -425,14 +427,6 @@ export async function scrapeBusinessVenueImages(input: {
 
   // Booking galleries first (Resy carousel) — real venue photos.
   for (const img of bookingPhotos) ingest(img);
-
-  // Fast path: enough booking photos → skip multi-page site crawl (global).
-  if (bookingPhotos.length >= Math.min(limit, 6)) {
-    const bookingOnly = rankVenueImageUrls([...byKey.values()]).filter((u) =>
-      /image\.resy\.com/i.test(u),
-    );
-    return proxyResyUrls(bookingOnly.slice(0, limit));
-  }
 
   // When Resy (or another booking gallery) already gave real photos, skip
   // mixing in site PNG ornaments that look like "photos" by pixel size.
@@ -446,8 +440,18 @@ export async function scrapeBusinessVenueImages(input: {
     const fromExtract = extractImageUrlsFromHtml(html, pageUrl);
     const fromLazy = extractLazyImageUrls(html, pageUrl);
     for (const img of [...fromExtract, ...fromLazy]) {
+      // Never keep site PNGs when a booking gallery exists (menu doodles / logos).
       if (
         hasBookingGallery &&
+        /\.png(\?|$)/i.test(img) &&
+        !/image\.resy\.com/i.test(img)
+      ) {
+        continue;
+      }
+      // Without booking photos, still drop site PNGs that aren't clearly photos —
+      // Bento/menu pages are almost all ornament PNGs; keep JPG/WEBP only.
+      if (
+        !hasBookingGallery &&
         /\.png(\?|$)/i.test(img) &&
         !/image\.resy\.com/i.test(img)
       ) {
@@ -460,12 +464,18 @@ export async function scrapeBusinessVenueImages(input: {
   // Seed page already fetched — ingest without a second round-trip.
   ingestPage(seedPageUrl, seedHtml);
 
-  const remaining = uniquePages.filter(
-    (u) => u !== seedPageUrl && u !== website && u !== `${origin}/`,
-  );
+  const remaining = uniquePages
+    .filter((u) => u !== seedPageUrl && u !== website && u !== `${origin}/`)
+    // Crawl about / team / gallery before menus so staff photos are not skipped.
+    .sort((a, b) => {
+      const score = (u: string) =>
+        /about|our-story|team|gallery|photos?/i.test(u) ? 0 : 1;
+      return score(a) - score(b);
+    });
 
   for (let i = 0; i < remaining.length; i += PAGE_CONCURRENCY) {
-    if (byKey.size >= limit) break;
+    // Keep crawling priority pages even after Resy fills most slots.
+    if (byKey.size >= limit + 8 && i >= PAGE_CONCURRENCY) break;
     const batch = remaining.slice(i, i + PAGE_CONCURRENCY);
     const htmls = await Promise.all(batch.map((pageUrl) => fetchHtml(pageUrl)));
     batch.forEach((pageUrl, idx) => ingestPage(pageUrl, htmls[idx] ?? null));
@@ -473,17 +483,27 @@ export async function scrapeBusinessVenueImages(input: {
 
   let ranked = rankVenueImageUrls([...byKey.values()]);
 
-  // Prefer the booking carousel when it has a full set.
+  // Prefer about/team site photography, then booking carousel.
+  // Resy used to fill the entire limit and drop About Us / staff JPGs.
   const bookingOnly = ranked.filter((u) => /image\.resy\.com/i.test(u));
-  if (bookingOnly.length >= 4) {
-    ranked = [
-      ...bookingOnly,
-      ...ranked.filter(
-        (u) => !/image\.resy\.com/i.test(u) && /\.(jpe?g|webp)(\?|$)/i.test(u),
-      ),
-    ];
+  const sitePhotos = ranked
+    .filter(
+      (u) =>
+        !/image\.resy\.com/i.test(u) &&
+        /\.(jpe?g|webp)(\?|$)/i.test(u) &&
+        !looksLikeDecorativeAssetUrl(u) &&
+        !looksLikeLogoUrl(u),
+    )
+    .sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
+
+  const siteKeep = sitePhotos.slice(0, SITE_PHOTO_GUARANTEED);
+  if (bookingOnly.length > 0) {
+    const bookingSlots = Math.max(0, limit - siteKeep.length);
+    ranked = [...siteKeep, ...bookingOnly.slice(0, bookingSlots)];
+  } else {
+    ranked = [...siteKeep, ...ranked.filter((u) => !siteKeep.includes(u))];
   }
 
   // Same-origin proxy so the browser gallery can render Resy CDN photos.
-  return proxyResyUrls(ranked.slice(0, limit));
+  return proxyResyUrls([...new Set(ranked)].slice(0, limit));
 }

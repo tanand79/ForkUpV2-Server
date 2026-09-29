@@ -34,7 +34,8 @@ exports.businessVenueImagesRouter.post("/business-venue-images", async (req, res
             : "";
         const businessIdRaw = Number(req.body?.businessId);
         const businessId = Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
-        if (businessId) {
+        const forceRefresh = req.body?.forceRefresh === true;
+        if (businessId && !forceRefresh) {
             try {
                 const { rows } = await pool_1.pool.query(`SELECT venue_gallery_urls, venue_cover_url FROM businesses WHERE id = $1 LIMIT 1`, [businessId]);
                 const cached = parseStoredGallery(rows[0]?.venue_gallery_urls);
@@ -57,12 +58,17 @@ exports.businessVenueImagesRouter.post("/business-venue-images", async (req, res
             limit: 16,
         });
         if (businessId && imageUrls.length > 0) {
-            void (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, imageUrls);
+            if (forceRefresh) {
+                void (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, imageUrls);
+            }
+            else {
+                void (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, imageUrls);
+            }
         }
         res.json({
             imageUrls,
             reservationUrl: reservationUrl || null,
-            coverUrl: null,
+            coverUrl: imageUrls[0] ?? null,
         });
     }
     catch (err) {

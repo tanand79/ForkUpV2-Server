@@ -49,4 +49,5 @@ export declare function findBusinessFromName(input: {
     state?: unknown;
     website?: unknown;
     businessId?: unknown;
+    forceRefresh?: unknown;
 }): Promise<FindBusinessFromNameResult>;

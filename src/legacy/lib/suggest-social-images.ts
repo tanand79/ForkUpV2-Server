@@ -74,17 +74,28 @@ export function looksLikeDecorativeAssetUrl(url: string): boolean {
   const raw = (url || "").trim();
   if (!raw) return false;
   if (
-    /paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox/i.test(
+    /paper[_-]?cut|cut[_-]?out|illustrat|doodle|clip[_-]?art|line[_-]?art|hand[_-]?drawn|decorati|ornament|sticker|scribble|silhouette|map[_-]?marker|unnamed|no[_-]?edge|sbox|jackelop/i.test(
       raw,
     )
+  ) {
+    return true;
+  }
+  // BentoBox (and similar): real venue photos are JPG; PNGs are doodles / logos.
+  if (/images\.getbento\.com/i.test(raw) && /\.png(\?|$)/i.test(raw)) {
+    return true;
+  }
+  // Hashed / numeric-only PNG filenames (menu illustrations with opaque names).
+  if (
+    /\.png(\?|$)/i.test(raw) &&
+    /\/(?:media\/)?images\/\d{8,}[^/]*\.png/i.test(raw)
   ) {
     return true;
   }
   // Single-ingredient / utensil PNGs used as page ornaments (not photography).
-  // Matches basilAJ / onionaj (no separator) as well as tomato_AJ.
+  // Matches basilAJ / onionaj (no separator) as well as tomato_AJ / Wine_Glass_….
   if (
     /\.png(\?|$)/i.test(raw) &&
-    /(?:^|[\/_\-])(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)(?:aj|[_\-.]|$)/i.test(
+    /(tomato|basil|onion|lettuce|corn|egg|blueberry|blueberries|carrot|garlic|lemon|avocado|pepper|wine|glass|goblet|utensil|cutlery|fork|knife|spoon|asparagus|jackelope|jackelop)/i.test(
       raw,
     )
   ) {
@@ -92,7 +103,7 @@ export function looksLikeDecorativeAssetUrl(url: string): boolean {
   }
   if (
     /\.png(\?|$)/i.test(raw) &&
-    /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|menu\.png/i.test(
+    /leaf[_-]?lettuce|egg[_-]?brunch|wine[_-]?glass|asparagus[_-]?group|bwjackelope|bwjackelop|menu\.png/i.test(
       raw,
     )
   ) {

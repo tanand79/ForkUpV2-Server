@@ -2,13 +2,15 @@
  * Pass D1 — find business profile from name (restaurant / local Join Us).
  *
  * POST /api/find-business-profile
- * request: { businessName, joinDoorType?, nearZip?, city?, state? }
+ * request: { businessName, joinDoorType?, nearZip?, city?, state?, website?, businessId? }
  * response: FindBusinessFromNameResult (see find-business-from-name.ts)
  *
  * Changelog (D1): Added — additive endpoint; does not change generate-business-draft.
  * Changelog: Optional nearZip/city/state for nearby store + social URLs on result.
  * Changelog: Optional website — use known DB/site URL so social scrape hits the right host
  *            (e.g. The Pear → thepeardilworthtown.com, not an AI-guessed wrong domain).
+ * Changelog: When businessId already has website/gallery in DB, return cached payload
+ *            (provider=database) — no AI re-fire on View profile reopen.
  */
 import { Router } from "express";
 import { findBusinessFromName } from "../lib/find-business-from-name";
@@ -31,6 +33,7 @@ findBusinessProfileRouter.post("/find-business-profile", async (req, res) => {
       state: req.body?.state,
       website: req.body?.website,
       businessId: req.body?.businessId,
+      forceRefresh: req.body?.forceRefresh === true,
     });
     res.json(result);
   } catch (err) {

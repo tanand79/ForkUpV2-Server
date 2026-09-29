@@ -19,6 +19,7 @@ exports.findBusinessProfileRouter.post("/find-business-profile", async (req, res
             state: req.body?.state,
             website: req.body?.website,
             businessId: req.body?.businessId,
+            forceRefresh: req.body?.forceRefresh === true,
         });
         res.json(result);
     }

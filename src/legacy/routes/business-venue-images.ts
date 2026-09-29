@@ -14,11 +14,15 @@
  * Additive: optional businessId persists gallery URLs (null-only) for fast reopen.
  * Additive: when businessId already has venue_gallery_urls, return DB cache — no scrape.
  * Additive: cached path also returns businesses.venue_cover_url as coverUrl.
+ * Additive: forceRefresh=true skips cache, re-scrapes, and replaces venue_gallery_urls.
  */
 import { Router } from "express";
 import { pool } from "../db/pool";
 import { scrapeBusinessVenueImages } from "../lib/business-venue-images";
-import { persistBusinessGalleryUrls } from "../lib/persist-business-public-links";
+import {
+  persistBusinessGalleryUrls,
+  replaceBusinessGalleryUrls,
+} from "../lib/persist-business-public-links";
 
 export const businessVenueImagesRouter = Router();
 
@@ -53,9 +57,10 @@ businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
     const businessIdRaw = Number(req.body?.businessId);
     const businessId =
       Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
+    const forceRefresh = req.body?.forceRefresh === true;
 
     // Instant path: gallery already stored — never re-scrape on every open.
-    if (businessId) {
+    if (businessId && !forceRefresh) {
       try {
         const { rows } = await pool.query<{
           venue_gallery_urls: unknown;
@@ -86,13 +91,17 @@ businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
     });
 
     if (businessId && imageUrls.length > 0) {
-      void persistBusinessGalleryUrls(businessId, imageUrls);
+      if (forceRefresh) {
+        void replaceBusinessGalleryUrls(businessId, imageUrls);
+      } else {
+        void persistBusinessGalleryUrls(businessId, imageUrls);
+      }
     }
 
     res.json({
       imageUrls,
       reservationUrl: reservationUrl || null,
-      coverUrl: null,
+      coverUrl: imageUrls[0] ?? null,
     });
   } catch (err) {
     console.error(err);

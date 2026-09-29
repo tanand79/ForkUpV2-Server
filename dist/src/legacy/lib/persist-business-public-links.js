@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.persistBusinessPublicLinks = persistBusinessPublicLinks;
 exports.updateBusinessPublicLinks = updateBusinessPublicLinks;
 exports.persistBusinessGalleryUrls = persistBusinessGalleryUrls;
+exports.replaceBusinessGalleryUrls = replaceBusinessGalleryUrls;
 exports.mergeBusinessGalleryUrls = mergeBusinessGalleryUrls;
 exports.persistBusinessVenueCoverUrl = persistBusinessVenueCoverUrl;
 const pool_1 = require("../db/pool");
@@ -22,13 +23,15 @@ async function persistBusinessPublicLinks(businessId, links) {
     const tiktokUrl = trimOrNull(links.tiktokUrl);
     const phone = trimOrNull(links.phone);
     const venueEmail = trimOrNull(links.venueEmail);
+    const description = trimOrNull(links.description);
     if (!website &&
         !facebookUrl &&
         !instagramUrl &&
         !linkedinUrl &&
         !tiktokUrl &&
         !phone &&
-        !venueEmail) {
+        !venueEmail &&
+        !description) {
         return;
     }
     try {
@@ -40,6 +43,7 @@ async function persistBusinessPublicLinks(businessId, links) {
          tiktok_url = COALESCE(NULLIF(TRIM(tiktok_url), ''), $6),
          contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
          venue_email = COALESCE(NULLIF(TRIM(venue_email), ''), $8),
+         description = COALESCE(NULLIF(TRIM(description), ''), $9),
          updated_at = NOW()
        WHERE id = $1`, [
             businessId,
@@ -50,6 +54,7 @@ async function persistBusinessPublicLinks(businessId, links) {
             tiktokUrl,
             phone,
             venueEmail,
+            description,
         ]);
     }
     catch (err) {
@@ -66,6 +71,7 @@ async function persistBusinessPublicLinks(businessId, links) {
            linkedin_url = COALESCE(NULLIF(TRIM(linkedin_url), ''), $5),
            tiktok_url = COALESCE(NULLIF(TRIM(tiktok_url), ''), $6),
            contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
+           description = COALESCE(NULLIF(TRIM(description), ''), $8),
            updated_at = NOW()
          WHERE id = $1`, [
                 businessId,
@@ -75,6 +81,7 @@ async function persistBusinessPublicLinks(businessId, links) {
                 linkedinUrl,
                 tiktokUrl,
                 phone,
+                description,
             ]);
         }
         catch (err2) {
@@ -144,6 +151,37 @@ async function persistBusinessGalleryUrls(businessId, urls) {
         const message = err instanceof Error ? err.message : String(err);
         if (!/venue_gallery_urls/i.test(message)) {
             console.error("persistBusinessGalleryUrls failed:", err);
+        }
+    }
+}
+async function replaceBusinessGalleryUrls(businessId, urls) {
+    if (!Number.isFinite(businessId) || businessId <= 0)
+        return;
+    const clean = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(0, 24);
+    try {
+        await pool_1.pool.query(`UPDATE businesses SET
+         venue_gallery_urls = $2::jsonb,
+         venue_cover_url = COALESCE($3, venue_cover_url),
+         updated_at = NOW()
+       WHERE id = $1`, [businessId, JSON.stringify(clean), clean[0] ?? null]);
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/venue_cover_url/i.test(message)) {
+            try {
+                await pool_1.pool.query(`UPDATE businesses SET
+             venue_gallery_urls = $2::jsonb,
+             updated_at = NOW()
+           WHERE id = $1`, [businessId, JSON.stringify(clean)]);
+                return;
+            }
+            catch (err2) {
+                console.error("replaceBusinessGalleryUrls fallback failed:", err2);
+                return;
+            }
+        }
+        if (!/venue_gallery_urls/i.test(message)) {
+            console.error("replaceBusinessGalleryUrls failed:", err);
         }
     }
 }

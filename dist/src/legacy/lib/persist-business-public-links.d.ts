@@ -7,6 +7,7 @@ export type BusinessPublicLinks = {
     youtubeUrl?: string | null;
     phone?: string | null;
     venueEmail?: string | null;
+    description?: string | null;
 };
 export declare function persistBusinessPublicLinks(businessId: number, links: BusinessPublicLinks): Promise<void>;
 export type BusinessPublicLinksUpdate = {
@@ -20,5 +21,6 @@ export type BusinessPublicLinksUpdate = {
 };
 export declare function updateBusinessPublicLinks(businessId: number, links: BusinessPublicLinksUpdate): Promise<BusinessPublicLinksUpdate | null>;
 export declare function persistBusinessGalleryUrls(businessId: number, urls: string[]): Promise<void>;
+export declare function replaceBusinessGalleryUrls(businessId: number, urls: string[]): Promise<void>;
 export declare function mergeBusinessGalleryUrls(businessId: number, urls: string[]): Promise<string[]>;
 export declare function persistBusinessVenueCoverUrl(businessId: number, coverUrl: string | null | undefined): Promise<string | null>;

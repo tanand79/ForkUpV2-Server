@@ -9,6 +9,7 @@ const venue_page_extract_1 = require("./venue-page-extract");
 const join_door_type_1 = require("./join-door-type");
 const geo_distance_1 = require("./geo-distance");
 const persist_business_public_links_1 = require("./persist-business-public-links");
+const pool_1 = require("../db/pool");
 function normalizeWebsite(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -26,6 +27,118 @@ function cleanNearZip(raw) {
         return "";
     return raw.replace(/\D/g, "").slice(0, 5);
 }
+function parseGalleryUrls(raw) {
+    if (!raw)
+        return [];
+    let value = raw;
+    if (typeof raw === "string") {
+        try {
+            value = JSON.parse(raw);
+        }
+        catch {
+            return [];
+        }
+    }
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((u) => typeof u === "string" && u.trim().length > 0);
+}
+async function loadHydratedBusinessFromDb(input) {
+    try {
+        const { rows } = await pool_1.pool.query(`SELECT
+         b.business_name,
+         b.business_type,
+         b.description,
+         b.website,
+         b.facebook_url,
+         b.instagram_url,
+         b.linkedin_url,
+         b.tiktok_url,
+         b.contact_phone,
+         b.venue_email,
+         b.venue_gallery_urls,
+         b.join_door_type,
+         bl.location_name,
+         bl.address,
+         bl.city,
+         bl.state,
+         bl.zip,
+         bl.reservation_url
+       FROM businesses b
+       LEFT JOIN business_locations bl ON bl.business_id = b.id AND bl.active_status = TRUE
+       WHERE b.id = $1
+       ORDER BY bl.id ASC
+       LIMIT 1`, [input.businessId]);
+        if (rows.length === 0)
+            return null;
+        const row = rows[0];
+        const website = normalizeWebsite(row.website ?? "");
+        const imageUrls = parseGalleryUrls(row.venue_gallery_urls);
+        if (!website && imageUrls.length === 0)
+            return null;
+        const city = row.city?.trim() || "";
+        const state = row.state?.trim() || "";
+        const address = row.address?.trim() || "";
+        const zip = row.zip?.trim() || "";
+        const about = row.description?.trim() || "";
+        const phone = row.contact_phone?.trim() || "";
+        const contactEmail = row.venue_email?.trim() || "";
+        const locationFound = Boolean(city || state || address);
+        const door = (0, join_door_type_1.normalizeJoinDoorType)(row.join_door_type) ?? input.joinDoorType;
+        return {
+            businessName: input.businessName.trim() || row.business_name,
+            website,
+            businessType: row.business_type?.trim() ||
+                (door === "local" ? "Local Business" : "Restaurant"),
+            about,
+            contactEmail,
+            phone,
+            city,
+            state,
+            address,
+            zip,
+            locations: locationFound || input.businessName
+                ? [
+                    {
+                        locationName: row.location_name?.trim() ||
+                            (city ? `${input.businessName} — ${city}` : input.businessName),
+                        city,
+                        state,
+                        ...(address ? { address } : {}),
+                        ...(row.reservation_url?.trim()
+                            ? { reservationUrl: row.reservation_url.trim() }
+                            : {}),
+                    },
+                ]
+                : [],
+            reservationUrl: row.reservation_url?.trim() || null,
+            bookingPlatform: null,
+            logoUrl: imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null,
+            imageUrls,
+            discountHours: null,
+            eligibleWindow: "",
+            facebookUrl: row.facebook_url?.trim() || null,
+            instagramUrl: row.instagram_url?.trim() || null,
+            linkedinUrl: row.linkedin_url?.trim() || null,
+            youtubeUrl: null,
+            tiktokUrl: row.tiktok_url?.trim() || null,
+            checks: {
+                websiteFound: Boolean(website),
+                logoFound: imageUrls.length > 0,
+                photosFound: imageUrls.length > 0,
+                locationFound,
+            },
+            locationSourceUrl: null,
+            joinDoorType: door,
+            confirmationStatus: "Cached",
+            provider: "database",
+        };
+    }
+    catch (err) {
+        console.error("loadHydratedBusinessFromDb failed:", err);
+        return null;
+    }
+}
 async function findBusinessFromName(input) {
     const businessName = input.businessName.trim();
     if (!businessName || businessName.length > 200) {
@@ -41,6 +154,16 @@ async function findBusinessFromName(input) {
     const knownWebsite = typeof input.website === "string" ? normalizeWebsite(input.website) : "";
     const businessIdRaw = Number(input.businessId);
     const businessId = Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
+    const forceRefresh = input.forceRefresh === true;
+    if (businessId && !forceRefresh) {
+        const cached = await loadHydratedBusinessFromDb({
+            businessId,
+            businessName,
+            joinDoorType,
+        });
+        if (cached)
+            return cached;
+    }
     let website = knownWebsite;
     let about = "";
     let contactEmail = "";
@@ -181,17 +304,29 @@ async function findBusinessFromName(input) {
             tiktokUrl: social.tiktokUrl,
             phone: social.phone,
             venueEmail: social.email,
+            description: about || null,
         });
     }
-    const mergedImages = [
-        ...venuePhotos,
-        ...imageSuggestions.map((img) => img.url).filter(Boolean),
-    ].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
+    const bookingPhotoCount = venuePhotos.filter((u) => /image\.resy\.com|\/api\/venue-photo-proxy\?/i.test(u)).length;
+    const suggestionUrls = bookingPhotoCount >= 3
+        ? []
+        : imageSuggestions
+            .map((img) => img.url)
+            .filter((u) => Boolean(u) &&
+            !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) &&
+            !(0, suggest_social_images_1.looksLikeLogoUrl)(u) &&
+            /\.(jpe?g|webp)(\?|$)/i.test(u));
+    const mergedImages = [...venuePhotos, ...suggestionUrls].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) && !(0, suggest_social_images_1.looksLikeLogoUrl)(u));
     const imageUrls = [...new Set(mergedImages)];
     const logoCandidate = imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null;
     const photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
     if (businessId && photoUrls.length > 0) {
-        await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, photoUrls);
+        if (forceRefresh) {
+            await (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, photoUrls);
+        }
+        else {
+            await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, photoUrls);
+        }
     }
     const locationFound = Boolean(city || state || address);
     const checks = {
