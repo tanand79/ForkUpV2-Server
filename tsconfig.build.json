@@ -21,6 +21,8 @@
     "src/legacy/db/migrate-venue-email.ts",
     "src/legacy/db/migrate-venue-gallery-urls.ts",
     "src/legacy/db/migrate-venue-cover-url.ts",
+    "src/legacy/db/migrate-venue-discount-hours.ts",
+    "src/legacy/db/run-venue-discount-hours-production.ts",
     "src/legacy/db/migrate-nonprofit-gallery.ts",
     "src/legacy/db/run-nonprofit-gallery-production.ts",
     "src/legacy/db/migrate-campaign-images-url-width.ts",

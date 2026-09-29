@@ -21,6 +21,7 @@ import {
   listOrganizationMembers,
   type OrganizationType,
 } from "../lib/invite-sender";
+import { normalizeVenueDiscountHours } from "../lib/persist-business-public-links";
 
 export const profilesRouter = Router();
 
@@ -1743,8 +1744,13 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
         location_name: string;
         city: string | null;
         state: string | null;
+        address: string | null;
+        zip: string | null;
         latitude: number | null;
         longitude: number | null;
+        description: string | null;
+        venue_discount_hours: unknown;
+        venue_eligible_window: string | null;
       }
     >(
       `SELECT
@@ -1766,11 +1772,16 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
          NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
          NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
          NULLIF(TRIM(b.venue_email), '') AS venue_email,
+         NULLIF(TRIM(b.description), '') AS description,
          b.venue_gallery_urls,
+         b.venue_discount_hours,
+         NULLIF(TRIM(b.venue_eligible_window), '') AS venue_eligible_window,
          bl.id AS location_id,
          bl.location_name,
          bl.city,
          bl.state,
+         bl.address,
+         bl.zip,
          bl.latitude,
          bl.longitude
        FROM businesses b
@@ -1794,6 +1805,10 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
       tiktokUrl: string | null;
       contactPhone: string | null;
       venueEmail: string | null;
+      /** About from businesses.description (DB-only venue profile). */
+      about: string | null;
+      discountHours: ReturnType<typeof normalizeVenueDiscountHours> | null;
+      eligibleWindow: string | null;
       galleryImageUrls: string[];
       capabilities: {
         dineAndDonate: boolean;
@@ -1806,6 +1821,8 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
         locationName: string;
         city: string | null;
         state: string | null;
+        address: string | null;
+        zip: string | null;
         distanceMiles: number | null;
       }[];
       _nearestMiles: number | null;
@@ -1845,6 +1862,16 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
             typeof row.contact_phone === "string" ? row.contact_phone : null,
           venueEmail:
             typeof row.venue_email === "string" ? row.venue_email : null,
+          about:
+            typeof row.description === "string" ? row.description : null,
+          discountHours:
+            row.venue_discount_hours != null
+              ? normalizeVenueDiscountHours(row.venue_discount_hours)
+              : null,
+          eligibleWindow:
+            typeof row.venue_eligible_window === "string"
+              ? row.venue_eligible_window
+              : null,
           galleryImageUrls: parseGalleryImageUrls(row.venue_gallery_urls),
           capabilities: {
             dineAndDonate: Boolean(row.supports_dine_and_donate),
@@ -1863,6 +1890,8 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
         locationName: row.location_name,
         city: row.city,
         state: row.state,
+        address: typeof row.address === "string" ? row.address : null,
+        zip: typeof row.zip === "string" ? row.zip : null,
         distanceMiles: nearby.distanceMiles,
       });
       if (nearby.distanceMiles != null) {

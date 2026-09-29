@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS businesses (
   guest_claim_token VARCHAR(64) NULL,
   guest_claim_expires_at TIMESTAMP NULL,
   guest_claim_claimed_at TIMESTAMP NULL,
+  -- Additive: durable giveback hours / window (replaces browser venue snapshot).
+  venue_discount_hours JSONB NULL,
+  venue_eligible_window VARCHAR(255) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

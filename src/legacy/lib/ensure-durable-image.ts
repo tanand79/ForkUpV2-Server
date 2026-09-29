@@ -30,6 +30,8 @@ function imageContentHash(buffer: Buffer): string {
 const MAX_BYTES = 8 * 1024 * 1024;
 /** Venue gallery originals (Resy) can exceed campaign-cover size. */
 const VENUE_GALLERY_MAX_BYTES = 16 * 1024 * 1024;
+/** Skip tiny thumbs that blur when used as cover (seen ~3KB on Don Camaron). */
+const VENUE_GALLERY_MIN_BYTES = 20 * 1024;
 const FETCH_MS = 15_000;
 
 /**
@@ -113,7 +115,11 @@ function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): stri
 export async function ensureDurableImageUrl(
   imageUrl: string,
   prefix = "covers",
-  options?: { headers?: Record<string, string>; maxBytes?: number },
+  options?: {
+    headers?: Record<string, string>;
+    maxBytes?: number;
+    minBytes?: number;
+  },
 ): Promise<string> {
   const trimmed = imageUrl.trim();
   if (!trimmed || trimmed.startsWith("blob:") || trimmed.startsWith("data:")) {
@@ -145,6 +151,12 @@ export async function ensureDurableImageUrl(
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length === 0) {
     throw new Error("Downloaded image was empty");
+  }
+  const minBytes = options?.minBytes ?? 0;
+  if (minBytes > 0 && buffer.length < minBytes) {
+    throw new Error(
+      `Image too small to store as gallery photo (${buffer.length} bytes)`,
+    );
   }
   const maxBytes = options?.maxBytes ?? MAX_BYTES;
   if (buffer.length > maxBytes) {
@@ -184,9 +196,36 @@ export function unwrapVenuePhotoProxyUrl(url: string): string {
 }
 
 /**
+ * Prefer a larger public variant when sites expose tiny thumbs via query/path.
+ * Inputs: absolute image URL. Outputs: maybe-upgraded URL (same if unchanged).
+ */
+function preferLargerPublicImageUrl(url: string): string {
+  const trimmed = (url || "").trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    const u = new URL(trimmed);
+    // "quality_auto" folders often serve compressed thumbs — try the raw media path.
+    if (/\/quality_auto\//i.test(u.pathname)) {
+      u.pathname = u.pathname.replace(/\/quality_auto\//i, "/");
+    }
+    const w = Number(u.searchParams.get("w") || 0);
+    if (w > 0 && w < 800) {
+      u.searchParams.set("w", "1600");
+    }
+    const h = Number(u.searchParams.get("h") || 0);
+    if (h > 0 && h < 600) {
+      u.searchParams.set("h", "1200");
+    }
+    return u.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
  * Re-host scraped venue gallery URLs into ForkUp storage (S3 or /uploads/).
- * Resy CDN fetches use booking Referer. Failures keep the original URL.
- * Inputs: scraped URL list. Outputs: durable (or original) URL list, same order.
+ * Drops failed / tiny downloads (do not keep broken hotlinks in DB).
+ * Inputs: scraped URL list. Outputs: durable URL list only.
  */
 export async function ensureDurableVenueGalleryUrls(
   urls: string[],
@@ -200,15 +239,30 @@ export async function ensureDurableVenueGalleryUrls(
   const CONCURRENCY = 4;
   const out: string[] = [];
 
-  const one = async (url: string): Promise<string> => {
-    // Already our storage — keep as-is (still resolve proxy wrappers).
-    if (
-      isDurableCampaignImageUrl(url) &&
-      !/venue-photo-proxy/i.test(url)
-    ) {
+  const one = async (url: string): Promise<string | null> => {
+    // Already our storage — keep (re-scrape replace will refresh the full set).
+    if (isDurableCampaignImageUrl(url) && !/venue-photo-proxy/i.test(url)) {
+      // Drop known-tiny local re-hosts if we can stat them (blurry covers).
+      if (url.startsWith("/uploads/")) {
+        try {
+          const abs = path.join(process.cwd(), url.replace(/^\//, ""));
+          const st = fs.statSync(abs);
+          if (st.size > 0 && st.size < VENUE_GALLERY_MIN_BYTES) {
+            console.warn(
+              "ensureDurableVenueGalleryUrls drop tiny upload:",
+              url,
+              st.size,
+            );
+            return null;
+          }
+        } catch {
+          /* missing file — drop so scrape can replace */
+          return null;
+        }
+      }
       return normalizeDurableCampaignImageUrl(url);
     }
-    const fetchUrl = unwrapVenuePhotoProxyUrl(url);
+    const fetchUrl = preferLargerPublicImageUrl(unwrapVenuePhotoProxyUrl(url));
     const resyHeaders = /image\.resy\.com|images\.resy\.com/i.test(fetchUrl)
       ? {
           "User-Agent":
@@ -221,17 +275,20 @@ export async function ensureDurableVenueGalleryUrls(
       return await ensureDurableImageUrl(fetchUrl, "venue-gallery", {
         headers: resyHeaders,
         maxBytes: VENUE_GALLERY_MAX_BYTES,
+        minBytes: VENUE_GALLERY_MIN_BYTES,
       });
     } catch (err) {
-      console.warn("ensureDurableVenueGalleryUrls failed:", fetchUrl, err);
-      return url;
+      console.warn("ensureDurableVenueGalleryUrls drop:", fetchUrl, err);
+      return null;
     }
   };
 
   for (let i = 0; i < list.length; i += CONCURRENCY) {
     const batch = list.slice(i, i + CONCURRENCY);
     const done = await Promise.all(batch.map(one));
-    out.push(...done);
+    for (const u of done) {
+      if (u) out.push(u);
+    }
   }
-  return out;
+  return [...new Set(out)];
 }

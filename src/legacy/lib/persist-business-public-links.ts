@@ -22,12 +22,203 @@ export type BusinessPublicLinks = {
   venueEmail?: string | null;
   /** Maps to businesses.description (About). */
   description?: string | null;
+  /** Giveback weekday labels — maps to venue_discount_hours JSONB. */
+  discountHours?: Record<string, string> | null;
+  /** Free-text eligible window — maps to venue_eligible_window. */
+  eligibleWindow?: string | null;
 };
 
 function trimOrNull(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   const t = value.trim();
   return t || null;
+}
+
+export const VENUE_DISCOUNT_DAYS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+] as const;
+
+export type VenueDiscountHoursMap = Record<
+  (typeof VENUE_DISCOUNT_DAYS)[number],
+  string
+>;
+
+/** Closed/unknown day markers for durable giveback hours. */
+export function defaultVenueDiscountHours(): VenueDiscountHoursMap {
+  return {
+    Monday: "-",
+    Tuesday: "-",
+    Wednesday: "-",
+    Thursday: "-",
+    Friday: "-",
+    Saturday: "-",
+    Sunday: "-",
+  };
+}
+
+/** Normalize unknown JSON / object into weekday → label map. */
+export function normalizeVenueDiscountHours(
+  value: unknown,
+): VenueDiscountHoursMap {
+  const hours = defaultVenueDiscountHours();
+  if (!value || typeof value !== "object") return hours;
+  for (const day of VENUE_DISCOUNT_DAYS) {
+    const raw = (value as Record<string, unknown>)[day];
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    hours[day] = trimmed || "-";
+  }
+  return hours;
+}
+
+export function venueDiscountHoursHaveOpenDay(
+  hours: VenueDiscountHoursMap,
+): boolean {
+  return VENUE_DISCOUNT_DAYS.some((day) => {
+    const v = hours[day]?.trim() ?? "";
+    return Boolean(v) && v !== "-" && v !== "—";
+  });
+}
+
+/**
+ * Null-only fill for giveback hours / eligible window.
+ * When `markResolved` is true and hours are empty, stores all "-" so hydrate
+ * knows AI already ran (avoids re-scrape every open).
+ */
+export async function persistVenueDiscountHours(
+  businessId: number,
+  hours: Record<string, string> | null | undefined,
+  eligibleWindow?: string | null,
+  options?: { overwrite?: boolean; markResolved?: boolean },
+): Promise<void> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return;
+  const overwrite = options?.overwrite === true;
+  const markResolved = options?.markResolved !== false;
+  const normalized = normalizeVenueDiscountHours(hours ?? null);
+  const hasOpen = venueDiscountHoursHaveOpenDay(normalized);
+  if (!hasOpen && !markResolved && !overwrite) return;
+
+  const payload = JSON.stringify(normalized);
+  const windowVal = trimOrNull(eligibleWindow);
+
+  try {
+    if (overwrite) {
+      await pool.query(
+        `UPDATE businesses SET
+           venue_discount_hours = $2::jsonb,
+           venue_eligible_window = COALESCE($3, venue_eligible_window),
+           updated_at = NOW()
+         WHERE id = $1`,
+        [businessId, payload, windowVal],
+      );
+      return;
+    }
+    await pool.query(
+      `UPDATE businesses SET
+         venue_discount_hours = COALESCE(venue_discount_hours, $2::jsonb),
+         venue_eligible_window = COALESCE(NULLIF(TRIM(venue_eligible_window), ''), $3),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [businessId, payload, windowVal],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/venue_discount_hours|venue_eligible_window/i.test(message)) {
+      console.error("persistVenueDiscountHours failed:", err);
+    }
+  }
+}
+
+/**
+ * Null-only fill for primary business_locations address fields.
+ */
+export async function persistPrimaryBusinessLocationDetails(
+  businessId: number,
+  loc: {
+    address?: string | null;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
+    phone?: string | null;
+  },
+): Promise<void> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return;
+  const address = trimOrNull(loc.address);
+  const city = trimOrNull(loc.city);
+  const state = trimOrNull(loc.state);
+  const zip = trimOrNull(loc.zip);
+  const phone = trimOrNull(loc.phone);
+  if (!address && !city && !state && !zip && !phone) return;
+
+  try {
+    await pool.query(
+      `UPDATE business_locations SET
+         address = COALESCE(NULLIF(TRIM(address), ''), $2),
+         city = COALESCE(NULLIF(TRIM(city), ''), $3),
+         state = COALESCE(NULLIF(TRIM(state), ''), $4),
+         zip = COALESCE(NULLIF(TRIM(zip), ''), $5),
+         phone = COALESCE(NULLIF(TRIM(phone), ''), $6),
+         updated_at = NOW()
+       WHERE id = (
+         SELECT id FROM business_locations
+         WHERE business_id = $1 AND active_status = TRUE
+         ORDER BY id ASC
+         LIMIT 1
+       )`,
+      [businessId, address, city, state, zip, phone],
+    );
+  } catch (err) {
+    console.error("persistPrimaryBusinessLocationDetails failed:", err);
+  }
+}
+
+/**
+ * Owner edit — overwrite primary location fields that are present on `loc`.
+ */
+export async function updatePrimaryBusinessLocationDetails(
+  businessId: number,
+  loc: {
+    address?: string | null;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
+    phone?: string | null;
+  },
+): Promise<void> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return;
+  const sets: string[] = [];
+  const params: (string | number | null)[] = [businessId];
+  const push = (column: string, value: string | null | undefined, present: boolean) => {
+    if (!present) return;
+    params.push(trimOrNull(value));
+    sets.push(`${column} = $${params.length}`);
+  };
+  push("address", loc.address, Object.prototype.hasOwnProperty.call(loc, "address"));
+  push("city", loc.city, Object.prototype.hasOwnProperty.call(loc, "city"));
+  push("state", loc.state, Object.prototype.hasOwnProperty.call(loc, "state"));
+  push("zip", loc.zip, Object.prototype.hasOwnProperty.call(loc, "zip"));
+  push("phone", loc.phone, Object.prototype.hasOwnProperty.call(loc, "phone"));
+  if (sets.length === 0) return;
+  try {
+    await pool.query(
+      `UPDATE business_locations SET ${sets.join(", ")}, updated_at = NOW()
+       WHERE id = (
+         SELECT id FROM business_locations
+         WHERE business_id = $1 AND active_status = TRUE
+         ORDER BY id ASC
+         LIMIT 1
+       )`,
+      params,
+    );
+  } catch (err) {
+    console.error("updatePrimaryBusinessLocationDetails failed:", err);
+  }
 }
 
 /**
@@ -48,6 +239,9 @@ export async function persistBusinessPublicLinks(
   const phone = trimOrNull(links.phone);
   const venueEmail = trimOrNull(links.venueEmail);
   const description = trimOrNull(links.description);
+  const hasHoursInput =
+    links.discountHours != null ||
+    Object.prototype.hasOwnProperty.call(links, "eligibleWindow");
 
   if (
     !website &&
@@ -57,7 +251,8 @@ export async function persistBusinessPublicLinks(
     !tiktokUrl &&
     !phone &&
     !venueEmail &&
-    !description
+    !description &&
+    !hasHoursInput
   ) {
     return;
   }
@@ -121,6 +316,15 @@ export async function persistBusinessPublicLinks(
       console.error("persistBusinessPublicLinks fallback failed:", err2);
     }
   }
+
+  if (hasHoursInput) {
+    await persistVenueDiscountHours(
+      businessId,
+      links.discountHours ?? null,
+      links.eligibleWindow,
+      { markResolved: true },
+    );
+  }
 }
 
 export type BusinessPublicLinksUpdate = {
@@ -131,6 +335,10 @@ export type BusinessPublicLinksUpdate = {
   tiktokUrl?: string | null;
   phone?: string | null;
   venueEmail?: string | null;
+  /** About copy → businesses.description */
+  description?: string | null;
+  discountHours?: Record<string, string> | null;
+  eligibleWindow?: string | null;
 };
 
 /**
@@ -148,9 +356,14 @@ export async function updateBusinessPublicLinks(
   const params: (string | number | null)[] = [businessId];
   const written: BusinessPublicLinksUpdate = {};
 
+  type StringLinkKey = Exclude<
+    keyof BusinessPublicLinksUpdate,
+    "discountHours"
+  >;
+
   const push = (
     column: string,
-    key: keyof BusinessPublicLinksUpdate,
+    key: StringLinkKey,
     value: string | null | undefined,
     present: boolean,
   ) => {
@@ -203,6 +416,27 @@ export async function updateBusinessPublicLinks(
     links.venueEmail,
     Object.prototype.hasOwnProperty.call(links, "venueEmail"),
   );
+  push(
+    "description",
+    "description",
+    links.description,
+    Object.prototype.hasOwnProperty.call(links, "description"),
+  );
+
+  const hasHours = Object.prototype.hasOwnProperty.call(links, "discountHours");
+  const hasWindow = Object.prototype.hasOwnProperty.call(links, "eligibleWindow");
+  if (hasHours) {
+    const normalized = normalizeVenueDiscountHours(links.discountHours ?? null);
+    params.push(JSON.stringify(normalized));
+    sets.push(`venue_discount_hours = $${params.length}::jsonb`);
+    written.discountHours = normalized;
+  }
+  if (hasWindow) {
+    const windowVal = trimOrNull(links.eligibleWindow);
+    params.push(windowVal);
+    sets.push(`venue_eligible_window = $${params.length}`);
+    written.eligibleWindow = windowVal;
+  }
 
   if (sets.length === 0) return {};
 
@@ -220,6 +454,17 @@ export async function updateBusinessPublicLinks(
       Object.prototype.hasOwnProperty.call(links, "venueEmail")
     ) {
       const { venueEmail: _drop, ...rest } = links;
+      return updateBusinessPublicLinks(businessId, rest);
+    }
+    if (
+      /venue_discount_hours|venue_eligible_window/i.test(message) &&
+      (hasHours || hasWindow)
+    ) {
+      const {
+        discountHours: _h,
+        eligibleWindow: _w,
+        ...rest
+      } = links;
       return updateBusinessPublicLinks(businessId, rest);
     }
     console.error("updateBusinessPublicLinks failed:", err);

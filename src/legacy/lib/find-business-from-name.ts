@@ -31,7 +31,7 @@ import {
 import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extract";
 import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
 import { searchNamedBusinessNear } from "./geo-distance";
-import { persistBusinessPublicLinks, persistBusinessGalleryUrls, replaceBusinessGalleryUrls } from "./persist-business-public-links";
+import { persistBusinessPublicLinks, persistBusinessGalleryUrls, replaceBusinessGalleryUrls, persistVenueDiscountHours, persistPrimaryBusinessLocationDetails, normalizeVenueDiscountHours, venueDiscountHoursHaveOpenDay } from "./persist-business-public-links";
 import { pool } from "../db/pool";
 import { resolveStoredImageUrl } from "./s3";
 
@@ -116,8 +116,9 @@ function parseGalleryUrls(raw: unknown): string[] {
 }
 
 /**
- * When businessId already has website and/or gallery in DB, return that payload
- * and skip AI + scrape. Directory View profile must not re-fire AI every open.
+ * When businessId already has a complete DB profile (website/gallery + about +
+ * hours resolved), return that payload and skip AI + scrape.
+ * Incomplete profiles return null so AI can fill and persist to DB.
  */
 async function loadHydratedBusinessFromDb(input: {
   businessId: number;
@@ -137,6 +138,8 @@ async function loadHydratedBusinessFromDb(input: {
       contact_phone: string | null;
       venue_email: string | null;
       venue_gallery_urls: unknown;
+      venue_discount_hours: unknown;
+      venue_eligible_window: string | null;
       join_door_type: string | null;
       location_name: string | null;
       address: string | null;
@@ -157,6 +160,8 @@ async function loadHydratedBusinessFromDb(input: {
          b.contact_phone,
          b.venue_email,
          b.venue_gallery_urls,
+         b.venue_discount_hours,
+         b.venue_eligible_window,
          b.join_door_type,
          bl.location_name,
          bl.address,
@@ -178,14 +183,19 @@ async function loadHydratedBusinessFromDb(input: {
     const imageUrls = await Promise.all(
       rawGallery.map((u) => resolveStoredImageUrl(u)),
     );
-    // Hydrated = gallery cached and/or official website already known.
+    // Need a known site or gallery before treating as cached.
     if (!website && imageUrls.length === 0) return null;
 
+    const about = row.description?.trim() || "";
+    const hoursResolved = row.venue_discount_hours != null;
+    // Incomplete → let AI scrape fill DB (hours column NULL means never resolved).
+    if (!about || !hoursResolved) return null;
+
+    const discountHours = normalizeVenueDiscountHours(row.venue_discount_hours);
     const city = row.city?.trim() || "";
     const state = row.state?.trim() || "";
     const address = row.address?.trim() || "";
     const zip = row.zip?.trim() || "";
-    const about = row.description?.trim() || "";
     const phone = row.contact_phone?.trim() || "";
     const contactEmail = row.venue_email?.trim() || "";
     const locationFound = Boolean(city || state || address);
@@ -226,8 +236,10 @@ async function loadHydratedBusinessFromDb(input: {
       bookingPlatform: null,
       logoUrl: imageUrls.find((u) => looksLikeLogoUrl(u)) ?? imageUrls[0] ?? null,
       imageUrls,
-      discountHours: null,
-      eligibleWindow: "",
+      discountHours: venueDiscountHoursHaveOpenDay(discountHours)
+        ? discountHours
+        : discountHours,
+      eligibleWindow: row.venue_eligible_window?.trim() || "",
       facebookUrl: row.facebook_url?.trim() || null,
       instagramUrl: row.instagram_url?.trim() || null,
       linkedinUrl: row.linkedin_url?.trim() || null,
@@ -286,7 +298,7 @@ export async function findBusinessFromName(input: {
     Number.isFinite(businessIdRaw) && businessIdRaw > 0 ? businessIdRaw : null;
   const forceRefresh = input.forceRefresh === true;
 
-  // Hydrate-once: if this business already has website/gallery in DB, never re-run AI.
+  // Hydrate-once: skip AI only when DB already has about + hours resolved.
   if (businessId && !forceRefresh) {
     const cached = await loadHydratedBusinessFromDb({
       businessId,
@@ -435,9 +447,22 @@ export async function findBusinessFromName(input: {
       instagramUrl: social.instagramUrl,
       linkedinUrl: social.linkedinUrl,
       tiktokUrl: social.tiktokUrl,
-      phone: social.phone,
-      venueEmail: social.email,
+      phone: social.phone || phone || null,
+      venueEmail: social.email || contactEmail || null,
       description: about || null,
+    });
+    await persistVenueDiscountHours(
+      businessId,
+      pageCopy?.discountHours ?? null,
+      pageCopy?.eligibleWindow ?? "",
+      { overwrite: forceRefresh, markResolved: true },
+    );
+    await persistPrimaryBusinessLocationDetails(businessId, {
+      address,
+      city,
+      state,
+      zip,
+      phone: phone || social.phone || null,
     });
   }
 
