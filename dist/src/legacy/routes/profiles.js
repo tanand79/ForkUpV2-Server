@@ -1260,6 +1260,7 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
          bl.state,
          bl.address,
          bl.zip,
+         NULLIF(TRIM(bl.reservation_url), '') AS reservation_url,
          bl.latitude,
          bl.longitude
        FROM businesses b
@@ -1312,6 +1313,7 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
                 state: row.state,
                 address: typeof row.address === "string" ? row.address : null,
                 zip: typeof row.zip === "string" ? row.zip : null,
+                reservationUrl: typeof row.reservation_url === "string" ? row.reservation_url : null,
                 distanceMiles: nearby.distanceMiles,
             });
             if (nearby.distanceMiles != null) {
