@@ -85,6 +85,55 @@ function mimeFromHeaders(contentType: string | null, url: string): string {
 }
 
 /**
+ * Detect real image mime from magic bytes. Returns null for HTML/JSON/etc.
+ * Prevents storing error pages as .jpg (seen on Don Camaron covers).
+ */
+export function detectImageMimeFromBuffer(buffer: Buffer): string | null {
+  if (!buffer || buffer.length < 3) return null;
+  // JPEG
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  // PNG
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) {
+    return "image/png";
+  }
+  // GIF
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x47 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x38 &&
+    (buffer[4] === 0x39 || buffer[4] === 0x37) &&
+    buffer[5] === 0x61
+  ) {
+    return "image/gif";
+  }
+  // WEBP (RIFF....WEBP)
+  if (
+    buffer.length >= 12 &&
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/**
  * Writes image bytes under uploads/<prefix>/ when S3 is unavailable.
  * Inputs: buffer, mime, prefix. Outputs: `/uploads/<prefix>/<file>` path.
  */
@@ -147,11 +196,23 @@ export async function ensureDurableImageUrl(
     throw new Error(`Failed to download image (${res.status})`);
   }
 
-  const mime = mimeFromHeaders(res.headers.get("content-type"), trimmed);
+  const headerCt = (res.headers.get("content-type") || "")
+    .split(";")[0]
+    ?.trim()
+    .toLowerCase();
+  if (headerCt && (headerCt.startsWith("text/") || headerCt.includes("html") || headerCt.includes("json"))) {
+    throw new Error(`URL did not return an image (content-type ${headerCt})`);
+  }
+
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length === 0) {
     throw new Error("Downloaded image was empty");
   }
+  const magicMime = detectImageMimeFromBuffer(buffer);
+  if (!magicMime) {
+    throw new Error("Downloaded bytes are not a JPEG/PNG/GIF/WEBP image");
+  }
+  const mime = magicMime;
   const minBytes = options?.minBytes ?? 0;
   if (minBytes > 0 && buffer.length < minBytes) {
     throw new Error(
@@ -208,6 +269,12 @@ function preferLargerPublicImageUrl(url: string): string {
     if (/\/quality_auto\//i.test(u.pathname)) {
       u.pathname = u.pathname.replace(/\/quality_auto\//i, "/");
     }
+    // Wix: strip /v1/fill|fit|crop/… so one media id downloads once at full size.
+    if (/wixstatic\.com$/i.test(u.hostname) && /\/v1\//i.test(u.pathname)) {
+      u.pathname = u.pathname.replace(/\/v1\/.*$/i, "");
+      u.search = "";
+      return u.toString();
+    }
     const w = Number(u.searchParams.get("w") || 0);
     if (w > 0 && w < 800) {
       u.searchParams.set("w", "1600");
@@ -220,6 +287,27 @@ function preferLargerPublicImageUrl(url: string): string {
   } catch {
     return trimmed;
   }
+}
+
+/** Hash embedded in /uploads/venue-gallery/venue-galler-<hash>.ext filenames. */
+function contentHashFromDurableUrl(url: string): string | null {
+  const m = /venue-galler-([a-f0-9]{16})\./i.exec(url);
+  return m?.[1]?.toLowerCase() || null;
+}
+
+/**
+ * Prefer real photos (JPEG/WEBP) ahead of PNG marks/logos for cover + gallery order.
+ * Inputs: durable URL list. Outputs: reordered list (same members).
+ */
+export function preferPhotoUrlsFirst(urls: string[]): string[] {
+  const score = (u: string) => {
+    const lower = u.toLowerCase();
+    if (/\.(jpe?g|webp)(\?|$)/i.test(lower)) return 0;
+    if (/\.gif(\?|$)/i.test(lower)) return 1;
+    if (/\.png(\?|$)/i.test(lower)) return 2;
+    return 3;
+  };
+  return [...urls].sort((a, b) => score(a) - score(b));
 }
 
 /**
@@ -238,6 +326,30 @@ export async function ensureDurableVenueGalleryUrls(
 
   const CONCURRENCY = 4;
   const out: string[] = [];
+  /** Same bytes (or same hash filename) → one gallery slot. */
+  const seenHashes = new Set<string>();
+
+  const remember = (durable: string): string | null => {
+    const fromName = contentHashFromDurableUrl(durable);
+    if (fromName) {
+      if (seenHashes.has(fromName)) return null;
+      seenHashes.add(fromName);
+      return durable;
+    }
+    // Fallback: hash on-disk bytes for older upload names.
+    if (durable.startsWith("/uploads/")) {
+      try {
+        const abs = path.join(process.cwd(), durable.replace(/^\//, ""));
+        const buf = fs.readFileSync(abs);
+        const h = imageContentHash(buf);
+        if (seenHashes.has(h)) return null;
+        seenHashes.add(h);
+      } catch {
+        /* keep path if unreadable */
+      }
+    }
+    return durable;
+  };
 
   const one = async (url: string): Promise<string | null> => {
     // Already our storage — keep (re-scrape replace will refresh the full set).
@@ -255,12 +367,27 @@ export async function ensureDurableVenueGalleryUrls(
             );
             return null;
           }
+          // Drop HTML/error-page files that were wrongly saved as .jpg.
+          const fd = fs.openSync(abs, "r");
+          try {
+            const head = Buffer.alloc(16);
+            const n = fs.readSync(fd, head, 0, 16, 0);
+            if (!detectImageMimeFromBuffer(head.subarray(0, n))) {
+              console.warn(
+                "ensureDurableVenueGalleryUrls drop non-image upload:",
+                url,
+              );
+              return null;
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
         } catch {
           /* missing file — drop so scrape can replace */
           return null;
         }
       }
-      return normalizeDurableCampaignImageUrl(url);
+      return remember(normalizeDurableCampaignImageUrl(url));
     }
     const fetchUrl = preferLargerPublicImageUrl(unwrapVenuePhotoProxyUrl(url));
     const resyHeaders = /image\.resy\.com|images\.resy\.com/i.test(fetchUrl)
@@ -272,11 +399,12 @@ export async function ensureDurableVenueGalleryUrls(
         }
       : undefined;
     try {
-      return await ensureDurableImageUrl(fetchUrl, "venue-gallery", {
+      const durable = await ensureDurableImageUrl(fetchUrl, "venue-gallery", {
         headers: resyHeaders,
         maxBytes: VENUE_GALLERY_MAX_BYTES,
         minBytes: VENUE_GALLERY_MIN_BYTES,
       });
+      return remember(durable);
     } catch (err) {
       console.warn("ensureDurableVenueGalleryUrls drop:", fetchUrl, err);
       return null;
@@ -290,5 +418,6 @@ export async function ensureDurableVenueGalleryUrls(
       if (u) out.push(u);
     }
   }
-  return [...new Set(out)];
+  // JPEG/WEBP first so cover + carousel lead with real photos, not PNG logos.
+  return preferPhotoUrlsFirst([...new Set(out)]);
 }

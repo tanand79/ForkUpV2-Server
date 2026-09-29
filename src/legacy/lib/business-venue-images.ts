@@ -231,6 +231,18 @@ function imageDedupeKey(url: string): string {
         "/$1",
       );
     }
+    // Wix: same media id at /v1/fill/w_39… and /v1/fill/w_1600… are one photo.
+    // Path shape: /media/<id>~mv2.jpg/v1/fill/w_980,h_653,...
+    if (/wixstatic\.com$/i.test(u.hostname)) {
+      const media = path.match(/\/media\/([^/]+)/i);
+      if (media?.[1]) {
+        const id = decodeURIComponent(media[1])
+          .replace(/\.(jpe?g|png|webp|gif)$/i, "")
+          .replace(/%7e/gi, "~")
+          .toLowerCase();
+        return `wix:${id}`;
+      }
+    }
     // Strip common size suffixes in the path when present.
     return path.replace(/[-_]\d{2,4}x\d{2,4}(?=\.[a-z]+$)/i, "");
   } catch {
@@ -339,9 +351,13 @@ async function fetchBookingPlatformVenueImages(
 }
 
 function preferHigherRes(a: string, b: string): string {
+  // Wix: prefer original media URL (no /v1/fill crop) over resized variants.
+  const aWixFull = /wixstatic\.com/i.test(a) && !/\/v1\//i.test(a);
+  const bWixFull = /wixstatic\.com/i.test(b) && !/\/v1\//i.test(b);
+  if (aWixFull !== bWixFull) return aWixFull ? a : b;
   const score = (url: string) => {
-    const w = /[?&]w=(\d+)/i.exec(url);
-    const h = /[?&]h=(\d+)/i.exec(url);
+    const w = /[?&]w=(\d+)/i.exec(url) || /\/w_(\d+)/i.exec(url);
+    const h = /[?&]h=(\d+)/i.exec(url) || /\/h_(\d+)/i.exec(url);
     return (w ? Number(w[1]) : 0) + (h ? Number(h[1]) : 0) + url.length;
   };
   return score(a) >= score(b) ? a : b;

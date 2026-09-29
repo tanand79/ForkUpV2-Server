@@ -328,6 +328,8 @@ export async function persistBusinessPublicLinks(
 }
 
 export type BusinessPublicLinksUpdate = {
+  /** Display name → businesses.business_name */
+  businessName?: string | null;
   website?: string | null;
   facebookUrl?: string | null;
   instagramUrl?: string | null;
@@ -374,6 +376,13 @@ export async function updateBusinessPublicLinks(
     written[key] = clean;
   };
 
+  push(
+    "business_name",
+    "businessName",
+    links.businessName,
+    Object.prototype.hasOwnProperty.call(links, "businessName") &&
+      Boolean(trimOrNull(links.businessName)),
+  );
   push(
     "website",
     "website",

@@ -6,6 +6,7 @@
  *
  * Request: {
  *   businessId: number,
+ *   businessName?: string | null,
  *   website?: string | null,
  *   facebookUrl?: string | null,
  *   instagramUrl?: string | null,
@@ -65,6 +66,9 @@ businessVenueLinksRouter.post("/business-venue-links", async (req, res) => {
 
     const body = req.body ?? {};
     const patch: BusinessPublicLinksUpdate = {};
+    if (Object.prototype.hasOwnProperty.call(body, "businessName")) {
+      patch.businessName = optionalString(body.businessName) ?? null;
+    }
     if (Object.prototype.hasOwnProperty.call(body, "website")) {
       patch.website = optionalString(body.website) ?? null;
     }
