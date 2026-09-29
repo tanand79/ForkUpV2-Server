@@ -10,7 +10,9 @@ const join_door_type_1 = require("../lib/join-door-type");
 const join_giveback_prefs_1 = require("../lib/join-giveback-prefs");
 const guest_business_claim_1 = require("../lib/guest-business-claim");
 const booking_platform_links_1 = require("../lib/booking-platform-links");
+const s3_1 = require("../lib/s3");
 const invite_sender_1 = require("../lib/invite-sender");
+const persist_business_public_links_1 = require("../lib/persist-business-public-links");
 exports.profilesRouter = (0, express_1.Router)();
 const DIRECTORY_HIDDEN_SEED_SLUGS = [
     "olive-and-oak",
@@ -1248,11 +1250,16 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
          NULLIF(TRIM(b.tiktok_url), '') AS tiktok_url,
          NULLIF(TRIM(b.contact_phone), '') AS contact_phone,
          NULLIF(TRIM(b.venue_email), '') AS venue_email,
+         NULLIF(TRIM(b.description), '') AS description,
          b.venue_gallery_urls,
+         b.venue_discount_hours,
+         NULLIF(TRIM(b.venue_eligible_window), '') AS venue_eligible_window,
          bl.id AS location_id,
          bl.location_name,
          bl.city,
          bl.state,
+         bl.address,
+         bl.zip,
          bl.latitude,
          bl.longitude
        FROM businesses b
@@ -1279,6 +1286,13 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
                     tiktokUrl: typeof row.tiktok_url === "string" ? row.tiktok_url : null,
                     contactPhone: typeof row.contact_phone === "string" ? row.contact_phone : null,
                     venueEmail: typeof row.venue_email === "string" ? row.venue_email : null,
+                    about: typeof row.description === "string" ? row.description : null,
+                    discountHours: row.venue_discount_hours != null
+                        ? (0, persist_business_public_links_1.normalizeVenueDiscountHours)(row.venue_discount_hours)
+                        : null,
+                    eligibleWindow: typeof row.venue_eligible_window === "string"
+                        ? row.venue_eligible_window
+                        : null,
                     galleryImageUrls: parseGalleryImageUrls(row.venue_gallery_urls),
                     capabilities: {
                         dineAndDonate: Boolean(row.supports_dine_and_donate),
@@ -1296,6 +1310,8 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
                 locationName: row.location_name,
                 city: row.city,
                 state: row.state,
+                address: typeof row.address === "string" ? row.address : null,
+                zip: typeof row.zip === "string" ? row.zip : null,
                 distanceMiles: nearby.distanceMiles,
             });
             if (nearby.distanceMiles != null) {
@@ -1319,16 +1335,18 @@ exports.profilesRouter.get("/businesses/directory", async (req, res) => {
         });
         const sliced = sorted.slice(0, limit);
         const accessById = await loadLatestBusinessAccessStatuses(sliced.map((b) => b.id));
-        const payload = sliced.map(({ _nearestMiles: _drop, ...rest }) => {
+        const payload = await Promise.all(sliced.map(async ({ _nearestMiles: _drop, ...rest }) => {
             const accessRequestStatus = accessById.get(rest.id) ?? null;
             const flags = businessDirectoryFlags(rest.claimStatus, accessRequestStatus);
+            const galleryImageUrls = await Promise.all((rest.galleryImageUrls || []).map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
             return {
                 ...rest,
+                galleryImageUrls,
                 accessRequestStatus,
                 awaitingVerification: flags.awaitingVerification,
                 inviteable: flags.inviteable,
             };
-        });
+        }));
         res.json(payload);
     }
     catch (err) {
@@ -1350,6 +1368,7 @@ exports.profilesRouter.get("/businesses/:slug", async (req, res) => {
         const claimStatus = String(biz.claim_status ?? "unclaimed");
         const businessStatus = String(biz.business_status ?? "preloaded");
         const flags = businessDirectoryFlags(claimStatus, accessRequestStatus);
+        const galleryImageUrls = await Promise.all(parseGalleryImageUrls(biz.venue_gallery_urls).map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
         res.json({
             id: biz.id,
             businessName: biz.business_name,
@@ -1363,7 +1382,7 @@ exports.profilesRouter.get("/businesses/:slug", async (req, res) => {
             tiktokUrl: biz.tiktok_url ?? null,
             contactPhone: biz.contact_phone ?? null,
             venueEmail: biz.venue_email ?? null,
-            galleryImageUrls: parseGalleryImageUrls(biz.venue_gallery_urls),
+            galleryImageUrls,
             profileStatus: biz.profile_status ?? biz.business_status,
             claimStatus,
             businessStatus,

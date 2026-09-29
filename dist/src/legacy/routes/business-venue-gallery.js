@@ -6,6 +6,7 @@ const auth_1 = require("../lib/auth");
 const campaign_partner_join_requests_1 = require("../lib/campaign-partner-join-requests");
 const persist_business_public_links_1 = require("../lib/persist-business-public-links");
 const pool_1 = require("../db/pool");
+const s3_1 = require("../lib/s3");
 exports.businessVenueGalleryRouter = (0, express_1.Router)();
 function parseGalleryUrls(raw) {
     if (!raw)
@@ -25,10 +26,13 @@ function parseGalleryUrls(raw) {
 }
 async function loadVenueMedia(businessId) {
     const { rows } = await pool_1.pool.query(`SELECT venue_gallery_urls, venue_cover_url FROM businesses WHERE id = $1 LIMIT 1`, [businessId]);
-    return {
-        imageUrls: parseGalleryUrls(rows[0]?.venue_gallery_urls),
-        coverUrl: rows[0]?.venue_cover_url?.trim() || null,
-    };
+    const stored = parseGalleryUrls(rows[0]?.venue_gallery_urls);
+    const imageUrls = await Promise.all(stored.map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
+    const coverStored = rows[0]?.venue_cover_url?.trim() || null;
+    const coverUrl = coverStored
+        ? await (0, s3_1.resolveStoredImageUrl)(coverStored)
+        : null;
+    return { imageUrls, coverUrl };
 }
 exports.businessVenueGalleryRouter.post("/business-venue-gallery", async (req, res) => {
     try {
@@ -76,7 +80,11 @@ exports.businessVenueGalleryRouter.post("/business-venue-gallery", async (req, r
         else {
             coverUrl = (await loadVenueMedia(businessId)).coverUrl;
         }
-        res.json({ imageUrls: merged, coverUrl });
+        const resolvedImages = await Promise.all(merged.map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
+        const resolvedCover = coverUrl
+            ? await (0, s3_1.resolveStoredImageUrl)(coverUrl)
+            : null;
+        res.json({ imageUrls: resolvedImages, coverUrl: resolvedCover });
     }
     catch (err) {
         console.error(err);

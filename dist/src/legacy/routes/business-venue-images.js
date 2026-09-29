@@ -5,6 +5,7 @@ const express_1 = require("express");
 const pool_1 = require("../db/pool");
 const business_venue_images_1 = require("../lib/business-venue-images");
 const persist_business_public_links_1 = require("../lib/persist-business-public-links");
+const s3_1 = require("../lib/s3");
 exports.businessVenueImagesRouter = (0, express_1.Router)();
 function parseStoredGallery(raw) {
     if (!raw)
@@ -21,6 +22,9 @@ function parseStoredGallery(raw) {
     if (!Array.isArray(value))
         return [];
     return value.filter((u) => typeof u === "string" && u.trim().length > 0);
+}
+async function resolveGalleryForClient(urls) {
+    return Promise.all(urls.map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
 }
 exports.businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
     try {
@@ -40,9 +44,13 @@ exports.businessVenueImagesRouter.post("/business-venue-images", async (req, res
                 const { rows } = await pool_1.pool.query(`SELECT venue_gallery_urls, venue_cover_url FROM businesses WHERE id = $1 LIMIT 1`, [businessId]);
                 const cached = parseStoredGallery(rows[0]?.venue_gallery_urls);
                 if (cached.length > 0) {
-                    const coverUrl = rows[0]?.venue_cover_url?.trim() || null;
+                    const imageUrls = await resolveGalleryForClient(cached);
+                    const coverStored = rows[0]?.venue_cover_url?.trim() || null;
+                    const coverUrl = coverStored
+                        ? await (0, s3_1.resolveStoredImageUrl)(coverStored)
+                        : imageUrls[0] ?? null;
                     res.json({
-                        imageUrls: cached,
+                        imageUrls,
                         reservationUrl: reservationUrl || null,
                         coverUrl,
                     });
@@ -52,23 +60,25 @@ exports.businessVenueImagesRouter.post("/business-venue-images", async (req, res
             catch {
             }
         }
-        const imageUrls = await (0, business_venue_images_1.scrapeBusinessVenueImages)({
+        const scraped = await (0, business_venue_images_1.scrapeBusinessVenueImages)({
             websiteUrl,
             reservationUrl: reservationUrl || null,
             limit: 16,
         });
-        if (businessId && imageUrls.length > 0) {
+        let imageUrls = scraped;
+        if (businessId && scraped.length > 0) {
             if (forceRefresh) {
-                void (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, imageUrls);
+                imageUrls = await (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, scraped);
             }
             else {
-                void (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, imageUrls);
+                imageUrls = await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, scraped);
             }
         }
+        const resolved = await resolveGalleryForClient(imageUrls);
         res.json({
-            imageUrls,
+            imageUrls: resolved,
             reservationUrl: reservationUrl || null,
-            coverUrl: imageUrls[0] ?? null,
+            coverUrl: resolved[0] ?? null,
         });
     }
     catch (err) {

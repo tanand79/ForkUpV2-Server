@@ -451,11 +451,19 @@ export async function findBusinessFromName(input: {
       venueEmail: social.email || contactEmail || null,
       description: about || null,
     });
+    // Re-scrape: only overwrite durable hours when the fresh scrape found open days.
+    // Empty scrape must not wipe user-edited / previously saved giveback hours.
+    const scrapedHours = normalizeVenueDiscountHours(
+      pageCopy?.discountHours ?? null,
+    );
     await persistVenueDiscountHours(
       businessId,
-      pageCopy?.discountHours ?? null,
+      scrapedHours,
       pageCopy?.eligibleWindow ?? "",
-      { overwrite: forceRefresh, markResolved: true },
+      {
+        overwrite: forceRefresh && venueDiscountHoursHaveOpenDay(scrapedHours),
+        markResolved: true,
+      },
     );
     await persistPrimaryBusinessLocationDetails(businessId, {
       address,

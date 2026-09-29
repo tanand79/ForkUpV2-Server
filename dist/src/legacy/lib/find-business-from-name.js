@@ -10,6 +10,7 @@ const join_door_type_1 = require("./join-door-type");
 const geo_distance_1 = require("./geo-distance");
 const persist_business_public_links_1 = require("./persist-business-public-links");
 const pool_1 = require("../db/pool");
+const s3_1 = require("./s3");
 function normalizeWebsite(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -57,6 +58,8 @@ async function loadHydratedBusinessFromDb(input) {
          b.contact_phone,
          b.venue_email,
          b.venue_gallery_urls,
+         b.venue_discount_hours,
+         b.venue_eligible_window,
          b.join_door_type,
          bl.location_name,
          bl.address,
@@ -73,14 +76,19 @@ async function loadHydratedBusinessFromDb(input) {
             return null;
         const row = rows[0];
         const website = normalizeWebsite(row.website ?? "");
-        const imageUrls = parseGalleryUrls(row.venue_gallery_urls);
+        const rawGallery = parseGalleryUrls(row.venue_gallery_urls);
+        const imageUrls = await Promise.all(rawGallery.map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
         if (!website && imageUrls.length === 0)
             return null;
+        const about = row.description?.trim() || "";
+        const hoursResolved = row.venue_discount_hours != null;
+        if (!about || !hoursResolved)
+            return null;
+        const discountHours = (0, persist_business_public_links_1.normalizeVenueDiscountHours)(row.venue_discount_hours);
         const city = row.city?.trim() || "";
         const state = row.state?.trim() || "";
         const address = row.address?.trim() || "";
         const zip = row.zip?.trim() || "";
-        const about = row.description?.trim() || "";
         const phone = row.contact_phone?.trim() || "";
         const contactEmail = row.venue_email?.trim() || "";
         const locationFound = Boolean(city || state || address);
@@ -115,8 +123,10 @@ async function loadHydratedBusinessFromDb(input) {
             bookingPlatform: null,
             logoUrl: imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null,
             imageUrls,
-            discountHours: null,
-            eligibleWindow: "",
+            discountHours: (0, persist_business_public_links_1.venueDiscountHoursHaveOpenDay)(discountHours)
+                ? discountHours
+                : discountHours,
+            eligibleWindow: row.venue_eligible_window?.trim() || "",
             facebookUrl: row.facebook_url?.trim() || null,
             instagramUrl: row.instagram_url?.trim() || null,
             linkedinUrl: row.linkedin_url?.trim() || null,
@@ -302,9 +312,21 @@ async function findBusinessFromName(input) {
             instagramUrl: social.instagramUrl,
             linkedinUrl: social.linkedinUrl,
             tiktokUrl: social.tiktokUrl,
-            phone: social.phone,
-            venueEmail: social.email,
+            phone: social.phone || phone || null,
+            venueEmail: social.email || contactEmail || null,
             description: about || null,
+        });
+        const scrapedHours = (0, persist_business_public_links_1.normalizeVenueDiscountHours)(pageCopy?.discountHours ?? null);
+        await (0, persist_business_public_links_1.persistVenueDiscountHours)(businessId, scrapedHours, pageCopy?.eligibleWindow ?? "", {
+            overwrite: forceRefresh && (0, persist_business_public_links_1.venueDiscountHoursHaveOpenDay)(scrapedHours),
+            markResolved: true,
+        });
+        await (0, persist_business_public_links_1.persistPrimaryBusinessLocationDetails)(businessId, {
+            address,
+            city,
+            state,
+            zip,
+            phone: phone || social.phone || null,
         });
     }
     const bookingPhotoCount = venuePhotos.filter((u) => /image\.resy\.com|\/api\/venue-photo-proxy\?/i.test(u)).length;
@@ -319,20 +341,26 @@ async function findBusinessFromName(input) {
     const mergedImages = [...venuePhotos, ...suggestionUrls].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) && !(0, suggest_social_images_1.looksLikeLogoUrl)(u));
     const imageUrls = [...new Set(mergedImages)];
     const logoCandidate = imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null;
-    const photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
+    let photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
     if (businessId && photoUrls.length > 0) {
         if (forceRefresh) {
-            await (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, photoUrls);
+            photoUrls = await (0, persist_business_public_links_1.replaceBusinessGalleryUrls)(businessId, photoUrls);
         }
         else {
-            await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, photoUrls);
+            photoUrls = await (0, persist_business_public_links_1.persistBusinessGalleryUrls)(businessId, photoUrls);
         }
     }
+    const clientImageUrls = await Promise.all(photoUrls.map((u) => (0, s3_1.resolveStoredImageUrl)(u)));
+    const clientLogo = (logoCandidate
+        ? await (0, s3_1.resolveStoredImageUrl)(logoCandidate)
+        : null) ??
+        clientImageUrls[0] ??
+        null;
     const locationFound = Boolean(city || state || address);
     const checks = {
         websiteFound: hints.websiteFound || Boolean(website),
-        logoFound: Boolean(logoCandidate),
-        photosFound: photoUrls.length > 0 || imageUrls.length > 0,
+        logoFound: Boolean(clientLogo),
+        photosFound: clientImageUrls.length > 0,
         locationFound,
     };
     const locations = locationFound || businessName
@@ -360,8 +388,8 @@ async function findBusinessFromName(input) {
         locations,
         reservationUrl: hints.reservationUrl,
         bookingPlatform: hints.bookingPlatform,
-        logoUrl: logoCandidate,
-        imageUrls,
+        logoUrl: clientLogo,
+        imageUrls: clientImageUrls,
         discountHours: pageCopy?.discountHours ?? null,
         eligibleWindow: pageCopy?.eligibleWindow ?? "",
         facebookUrl: social.facebookUrl,

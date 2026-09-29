@@ -200,6 +200,16 @@ function imageDedupeKey(url) {
         if (/image\.resy\.com$/i.test(u.hostname)) {
             path = path.replace(/\/(jpe?g|png|webp)(?:\/(?:\d+x\d+|1:1|4:3|16:9)(?:\/\d+)?)?$/i, "/$1");
         }
+        if (/wixstatic\.com$/i.test(u.hostname)) {
+            const media = path.match(/\/media\/([^/]+)/i);
+            if (media?.[1]) {
+                const id = decodeURIComponent(media[1])
+                    .replace(/\.(jpe?g|png|webp|gif)$/i, "")
+                    .replace(/%7e/gi, "~")
+                    .toLowerCase();
+                return `wix:${id}`;
+            }
+        }
         return path.replace(/[-_]\d{2,4}x\d{2,4}(?=\.[a-z]+$)/i, "");
     }
     catch {
@@ -296,9 +306,13 @@ async function fetchBookingPlatformVenueImages(reservationUrl) {
     return [];
 }
 function preferHigherRes(a, b) {
+    const aWixFull = /wixstatic\.com/i.test(a) && !/\/v1\//i.test(a);
+    const bWixFull = /wixstatic\.com/i.test(b) && !/\/v1\//i.test(b);
+    if (aWixFull !== bWixFull)
+        return aWixFull ? a : b;
     const score = (url) => {
-        const w = /[?&]w=(\d+)/i.exec(url);
-        const h = /[?&]h=(\d+)/i.exec(url);
+        const w = /[?&]w=(\d+)/i.exec(url) || /\/w_(\d+)/i.exec(url);
+        const h = /[?&]h=(\d+)/i.exec(url) || /\/h_(\d+)/i.exec(url);
         return (w ? Number(w[1]) : 0) + (h ? Number(h[1]) : 0) + url.length;
     };
     return score(a) >= score(b) ? a : b;

@@ -35,6 +35,9 @@ exports.businessVenueLinksRouter.post("/business-venue-links", async (req, res) 
         }
         const body = req.body ?? {};
         const patch = {};
+        if (Object.prototype.hasOwnProperty.call(body, "businessName")) {
+            patch.businessName = optionalString(body.businessName) ?? null;
+        }
         if (Object.prototype.hasOwnProperty.call(body, "website")) {
             patch.website = optionalString(body.website) ?? null;
         }
@@ -56,9 +59,40 @@ exports.businessVenueLinksRouter.post("/business-venue-links", async (req, res) 
         if (Object.prototype.hasOwnProperty.call(body, "venueEmail")) {
             patch.venueEmail = optionalString(body.venueEmail) ?? null;
         }
-        if (Object.keys(patch).length === 0) {
+        if (Object.prototype.hasOwnProperty.call(body, "description")) {
+            patch.description = optionalString(body.description) ?? null;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "discountHours")) {
+            patch.discountHours =
+                body.discountHours && typeof body.discountHours === "object"
+                    ? (0, persist_business_public_links_1.normalizeVenueDiscountHours)(body.discountHours)
+                    : (0, persist_business_public_links_1.normalizeVenueDiscountHours)(null);
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "eligibleWindow")) {
+            patch.eligibleWindow = optionalString(body.eligibleWindow) ?? null;
+        }
+        const locPatch = {};
+        if (Object.prototype.hasOwnProperty.call(body, "address")) {
+            locPatch.address = optionalString(body.address) ?? null;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "city")) {
+            locPatch.city = optionalString(body.city) ?? null;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "state")) {
+            locPatch.state = optionalString(body.state) ?? null;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "zip")) {
+            locPatch.zip = optionalString(body.zip) ?? null;
+        }
+        if (Object.prototype.hasOwnProperty.call(body, "phone")) {
+            locPatch.phone = optionalString(body.phone) ?? null;
+        }
+        const hasBizPatch = Object.keys(patch).length > 0;
+        const hasLocPatch = Object.keys(locPatch).length > 0;
+        if (!hasBizPatch && !hasLocPatch) {
             const { rows } = await pool_1.pool.query(`SELECT website, facebook_url, instagram_url, linkedin_url, tiktok_url,
-                contact_phone, venue_email
+                contact_phone, venue_email, description,
+                venue_discount_hours, venue_eligible_window
          FROM businesses WHERE id = $1 LIMIT 1`, [businessId]);
             const row = rows[0];
             res.json({
@@ -69,15 +103,25 @@ exports.businessVenueLinksRouter.post("/business-venue-links", async (req, res) 
                 tiktokUrl: row?.tiktok_url?.trim() || null,
                 phone: row?.contact_phone?.trim() || null,
                 venueEmail: row?.venue_email?.trim() || null,
+                description: row?.description?.trim() || null,
+                discountHours: (0, persist_business_public_links_1.normalizeVenueDiscountHours)(row?.venue_discount_hours),
+                eligibleWindow: row?.venue_eligible_window?.trim() || null,
             });
             return;
         }
-        const written = await (0, persist_business_public_links_1.updateBusinessPublicLinks)(businessId, patch);
-        if (written == null) {
-            res.status(500).json({ error: "Failed to save venue links." });
-            return;
+        let written = {};
+        if (hasBizPatch) {
+            const result = await (0, persist_business_public_links_1.updateBusinessPublicLinks)(businessId, patch);
+            if (result == null) {
+                res.status(500).json({ error: "Failed to save venue links." });
+                return;
+            }
+            written = result;
         }
-        res.json(written);
+        if (hasLocPatch) {
+            await (0, persist_business_public_links_1.updatePrimaryBusinessLocationDetails)(businessId, locPatch);
+        }
+        res.json({ ...written, ...locPatch });
     }
     catch (err) {
         console.error(err);
