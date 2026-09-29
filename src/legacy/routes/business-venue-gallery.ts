@@ -15,6 +15,7 @@ import {
   persistBusinessVenueCoverUrl,
 } from "../lib/persist-business-public-links";
 import { pool } from "../db/pool";
+import { resolveStoredImageUrl } from "../lib/s3";
 
 export const businessVenueGalleryRouter = Router();
 
@@ -45,10 +46,15 @@ async function loadVenueMedia(businessId: number): Promise<{
     `SELECT venue_gallery_urls, venue_cover_url FROM businesses WHERE id = $1 LIMIT 1`,
     [businessId],
   );
-  return {
-    imageUrls: parseGalleryUrls(rows[0]?.venue_gallery_urls),
-    coverUrl: rows[0]?.venue_cover_url?.trim() || null,
-  };
+  const stored = parseGalleryUrls(rows[0]?.venue_gallery_urls);
+  const imageUrls = await Promise.all(
+    stored.map((u) => resolveStoredImageUrl(u)),
+  );
+  const coverStored = rows[0]?.venue_cover_url?.trim() || null;
+  const coverUrl = coverStored
+    ? await resolveStoredImageUrl(coverStored)
+    : null;
+  return { imageUrls, coverUrl };
 }
 
 businessVenueGalleryRouter.post("/business-venue-gallery", async (req, res) => {
@@ -115,7 +121,14 @@ businessVenueGalleryRouter.post("/business-venue-gallery", async (req, res) => {
       coverUrl = (await loadVenueMedia(businessId)).coverUrl;
     }
 
-    res.json({ imageUrls: merged, coverUrl });
+    const resolvedImages = await Promise.all(
+      merged.map((u) => resolveStoredImageUrl(u)),
+    );
+    const resolvedCover = coverUrl
+      ? await resolveStoredImageUrl(coverUrl)
+      : null;
+
+    res.json({ imageUrls: resolvedImages, coverUrl: resolvedCover });
   } catch (err) {
     console.error(err);
     const message =

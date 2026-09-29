@@ -33,6 +33,7 @@ import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
 import { searchNamedBusinessNear } from "./geo-distance";
 import { persistBusinessPublicLinks, persistBusinessGalleryUrls, replaceBusinessGalleryUrls } from "./persist-business-public-links";
 import { pool } from "../db/pool";
+import { resolveStoredImageUrl } from "./s3";
 
 export type FindBusinessChecks = {
   websiteFound: boolean;
@@ -173,7 +174,10 @@ async function loadHydratedBusinessFromDb(input: {
     if (rows.length === 0) return null;
     const row = rows[0];
     const website = normalizeWebsite(row.website ?? "");
-    const imageUrls = parseGalleryUrls(row.venue_gallery_urls);
+    const rawGallery = parseGalleryUrls(row.venue_gallery_urls);
+    const imageUrls = await Promise.all(
+      rawGallery.map((u) => resolveStoredImageUrl(u)),
+    );
     // Hydrated = gallery cached and/or official website already known.
     if (!website && imageUrls.length === 0) return null;
 
@@ -460,23 +464,34 @@ export async function findBusinessFromName(input: {
   const imageUrls = [...new Set(mergedImages)];
   const logoCandidate =
     imageUrls.find((u) => looksLikeLogoUrl(u)) ?? imageUrls[0] ?? null;
-  const photoUrls = imageUrls.filter(
+  let photoUrls = imageUrls.filter(
     (u) => !looksLikeLogoUrl(u) && !looksLikeDecorativeAssetUrl(u),
   );
 
   if (businessId && photoUrls.length > 0) {
     if (forceRefresh) {
-      await replaceBusinessGalleryUrls(businessId, photoUrls);
+      photoUrls = await replaceBusinessGalleryUrls(businessId, photoUrls);
     } else {
-      await persistBusinessGalleryUrls(businessId, photoUrls);
+      photoUrls = await persistBusinessGalleryUrls(businessId, photoUrls);
     }
   }
+
+  // Browser-loadable URLs (presign s3://) for the Find response.
+  const clientImageUrls = await Promise.all(
+    photoUrls.map((u) => resolveStoredImageUrl(u)),
+  );
+  const clientLogo =
+    (logoCandidate
+      ? await resolveStoredImageUrl(logoCandidate)
+      : null) ??
+    clientImageUrls[0] ??
+    null;
 
   const locationFound = Boolean(city || state || address);
   const checks: FindBusinessChecks = {
     websiteFound: hints.websiteFound || Boolean(website),
-    logoFound: Boolean(logoCandidate),
-    photosFound: photoUrls.length > 0 || imageUrls.length > 0,
+    logoFound: Boolean(clientLogo),
+    photosFound: clientImageUrls.length > 0,
     locationFound,
   };
 
@@ -507,8 +522,8 @@ export async function findBusinessFromName(input: {
     locations,
     reservationUrl: hints.reservationUrl,
     bookingPlatform: hints.bookingPlatform,
-    logoUrl: logoCandidate,
-    imageUrls,
+    logoUrl: clientLogo,
+    imageUrls: clientImageUrls,
     discountHours: pageCopy?.discountHours ?? null,
     eligibleWindow: pageCopy?.eligibleWindow ?? "",
     facebookUrl: social.facebookUrl,

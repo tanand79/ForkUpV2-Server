@@ -16,6 +16,7 @@ import {
 } from "../lib/join-giveback-prefs";
 import { issueGuestBusinessClaim } from "../lib/guest-business-claim";
 import { classifyBookingPlatformUrl } from "../lib/booking-platform-links";
+import { resolveStoredImageUrl } from "../lib/s3";
 import {
   listOrganizationMembers,
   type OrganizationType,
@@ -1885,16 +1886,22 @@ profilesRouter.get("/businesses/directory", async (req, res) => {
     const sliced = sorted.slice(0, limit);
     const accessById = await loadLatestBusinessAccessStatuses(sliced.map((b) => b.id));
 
-    const payload = sliced.map(({ _nearestMiles: _drop, ...rest }) => {
-      const accessRequestStatus = accessById.get(rest.id) ?? null;
-      const flags = businessDirectoryFlags(rest.claimStatus, accessRequestStatus);
-      return {
-        ...rest,
-        accessRequestStatus,
-        awaitingVerification: flags.awaitingVerification,
-        inviteable: flags.inviteable,
-      };
-    });
+    const payload = await Promise.all(
+      sliced.map(async ({ _nearestMiles: _drop, ...rest }) => {
+        const accessRequestStatus = accessById.get(rest.id) ?? null;
+        const flags = businessDirectoryFlags(rest.claimStatus, accessRequestStatus);
+        const galleryImageUrls = await Promise.all(
+          (rest.galleryImageUrls || []).map((u) => resolveStoredImageUrl(u)),
+        );
+        return {
+          ...rest,
+          galleryImageUrls,
+          accessRequestStatus,
+          awaitingVerification: flags.awaitingVerification,
+          inviteable: flags.inviteable,
+        };
+      }),
+    );
 
     res.json(payload);
   } catch (err) {
@@ -1923,6 +1930,11 @@ profilesRouter.get("/businesses/:slug", async (req, res) => {
     const claimStatus = String(biz.claim_status ?? "unclaimed");
     const businessStatus = String(biz.business_status ?? "preloaded");
     const flags = businessDirectoryFlags(claimStatus, accessRequestStatus);
+    const galleryImageUrls = await Promise.all(
+      parseGalleryImageUrls(biz.venue_gallery_urls).map((u) =>
+        resolveStoredImageUrl(u),
+      ),
+    );
     res.json({
       id: biz.id,
       businessName: biz.business_name,
@@ -1936,7 +1948,7 @@ profilesRouter.get("/businesses/:slug", async (req, res) => {
       tiktokUrl: biz.tiktok_url ?? null,
       contactPhone: biz.contact_phone ?? null,
       venueEmail: biz.venue_email ?? null,
-      galleryImageUrls: parseGalleryImageUrls(biz.venue_gallery_urls),
+      galleryImageUrls,
       profileStatus: biz.profile_status ?? biz.business_status,
       // Additive (Pass A): homepage profile banner + invite gates
       claimStatus,

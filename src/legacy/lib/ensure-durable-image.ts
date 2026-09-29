@@ -28,6 +28,8 @@ function imageContentHash(buffer: Buffer): string {
 }
 
 const MAX_BYTES = 8 * 1024 * 1024;
+/** Venue gallery originals (Resy) can exceed campaign-cover size. */
+const VENUE_GALLERY_MAX_BYTES = 16 * 1024 * 1024;
 const FETCH_MS = 15_000;
 
 /**
@@ -105,11 +107,13 @@ function saveImageToDisk(buffer: Buffer, mimeType: string, prefix: string): stri
 
 /**
  * Re-host a remote image when needed; pass through durable values unchanged.
- * Inputs: imageUrl, optional storage prefix. Outputs: durable storage URL.
+ * Inputs: imageUrl, optional storage prefix, optional fetch headers (e.g. Resy Referer).
+ * Outputs: durable storage URL.
  */
 export async function ensureDurableImageUrl(
   imageUrl: string,
   prefix = "covers",
+  options?: { headers?: Record<string, string>; maxBytes?: number },
 ): Promise<string> {
   const trimmed = imageUrl.trim();
   if (!trimmed || trimmed.startsWith("blob:") || trimmed.startsWith("data:")) {
@@ -130,6 +134,7 @@ export async function ensureDurableImageUrl(
     headers: {
       Accept: "image/*,*/*;q=0.8",
       "User-Agent": "ForkUp-ImageMirror/1.0",
+      ...(options?.headers || {}),
     },
   });
   if (!res.ok) {
@@ -141,7 +146,8 @@ export async function ensureDurableImageUrl(
   if (buffer.length === 0) {
     throw new Error("Downloaded image was empty");
   }
-  if (buffer.length > MAX_BYTES) {
+  const maxBytes = options?.maxBytes ?? MAX_BYTES;
+  if (buffer.length > maxBytes) {
     throw new Error("Image is too large to store");
   }
 
@@ -154,4 +160,78 @@ export async function ensureDurableImageUrl(
   }
 
   return saveImageToDisk(buffer, mime, prefix);
+}
+
+/**
+ * Unwrap `/api/venue-photo-proxy?url=` back to the upstream https URL.
+ * Inputs: stored or scraped gallery URL. Outputs: fetchable https URL (or original).
+ */
+export function unwrapVenuePhotoProxyUrl(url: string): string {
+  const trimmed = (url || "").trim();
+  if (!trimmed) return trimmed;
+  try {
+    const parsed = trimmed.startsWith("http")
+      ? new URL(trimmed)
+      : new URL(trimmed, "http://localhost");
+    if (/venue-photo-proxy/i.test(parsed.pathname)) {
+      const inner = parsed.searchParams.get("url")?.trim() || "";
+      if (/^https?:\/\//i.test(inner)) return inner;
+    }
+  } catch {
+    /* keep original */
+  }
+  return trimmed;
+}
+
+/**
+ * Re-host scraped venue gallery URLs into ForkUp storage (S3 or /uploads/).
+ * Resy CDN fetches use booking Referer. Failures keep the original URL.
+ * Inputs: scraped URL list. Outputs: durable (or original) URL list, same order.
+ */
+export async function ensureDurableVenueGalleryUrls(
+  urls: string[],
+): Promise<string[]> {
+  const list = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(
+    0,
+    24,
+  );
+  if (list.length === 0) return [];
+
+  const CONCURRENCY = 4;
+  const out: string[] = [];
+
+  const one = async (url: string): Promise<string> => {
+    // Already our storage — keep as-is (still resolve proxy wrappers).
+    if (
+      isDurableCampaignImageUrl(url) &&
+      !/venue-photo-proxy/i.test(url)
+    ) {
+      return normalizeDurableCampaignImageUrl(url);
+    }
+    const fetchUrl = unwrapVenuePhotoProxyUrl(url);
+    const resyHeaders = /image\.resy\.com|images\.resy\.com/i.test(fetchUrl)
+      ? {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+          Referer: "https://resy.com/",
+          Origin: "https://resy.com",
+        }
+      : undefined;
+    try {
+      return await ensureDurableImageUrl(fetchUrl, "venue-gallery", {
+        headers: resyHeaders,
+        maxBytes: VENUE_GALLERY_MAX_BYTES,
+      });
+    } catch (err) {
+      console.warn("ensureDurableVenueGalleryUrls failed:", fetchUrl, err);
+      return url;
+    }
+  };
+
+  for (let i = 0; i < list.length; i += CONCURRENCY) {
+    const batch = list.slice(i, i + CONCURRENCY);
+    const done = await Promise.all(batch.map(one));
+    out.push(...done);
+  }
+  return out;
 }

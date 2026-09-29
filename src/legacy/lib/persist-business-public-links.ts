@@ -8,6 +8,7 @@
  * Outputs: void (best-effort UPDATE).
  */
 import { pool } from "../db/pool";
+import { ensureDurableVenueGalleryUrls } from "./ensure-durable-image";
 
 export type BusinessPublicLinks = {
   website?: string | null;
@@ -228,15 +229,21 @@ export async function updateBusinessPublicLinks(
 
 /**
  * Persist venue gallery photo URLs (null/empty only — never wipe a richer set).
+ * Re-hosts remote/CDN URLs into ForkUp storage before write.
  * Inputs: businessId, absolute image URL list.
+ * Outputs: durable URL list prepared for storage (even if DB keep-existing skipped write).
  */
 export async function persistBusinessGalleryUrls(
   businessId: number,
   urls: string[],
-): Promise<void> {
-  if (!Number.isFinite(businessId) || businessId <= 0) return;
-  const clean = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(0, 24);
-  if (clean.length === 0) return;
+): Promise<string[]> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return [];
+  const durable = await ensureDurableVenueGalleryUrls(urls);
+  const clean = [...new Set(durable.map((u) => u.trim()).filter(Boolean))].slice(
+    0,
+    24,
+  );
+  if (clean.length === 0) return [];
   try {
     await pool.query(
       `UPDATE businesses SET
@@ -259,18 +266,25 @@ export async function persistBusinessGalleryUrls(
       console.error("persistBusinessGalleryUrls failed:", err);
     }
   }
+  return clean;
 }
 
 /**
  * Replace venue gallery entirely (Edit → Re-scrape). Fixes broken cached URLs.
+ * Re-hosts remote/CDN URLs into ForkUp storage before write.
  * Inputs: businessId, absolute image URL list (may be empty to clear).
+ * Outputs: durable URL list actually stored (empty on skip/failure).
  */
 export async function replaceBusinessGalleryUrls(
   businessId: number,
   urls: string[],
-): Promise<void> {
-  if (!Number.isFinite(businessId) || businessId <= 0) return;
-  const clean = [...new Set(urls.map((u) => u.trim()).filter(Boolean))].slice(0, 24);
+): Promise<string[]> {
+  if (!Number.isFinite(businessId) || businessId <= 0) return [];
+  const durable = await ensureDurableVenueGalleryUrls(urls);
+  const clean = [...new Set(durable.map((u) => u.trim()).filter(Boolean))].slice(
+    0,
+    24,
+  );
   try {
     await pool.query(
       `UPDATE businesses SET
@@ -280,6 +294,7 @@ export async function replaceBusinessGalleryUrls(
        WHERE id = $1`,
       [businessId, JSON.stringify(clean), clean[0] ?? null],
     );
+    return clean;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/venue_cover_url/i.test(message)) {
@@ -291,15 +306,16 @@ export async function replaceBusinessGalleryUrls(
            WHERE id = $1`,
           [businessId, JSON.stringify(clean)],
         );
-        return;
+        return clean;
       } catch (err2) {
         console.error("replaceBusinessGalleryUrls fallback failed:", err2);
-        return;
+        return clean;
       }
     }
     if (!/venue_gallery_urls/i.test(message)) {
       console.error("replaceBusinessGalleryUrls failed:", err);
     }
+    return clean;
   }
 }
 
@@ -349,7 +365,8 @@ export async function mergeBusinessGalleryUrls(
       [businessId],
     );
     const existing = parseGalleryUrls(rows[0]?.venue_gallery_urls);
-    const merged = [...new Set([...existing, ...incoming])].slice(0, 24);
+    const durableIncoming = await ensureDurableVenueGalleryUrls(incoming);
+    const merged = [...new Set([...existing, ...durableIncoming])].slice(0, 24);
     await pool.query(
       `UPDATE businesses SET
          venue_gallery_urls = $2::jsonb,

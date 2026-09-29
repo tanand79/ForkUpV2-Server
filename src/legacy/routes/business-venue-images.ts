@@ -15,6 +15,8 @@
  * Additive: when businessId already has venue_gallery_urls, return DB cache — no scrape.
  * Additive: cached path also returns businesses.venue_cover_url as coverUrl.
  * Additive: forceRefresh=true skips cache, re-scrapes, and replaces venue_gallery_urls.
+ * Additive: gallery URLs are re-hosted to ForkUp storage (S3 /uploads) before persist;
+ *   API responses resolve s3:// to presigned https for the browser.
  */
 import { Router } from "express";
 import { pool } from "../db/pool";
@@ -23,6 +25,7 @@ import {
   persistBusinessGalleryUrls,
   replaceBusinessGalleryUrls,
 } from "../lib/persist-business-public-links";
+import { resolveStoredImageUrl } from "../lib/s3";
 
 export const businessVenueImagesRouter = Router();
 
@@ -40,6 +43,11 @@ function parseStoredGallery(raw: unknown): string[] {
   return value.filter(
     (u): u is string => typeof u === "string" && u.trim().length > 0,
   );
+}
+
+/** Resolve s3:// refs to browser-loadable URLs; pass /uploads and https through. */
+async function resolveGalleryForClient(urls: string[]): Promise<string[]> {
+  return Promise.all(urls.map((u) => resolveStoredImageUrl(u)));
 }
 
 businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
@@ -71,9 +79,13 @@ businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
         );
         const cached = parseStoredGallery(rows[0]?.venue_gallery_urls);
         if (cached.length > 0) {
-          const coverUrl = rows[0]?.venue_cover_url?.trim() || null;
+          const imageUrls = await resolveGalleryForClient(cached);
+          const coverStored = rows[0]?.venue_cover_url?.trim() || null;
+          const coverUrl = coverStored
+            ? await resolveStoredImageUrl(coverStored)
+            : imageUrls[0] ?? null;
           res.json({
-            imageUrls: cached,
+            imageUrls,
             reservationUrl: reservationUrl || null,
             coverUrl,
           });
@@ -84,24 +96,26 @@ businessVenueImagesRouter.post("/business-venue-images", async (req, res) => {
       }
     }
 
-    const imageUrls = await scrapeBusinessVenueImages({
+    const scraped = await scrapeBusinessVenueImages({
       websiteUrl,
       reservationUrl: reservationUrl || null,
       limit: 16,
     });
 
-    if (businessId && imageUrls.length > 0) {
+    let imageUrls = scraped;
+    if (businessId && scraped.length > 0) {
       if (forceRefresh) {
-        void replaceBusinessGalleryUrls(businessId, imageUrls);
+        imageUrls = await replaceBusinessGalleryUrls(businessId, scraped);
       } else {
-        void persistBusinessGalleryUrls(businessId, imageUrls);
+        imageUrls = await persistBusinessGalleryUrls(businessId, scraped);
       }
     }
 
+    const resolved = await resolveGalleryForClient(imageUrls);
     res.json({
-      imageUrls,
+      imageUrls: resolved,
       reservationUrl: reservationUrl || null,
-      coverUrl: imageUrls[0] ?? null,
+      coverUrl: resolved[0] ?? null,
     });
   } catch (err) {
     console.error(err);
