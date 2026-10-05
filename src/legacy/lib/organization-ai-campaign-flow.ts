@@ -340,6 +340,10 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   instagramUrl: string | null;
   linkedinUrl: string | null;
   youtubeUrl: string | null;
+  /** Additive: from website HTML discovery (footer / contact pages). */
+  tiktokUrl?: string | null;
+  phone?: string | null;
+  email?: string | null;
   mission: string | null;
   causeCategory: string | null;
   city: string | null;
@@ -361,6 +365,9 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   let ein = trimStr(input.ein) || null;
   let city = trimStr(input.city) || null;
   let state = trimStr(input.state) || null;
+  let tiktokUrl: string | null = null;
+  let phone: string | null = null;
+  let email: string | null = null;
 
   if (nonprofitId) {
     const row = await loadNonprofit(nonprofitId);
@@ -409,8 +416,8 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     if (guessed.website) website = normalizeWebsiteUrl(guessed.website);
   }
 
-  // Pull social URLs from the public website when missing.
-  if (website && (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)) {
+  // Always scrape the public website when we have one — fills social + contact.
+  if (website) {
     const discovered = await discoverSocialLinksFromWebsite(website);
     if (!facebookUrl && discovered.facebookUrl) {
       facebookUrl = discovered.facebookUrl;
@@ -424,6 +431,11 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     if (!youtubeUrl && discovered.youtubeUrl) {
       youtubeUrl = discovered.youtubeUrl;
     }
+    if (!tiktokUrl && discovered.tiktokUrl) {
+      tiktokUrl = discovered.tiktokUrl;
+    }
+    if (!phone && discovered.phone) phone = discovered.phone;
+    if (!email && discovered.email) email = discovered.email;
   }
 
   // No website (or site had no social links): AI-guess public profiles, verify HTTP.
@@ -448,6 +460,23 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     }
   }
 
+  // About / mission from public OG / meta when still empty.
+  if (website && !mission) {
+    const pageMeta = await extractOrgPageMeta(website);
+    if (pageMeta?.description?.trim()) {
+      mission = pageMeta.description.trim();
+    } else if (pageMeta?.title?.trim()) {
+      const title = pageMeta.title
+        .replace(/&#\d+;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (title && !/ymca of the roses/i.test(title)) {
+        mission = title;
+      }
+    }
+  }
+
   const instagramUrl = instagramRaw
     ? normalizeInstagramUrl(instagramRaw) || instagramRaw
     : null;
@@ -461,6 +490,9 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     instagramUrl: fitVarchar(instagramUrl, 512),
     linkedinUrl: fitVarchar(linkedinUrl, 512),
     youtubeUrl: fitVarchar(youtubeUrl, 512),
+    tiktokUrl: fitVarchar(tiktokUrl, 512),
+    phone: fitVarchar(phone, 64),
+    email: fitVarchar(email, 512),
     mission,
     causeCategory,
     city,
@@ -741,7 +773,8 @@ export async function runOrganizationAiCampaignFlow(
         instagramHandle: sources.instagramUrl || undefined,
         linkedinUrl: sources.linkedinUrl || undefined,
         youtubeUrl: sources.youtubeUrl || undefined,
-        limit: 6,
+        // Match campaign-ideas photo strip (10) so hydrate-before-profile needs one scrape.
+        limit: 10,
       }),
     ]);
 
