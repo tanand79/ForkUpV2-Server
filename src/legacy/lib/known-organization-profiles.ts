@@ -257,6 +257,11 @@ function normalizeNameQuery(raw: string): string {
     .trim();
 }
 
+/** Tokenize a normalized name query for alias checks (avoids "head to head" → headstrong). */
+function orgNameTokensForAlias(normalizedQuery: string): string[] {
+  return normalizedQuery.split(" ").filter(Boolean);
+}
+
 /**
  * Look up a curated profile by organization name.
  * Prefer explicit aliases and strong full-name / compact-domain matches.
@@ -267,8 +272,9 @@ export function findKnownOrganizationByName(nameQuery: string): KnownOrganizatio
   if (!q || q.length < 3) return null;
   const compact = q.replace(/\s+/g, "");
 
-  // Explicit aliases (Nick QA + major public orgs)
-  if (q.includes("headstrong") || q.includes("head strong")) {
+  // Explicit aliases (Nick QA + major public orgs) — token equality, not substring.
+  const qTokens = new Set(orgNameTokensForAlias(q));
+  if (qTokens.has("headstrong") || q === "head strong") {
     const hs = KNOWN_BY_DOMAIN["headstrong.org"]!;
     return { ...hs, website: "https://headstrong.org" };
   }

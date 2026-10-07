@@ -16,6 +16,7 @@ import {
 } from "../lib/auth-profiles";
 import { assertUserMayLinkOrganization } from "../lib/assert-may-link-organization";
 import { linkGuestBusinessesForVerifiedUser } from "../lib/link-guest-businesses-on-verify";
+import { linkGuestNonprofitsForVerifiedUser } from "../lib/link-guest-nonprofits-on-verify";
 import { sendEmail, resolveFrontendBaseUrl } from "../lib/mailer";
 
 export const authRouter = Router();
@@ -632,11 +633,16 @@ authRouter.post("/verify-email", async (req, res) => {
         );
       }
 
-      // Guest Join Us drafts: attach businesses saved under this email before signup.
+      // Guest Join Us drafts: attach businesses / nonprofits saved under this email before signup.
       try {
         await linkGuestBusinessesForVerifiedUser(userId, String(pending.email));
       } catch (linkErr) {
         console.error("guest business link on verify failed:", linkErr);
+      }
+      try {
+        await linkGuestNonprofitsForVerifiedUser(userId, String(pending.email));
+      } catch (linkErr) {
+        console.error("guest nonprofit link on verify failed:", linkErr);
       }
 
       await pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
@@ -712,9 +718,10 @@ authRouter.post("/verify-email", async (req, res) => {
       const legacyEmail = userRows[0]?.email;
       if (legacyEmail) {
         await linkGuestBusinessesForVerifiedUser(Number(legacy.user_id), legacyEmail);
+        await linkGuestNonprofitsForVerifiedUser(Number(legacy.user_id), legacyEmail);
       }
     } catch (linkErr) {
-      console.error("guest business link on legacy verify failed:", linkErr);
+      console.error("guest org link on legacy verify failed:", linkErr);
     }
 
     res.json({ success: true, emailVerified: true });

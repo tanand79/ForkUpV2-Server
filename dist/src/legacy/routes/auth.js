@@ -11,6 +11,7 @@ const pool_1 = require("../db/pool");
 const auth_profiles_1 = require("../lib/auth-profiles");
 const assert_may_link_organization_1 = require("../lib/assert-may-link-organization");
 const link_guest_businesses_on_verify_1 = require("../lib/link-guest-businesses-on-verify");
+const link_guest_nonprofits_on_verify_1 = require("../lib/link-guest-nonprofits-on-verify");
 const mailer_1 = require("../lib/mailer");
 exports.authRouter = (0, express_1.Router)();
 function normalizeEmail(raw) {
@@ -441,6 +442,12 @@ exports.authRouter.post("/verify-email", async (req, res) => {
             catch (linkErr) {
                 console.error("guest business link on verify failed:", linkErr);
             }
+            try {
+                await (0, link_guest_nonprofits_on_verify_1.linkGuestNonprofitsForVerifiedUser)(userId, String(pending.email));
+            }
+            catch (linkErr) {
+                console.error("guest nonprofit link on verify failed:", linkErr);
+            }
             await pool_1.pool.query(`UPDATE pending_signups SET used_at = NOW() WHERE id = $1`, [
                 pending.id,
             ]);
@@ -491,10 +498,11 @@ exports.authRouter.post("/verify-email", async (req, res) => {
             const legacyEmail = userRows[0]?.email;
             if (legacyEmail) {
                 await (0, link_guest_businesses_on_verify_1.linkGuestBusinessesForVerifiedUser)(Number(legacy.user_id), legacyEmail);
+                await (0, link_guest_nonprofits_on_verify_1.linkGuestNonprofitsForVerifiedUser)(Number(legacy.user_id), legacyEmail);
             }
         }
         catch (linkErr) {
-            console.error("guest business link on legacy verify failed:", linkErr);
+            console.error("guest org link on legacy verify failed:", linkErr);
         }
         res.json({ success: true, emailVerified: true });
     }

@@ -39,6 +39,7 @@ import { supportRouter } from "./routes/support";
 import { emailTemplatesRouter } from "./routes/email-templates";
 import { guestCampaignClaimRouter } from "./routes/guest-campaign-claim";
 import { guestBusinessClaimRouter } from "./routes/guest-business-claim";
+import { guestNonprofitClaimRouter } from "./routes/guest-nonprofit-claim";
 import { businessPostStartRouter } from "./routes/business-post-start";
 import {
   campaignPartnerJoinBusinessRouter,
@@ -165,6 +166,8 @@ export function mountLegacyApi(app: Express) {
   app.use("/api/guest-campaign-claim", guestCampaignClaimRouter);
   /** Guest restaurant/local claim link (email token → attach organization_users). */
   app.use("/api/guest-business-claim", guestBusinessClaimRouter);
+  /** Guest nonprofit Join claim link (email token → attach organization_users). */
+  app.use("/api/guest-nonprofit-claim", guestNonprofitClaimRouter);
   app.use("/api", businessPostStartRouter);
   app.use("/api/manage", manageRouter);
   /** NPO: list / accept / decline partner join requests. */

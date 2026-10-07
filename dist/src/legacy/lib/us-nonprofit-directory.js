@@ -3,6 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.enrichUsNonprofitByEin = enrichUsNonprofitByEin;
 exports.suggestUsNonprofits = suggestUsNonprofits;
 const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
+const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
+const suggest_social_images_1 = require("./suggest-social-images");
+const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 const PROPUBLICA_SEARCH = "https://projects.propublica.org/nonprofits/api/v2/search.json";
 const PROPUBLICA_ORG = "https://projects.propublica.org/nonprofits/api/v2/organizations";
 const EVERY_ORG_DETAIL = "https://partners.every.org/v0.2/nonprofit";
@@ -132,6 +135,104 @@ async function fetchProPublicaDetail(einDigits) {
         zip: org.zipcode?.trim()?.slice(0, 10) || null,
     };
 }
+async function attachVerifiedContactLayer(params) {
+    const providers = [...params.providers];
+    let website = params.website;
+    let mission = params.mission;
+    let facebookUrl = null;
+    let instagramUrl = null;
+    let linkedinUrl = null;
+    let youtubeUrl = null;
+    let tiktokUrl = null;
+    let contactEmail = null;
+    let contactPhone = null;
+    let verifiedWebsite = false;
+    let confidence = "low";
+    if (website) {
+        const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+            organizationName: params.organizationName,
+            website,
+            city: params.city,
+            state: params.state,
+        });
+        if (verified.ok && verified.website) {
+            website = verified.website;
+            verifiedWebsite = true;
+            confidence = verified.confidence;
+            providers.push("website_verify");
+            if (!mission && verified.pageDescription) {
+                mission = verified.pageDescription;
+            }
+        }
+        else if (verified.reason === "unreachable") {
+            providers.push("website_unverified_unreachable");
+            confidence = "low";
+        }
+        else {
+            website = null;
+            verifiedWebsite = false;
+        }
+    }
+    if (website) {
+        const discovered = await (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website);
+        facebookUrl = discovered.facebookUrl;
+        instagramUrl = discovered.instagramUrl;
+        linkedinUrl = discovered.linkedinUrl;
+        youtubeUrl = discovered.youtubeUrl;
+        tiktokUrl = discovered.tiktokUrl;
+        contactPhone = discovered.phone;
+        contactEmail = discovered.email;
+        if (facebookUrl ||
+            instagramUrl ||
+            linkedinUrl ||
+            youtubeUrl ||
+            tiktokUrl ||
+            contactPhone ||
+            contactEmail) {
+            providers.push("website_scrape");
+            if (confidence === "low")
+                confidence = "medium";
+        }
+    }
+    if (!facebookUrl || !instagramUrl || !linkedinUrl || !youtubeUrl) {
+        const guessedSocial = await (0, guess_nonprofit_social_1.guessNonprofitSocialLinks)({
+            organizationName: params.organizationName,
+            ein: params.ein,
+            city: params.city,
+            state: params.state,
+        });
+        if (!facebookUrl && guessedSocial.facebookUrl)
+            facebookUrl = guessedSocial.facebookUrl;
+        if (!instagramUrl && guessedSocial.instagramUrl) {
+            instagramUrl = guessedSocial.instagramUrl;
+        }
+        if (!linkedinUrl && guessedSocial.linkedinUrl)
+            linkedinUrl = guessedSocial.linkedinUrl;
+        if (!youtubeUrl && guessedSocial.youtubeUrl)
+            youtubeUrl = guessedSocial.youtubeUrl;
+        if (guessedSocial.provider)
+            providers.push(`social_${guessedSocial.provider}`);
+    }
+    if (verifiedWebsite && confidence === "low")
+        confidence = "medium";
+    if (verifiedWebsite && (facebookUrl || contactEmail || contactPhone)) {
+        confidence = confidence === "low" ? "medium" : confidence;
+    }
+    return {
+        website,
+        mission,
+        facebookUrl,
+        instagramUrl,
+        linkedinUrl,
+        youtubeUrl,
+        tiktokUrl,
+        contactEmail,
+        contactPhone,
+        confidence,
+        verifiedWebsite,
+        providers,
+    };
+}
 async function enrichUsNonprofitByEin(einRaw, options) {
     const digits = digitsOnlyEin(einRaw);
     if (!/^\d{9}$/.test(digits))
@@ -145,41 +246,68 @@ async function enrichUsNonprofitByEin(einRaw, options) {
         providers.push("propublica");
     if (eo)
         providers.push("every_org");
+    const orgName = options?.organizationName?.trim() ||
+        eo?.organizationName ||
+        pp?.organizationName ||
+        "";
+    const city = options?.city || pp?.city || null;
+    const state = options?.state || pp?.state || null;
+    const einFormatted = formatEinFromDigits(digits);
+    const identity = orgName
+        ? (0, verify_nonprofit_identity_1.scoreOrgNameMatch)(options?.organizationName?.trim() || orgName, orgName)
+        : { tier: "reject", score: 0 };
     if (!pp && !eo) {
-        const orgName = options?.organizationName?.trim() || "";
         if (!orgName)
             return null;
         const guessed = await (0, guess_nonprofit_website_1.guessNonprofitWebsite)({
             organizationName: orgName,
-            ein: formatEinFromDigits(digits),
-            city: options?.city || null,
-            state: options?.state || null,
+            ein: einFormatted,
+            city,
+            state,
         });
-        if (!guessed.website)
-            return null;
-        const providers = [];
         if (guessed.provider)
             providers.push(guessed.provider);
-        return {
-            ein: formatEinFromDigits(digits),
+        const layer = await attachVerifiedContactLayer({
             organizationName: orgName,
             website: guessed.website,
-            logoUrl: null,
+            ein: einFormatted,
+            city,
+            state,
             mission: null,
-            city: options?.city || null,
-            state: options?.state || null,
-            zip: null,
             providers,
+        });
+        if (!layer.website && !layer.facebookUrl && !layer.instagramUrl) {
+            return null;
+        }
+        return {
+            ein: einFormatted,
+            organizationName: orgName,
+            website: layer.website,
+            logoUrl: null,
+            mission: layer.mission,
+            city,
+            state,
+            zip: null,
+            providers: layer.providers,
+            facebookUrl: layer.facebookUrl,
+            instagramUrl: layer.instagramUrl,
+            linkedinUrl: layer.linkedinUrl,
+            youtubeUrl: layer.youtubeUrl,
+            tiktokUrl: layer.tiktokUrl,
+            contactEmail: layer.contactEmail,
+            contactPhone: layer.contactPhone,
+            confidence: layer.confidence,
+            identityMatch: identity.tier,
+            verifiedWebsite: layer.verifiedWebsite,
         };
     }
     let website = eo?.website || null;
-    const orgName = options?.organizationName?.trim() || eo?.organizationName || pp?.organizationName || "";
     if (!website && orgName) {
         const guessed = await (0, guess_nonprofit_website_1.guessNonprofitWebsite)({
             organizationName: orgName,
-            ein: formatEinFromDigits(digits),
-            city: options?.city || pp?.city || null,
-            state: options?.state || pp?.state || null,
+            ein: einFormatted,
+            city,
+            state,
         });
         if (guessed.website) {
             website = guessed.website;
@@ -187,16 +315,35 @@ async function enrichUsNonprofitByEin(einRaw, options) {
                 providers.push(guessed.provider);
         }
     }
-    return {
-        ein: formatEinFromDigits(digits),
-        organizationName: eo?.organizationName || pp?.organizationName || null,
+    const layer = await attachVerifiedContactLayer({
+        organizationName: orgName || eo?.organizationName || pp?.organizationName || "",
         website,
-        logoUrl: eo?.logoUrl || null,
+        ein: einFormatted,
+        city,
+        state,
         mission: eo?.mission || null,
-        city: pp?.city || null,
-        state: pp?.state || null,
-        zip: pp?.zip || null,
         providers,
+    });
+    return {
+        ein: einFormatted,
+        organizationName: eo?.organizationName || pp?.organizationName || orgName || null,
+        website: layer.website,
+        logoUrl: eo?.logoUrl || null,
+        mission: layer.mission,
+        city: pp?.city || city,
+        state: pp?.state || state,
+        zip: pp?.zip || null,
+        providers: layer.providers,
+        facebookUrl: layer.facebookUrl,
+        instagramUrl: layer.instagramUrl,
+        linkedinUrl: layer.linkedinUrl,
+        youtubeUrl: layer.youtubeUrl,
+        tiktokUrl: layer.tiktokUrl,
+        contactEmail: layer.contactEmail,
+        contactPhone: layer.contactPhone,
+        confidence: layer.confidence,
+        identityMatch: identity.tier,
+        verifiedWebsite: layer.verifiedWebsite,
     };
 }
 async function attachEveryOrgEnrichment(candidates) {
@@ -232,15 +379,33 @@ async function suggestUsNonprofits(params) {
     if (!body) {
         return { candidates: [], totalResults: 0, provider: "propublica" };
     }
+    const fetchCap = Math.min(25, Math.max(limit * 3, 15));
     const mapped = (body.organizations ?? [])
         .map(mapOrg)
         .filter((row) => row != null)
-        .slice(0, limit);
-    const enriched = await attachEveryOrgEnrichment(mapped);
+        .slice(0, fetchCap);
+    const identityFiltered = (0, verify_nonprofit_identity_1.filterByOrgIdentityMatch)(q, mapped);
+    const ranked = identityFiltered
+        .slice(0, limit)
+        .map((row) => {
+        const { identityMatch, identityScore: _score, ...rest } = row;
+        void _score;
+        const matchStrength = identityMatch === "exact" || identityMatch === "near"
+            ? "strong"
+            : identityMatch === "partial"
+                ? "partial"
+                : "weak";
+        return {
+            ...rest,
+            matchStrength,
+            identityMatch,
+        };
+    });
+    const enriched = await attachEveryOrgEnrichment(ranked);
     return {
         candidates: enriched,
         totalResults: typeof body.total_results === "number" ? body.total_results : enriched.length,
-        provider: "propublica+every_org",
+        provider: "propublica+every_org+identity",
     };
 }
 //# sourceMappingURL=us-nonprofit-directory.js.map

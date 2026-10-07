@@ -78,6 +78,9 @@ export declare function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<
     instagramUrl: string | null;
     linkedinUrl: string | null;
     youtubeUrl: string | null;
+    tiktokUrl?: string | null;
+    phone?: string | null;
+    email?: string | null;
     mission: string | null;
     causeCategory: string | null;
     city: string | null;

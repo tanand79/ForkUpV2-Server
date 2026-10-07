@@ -1,3 +1,4 @@
+import { type IdentityMatchTier } from "./verify-nonprofit-identity";
 export type UsNonprofitSuggestion = {
     id: number;
     organizationName: string;
@@ -19,6 +20,7 @@ export type UsNonprofitSuggestion = {
     matchStrength: "strong" | "partial" | "weak";
     source: "irs_us";
     logoUrl: string | null;
+    identityMatch?: IdentityMatchTier;
 };
 export type UsNonprofitEnrichment = {
     ein: string;
@@ -30,6 +32,16 @@ export type UsNonprofitEnrichment = {
     state: string | null;
     zip: string | null;
     providers: string[];
+    facebookUrl?: string | null;
+    instagramUrl?: string | null;
+    linkedinUrl?: string | null;
+    youtubeUrl?: string | null;
+    tiktokUrl?: string | null;
+    contactEmail?: string | null;
+    contactPhone?: string | null;
+    confidence?: "high" | "medium" | "low";
+    identityMatch?: IdentityMatchTier;
+    verifiedWebsite?: boolean;
 };
 export type EnrichUsNonprofitOptions = {
     ein: string;

@@ -9,6 +9,7 @@ const geo_distance_1 = require("../lib/geo-distance");
 const join_door_type_1 = require("../lib/join-door-type");
 const join_giveback_prefs_1 = require("../lib/join-giveback-prefs");
 const guest_business_claim_1 = require("../lib/guest-business-claim");
+const guest_nonprofit_claim_1 = require("../lib/guest-nonprofit-claim");
 const booking_platform_links_1 = require("../lib/booking-platform-links");
 const s3_1 = require("../lib/s3");
 const invite_sender_1 = require("../lib/invite-sender");
@@ -615,9 +616,20 @@ exports.profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
                 });
             }
             const { rows: updated } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE id = $1", [org.id]);
+            let claimEmailSent = false;
+            if (!requestedByUserId) {
+                const issued = await (0, guest_nonprofit_claim_1.issueGuestNonprofitClaim)({
+                    nonprofitId: org.id,
+                    slug: String(updated[0].slug),
+                    organizationName: body.organizationName.trim(),
+                    guestEmail: email,
+                });
+                claimEmailSent = issued.emailSent;
+            }
             res.json({
                 action: riskLevel === "medium" ? "claimed_pending_verification" : "claimed",
                 riskLevel,
+                claimEmailSent,
                 nonprofit: mapNonprofit(updated[0]),
                 businessWarning,
             });
@@ -669,9 +681,20 @@ exports.profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
             });
         }
         const { rows: created } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE id = $1", [result[0].id]);
+        let claimEmailSent = false;
+        if (!requestedByUserId) {
+            const issued = await (0, guest_nonprofit_claim_1.issueGuestNonprofitClaim)({
+                nonprofitId: result[0].id,
+                slug,
+                organizationName: body.organizationName.trim(),
+                guestEmail: email,
+            });
+            claimEmailSent = issued.emailSent;
+        }
         res.status(201).json({
             action: riskLevel === "medium" ? "created_pending_verification" : "created",
             riskLevel,
+            claimEmailSent,
             nonprofit: mapNonprofit(created[0]),
             businessWarning,
         });

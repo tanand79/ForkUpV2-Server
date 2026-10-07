@@ -1,17 +1,17 @@
 /**
  * Shared professional HTML + plain-text templates for guest claim emails
- * (NPO campaign claim + business profile claim).
+ * (NPO campaign claim + business profile claim + nonprofit Join claim).
  *
  * Purpose: Neat ForkUp-branded transactional mail. Callers pass context;
  * this module only renders subject/body/html — mailer sends.
  */
 import { forkUpEmailHeaderCellHtml } from "./forkup-email-layout";
 
-export type GuestClaimEmailKind = "business" | "campaign";
+export type GuestClaimEmailKind = "business" | "campaign" | "nonprofit";
 
 export type GuestClaimEmailInput = {
   kind: GuestClaimEmailKind;
-  /** Business name or campaign name */
+  /** Business name, campaign name, or nonprofit organization name */
   entityName: string;
   claimUrl: string;
   /** Campaign public page — only used for kind=campaign */
@@ -49,30 +49,47 @@ export function renderGuestClaimEmail(
   const days = Math.max(1, Math.floor(input.expiresInDays));
 
   const isBusiness = input.kind === "business";
-  const entityLabel = isBusiness ? "business" : "campaign";
+  const isNonprofit = input.kind === "nonprofit";
+  const entityLabel = isBusiness
+    ? "business"
+    : isNonprofit
+      ? "organization"
+      : "campaign";
   const subject = isBusiness
     ? `Claim your business on ForkUp — ${name}`
-    : `Claim your campaign on ForkUp — ${name}`;
+    : isNonprofit
+      ? `Claim your organization on ForkUp — ${name}`
+      : `Claim your campaign on ForkUp — ${name}`;
 
   const headline = isBusiness
     ? "Your business is saved on ForkUp"
-    : "Your campaign is live on ForkUp";
+    : isNonprofit
+      ? "Your organization is saved on ForkUp"
+      : "Your campaign is live on ForkUp";
   const intro = isBusiness
     ? `Thanks for joining ForkUp. <strong>${safeName}</strong> has been saved as a business profile.`
-    : `Thanks for launching on ForkUp. Your campaign <strong>${safeName}</strong> is live.`;
+    : isNonprofit
+      ? `Thanks for joining ForkUp. <strong>${safeName}</strong> has been saved as a nonprofit profile.`
+      : `Thanks for launching on ForkUp. Your campaign <strong>${safeName}</strong> is live.`;
   const ctaLabel = isBusiness
     ? "Claim &amp; manage profile"
-    : "Claim &amp; manage campaign";
+    : isNonprofit
+      ? "Claim &amp; manage organization"
+      : "Claim &amp; manage campaign";
   const actionLine = isBusiness
     ? "Use the button below to claim and manage this profile from any device."
-    : "Use the button below to claim and manage this campaign from any device.";
+    : isNonprofit
+      ? "Use the button below to claim and manage this organization from any device."
+      : "Use the button below to claim and manage this campaign from any device.";
 
   const bodyLines = [
     `Hi,`,
     ``,
     isBusiness
       ? `Your business "${name}" is saved on ForkUp.`
-      : `Your campaign "${name}" is live on ForkUp.`,
+      : isNonprofit
+        ? `Your organization "${name}" is saved on ForkUp.`
+        : `Your campaign "${name}" is live on ForkUp.`,
   ];
   if (publicUrl) {
     bodyLines.push(``, `Public campaign page:`, publicUrl);

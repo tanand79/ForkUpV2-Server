@@ -54,6 +54,7 @@ async function guessNonprofitSocialLinks(params) {
                 "You find the organization's OWN official public social media profile URLs for a US nonprofit.",
                 'Return ONLY JSON: {"facebookUrl": string, "instagramUrl": string, "linkedinUrl": string, "youtubeUrl": string}.',
                 "Return only the nonprofit's original official pages — not local chapters, affiliates, donors, or lookalikes.",
+                "Do NOT return a similar-sounding organization (example: searching \"Head To Head\" must NOT return Headstrong profiles).",
                 "Use full https URLs when confident they belong to this exact organization.",
                 "Use empty string for any channel you are unsure about or that does not exist.",
                 "Never invent handles or URLs. Never guess a URL pattern from the org name alone unless you know it is real.",

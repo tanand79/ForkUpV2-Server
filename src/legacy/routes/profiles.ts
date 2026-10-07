@@ -15,6 +15,7 @@ import {
   normalizePreferredCampaignSlug,
 } from "../lib/join-giveback-prefs";
 import { issueGuestBusinessClaim } from "../lib/guest-business-claim";
+import { issueGuestNonprofitClaim } from "../lib/guest-nonprofit-claim";
 import { classifyBookingPlatformUrl } from "../lib/booking-platform-links";
 import { resolveStoredImageUrl } from "../lib/s3";
 import {
@@ -866,9 +867,22 @@ profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
         "SELECT * FROM nonprofits WHERE id = $1",
         [org.id],
       );
+
+      let claimEmailSent = false;
+      if (!requestedByUserId) {
+        const issued = await issueGuestNonprofitClaim({
+          nonprofitId: org.id,
+          slug: String(updated[0].slug),
+          organizationName: body.organizationName.trim(),
+          guestEmail: email,
+        });
+        claimEmailSent = issued.emailSent;
+      }
+
       res.json({
         action: riskLevel === "medium" ? "claimed_pending_verification" : "claimed",
         riskLevel,
+        claimEmailSent,
         nonprofit: mapNonprofit(updated[0]),
         businessWarning,
       });
@@ -938,9 +952,22 @@ profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
       "SELECT * FROM nonprofits WHERE id = $1",
       [result[0].id],
     );
+
+    let claimEmailSent = false;
+    if (!requestedByUserId) {
+      const issued = await issueGuestNonprofitClaim({
+        nonprofitId: result[0].id,
+        slug,
+        organizationName: body.organizationName.trim(),
+        guestEmail: email,
+      });
+      claimEmailSent = issued.emailSent;
+    }
+
     res.status(201).json({
       action: riskLevel === "medium" ? "created_pending_verification" : "created",
       riskLevel,
+      claimEmailSent,
       nonprofit: mapNonprofit(created[0]),
       businessWarning,
     });

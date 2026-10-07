@@ -52,6 +52,8 @@
     "db:guest-campaign-claim:production": "tsx src/legacy/db/run-guest-campaign-claim-production.ts",
     "db:guest-business-claim": "tsx src/legacy/db/migrate-guest-business-claim.ts",
     "db:guest-business-claim:production": "tsx src/legacy/db/run-guest-business-claim-production.ts",
+    "db:guest-nonprofit-claim": "tsx src/legacy/db/migrate-guest-nonprofit-claim.ts",
+    "db:guest-nonprofit-claim:production": "tsx src/legacy/db/run-guest-nonprofit-claim-production.ts",
     "db:stripe-donations": "tsx src/legacy/db/migrate-stripe-donations.ts",
     "db:stripe-donations:production": "tsx src/legacy/db/run-stripe-donations-production.ts",
     "db:guest-fundraiser-invite": "tsx src/legacy/db/migrate-guest-fundraiser-invite.ts",

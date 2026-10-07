@@ -339,11 +339,12 @@ usNonprofitSuggestRouter.get("/nonprofits/us-suggest", async (req, res) => {
 });
 
 /**
- * Enrich a US directory pick for the confirm form (website, logo, ZIP, mission).
+ * Enrich a US directory pick for the confirm form (website, logo, ZIP, mission,
+ * plus verified social/contact when confidently associated with this exact org).
  *
  * method: GET /api/profiles/nonprofits/us-enrich
  * query: { ein: string, name?: string, city?: string, state?: string }
- * response: UsNonprofitEnrichment
+ * response: UsNonprofitEnrichment (additive social/contact/confidence fields)
  */
 usNonprofitSuggestRouter.get("/nonprofits/us-enrich", async (req, res) => {
   try {

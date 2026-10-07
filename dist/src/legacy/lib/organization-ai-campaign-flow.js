@@ -12,6 +12,7 @@ const ai_chat_1 = require("./ai-chat");
 const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
 const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
 const known_organization_profiles_1 = require("./known-organization-profiles");
+const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 const suggest_social_images_1 = require("./suggest-social-images");
 const persist_nonprofit_public_links_1 = require("./persist-nonprofit-public-links");
 const SESSION_TTL_DAYS = 7;
@@ -183,6 +184,9 @@ async function resolveAnalysisSources(input) {
     let ein = trimStr(input.ein) || null;
     let city = trimStr(input.city) || null;
     let state = trimStr(input.state) || null;
+    let tiktokUrl = null;
+    let phone = null;
+    let email = null;
     if (nonprofitId) {
         const row = await loadNonprofit(nonprofitId);
         if (row) {
@@ -240,7 +244,21 @@ async function resolveAnalysisSources(input) {
         if (guessed.website)
             website = (0, suggest_social_images_1.normalizeWebsiteUrl)(guessed.website);
     }
-    if (website && (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)) {
+    if (website && organizationName) {
+        const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+            organizationName,
+            website,
+            city,
+            state,
+        });
+        if (verified.ok && verified.website) {
+            website = (0, suggest_social_images_1.normalizeWebsiteUrl)(verified.website);
+        }
+        else if (verified.reason !== "unreachable") {
+            website = null;
+        }
+    }
+    if (website) {
         const discovered = await (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website);
         if (!facebookUrl && discovered.facebookUrl) {
             facebookUrl = discovered.facebookUrl;
@@ -254,6 +272,13 @@ async function resolveAnalysisSources(input) {
         if (!youtubeUrl && discovered.youtubeUrl) {
             youtubeUrl = discovered.youtubeUrl;
         }
+        if (!tiktokUrl && discovered.tiktokUrl) {
+            tiktokUrl = discovered.tiktokUrl;
+        }
+        if (!phone && discovered.phone)
+            phone = discovered.phone;
+        if (!email && discovered.email)
+            email = discovered.email;
     }
     if (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl) {
         const guessedSocial = await (0, guess_nonprofit_social_1.guessNonprofitSocialLinks)({
@@ -275,6 +300,22 @@ async function resolveAnalysisSources(input) {
             youtubeUrl = guessedSocial.youtubeUrl;
         }
     }
+    if (website && !mission) {
+        const pageMeta = await extractOrgPageMeta(website);
+        if (pageMeta?.description?.trim()) {
+            mission = pageMeta.description.trim();
+        }
+        else if (pageMeta?.title?.trim()) {
+            const title = pageMeta.title
+                .replace(/&#\d+;/g, " ")
+                .replace(/&amp;/g, "&")
+                .replace(/\s+/g, " ")
+                .trim();
+            if (title && !/ymca of the roses/i.test(title)) {
+                mission = title;
+            }
+        }
+    }
     const instagramUrl = instagramRaw
         ? (0, suggest_social_images_1.normalizeInstagramUrl)(instagramRaw) || instagramRaw
         : null;
@@ -287,6 +328,9 @@ async function resolveAnalysisSources(input) {
         instagramUrl: fitVarchar(instagramUrl, 512),
         linkedinUrl: fitVarchar(linkedinUrl, 512),
         youtubeUrl: fitVarchar(youtubeUrl, 512),
+        tiktokUrl: fitVarchar(tiktokUrl, 512),
+        phone: fitVarchar(phone, 64),
+        email: fitVarchar(email, 512),
         mission,
         causeCategory,
         city,
@@ -488,7 +532,7 @@ async function runOrganizationAiCampaignFlow(input) {
                 instagramHandle: sources.instagramUrl || undefined,
                 linkedinUrl: sources.linkedinUrl || undefined,
                 youtubeUrl: sources.youtubeUrl || undefined,
-                limit: 6,
+                limit: 10,
             }),
         ]);
         const mission = sources.mission || pageMeta?.description || null;

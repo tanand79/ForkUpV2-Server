@@ -45,6 +45,7 @@ const support_1 = require("./routes/support");
 const email_templates_1 = require("./routes/email-templates");
 const guest_campaign_claim_1 = require("./routes/guest-campaign-claim");
 const guest_business_claim_1 = require("./routes/guest-business-claim");
+const guest_nonprofit_claim_1 = require("./routes/guest-nonprofit-claim");
 const business_post_start_1 = require("./routes/business-post-start");
 const campaign_partner_join_requests_1 = require("./routes/campaign-partner-join-requests");
 const stripe_donations_1 = require("./routes/stripe-donations");
@@ -134,6 +135,7 @@ function mountLegacyApi(app) {
     app.use("/api/email-templates", email_templates_1.emailTemplatesRouter);
     app.use("/api/guest-campaign-claim", guest_campaign_claim_1.guestCampaignClaimRouter);
     app.use("/api/guest-business-claim", guest_business_claim_1.guestBusinessClaimRouter);
+    app.use("/api/guest-nonprofit-claim", guest_nonprofit_claim_1.guestNonprofitClaimRouter);
     app.use("/api", business_post_start_1.businessPostStartRouter);
     app.use("/api/manage", manage_1.manageRouter);
     app.use("/api/manage", campaign_partner_join_requests_1.campaignPartnerJoinManageRouter);

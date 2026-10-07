@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS nonprofits (
   verification_date TIMESTAMP,
   latitude DOUBLE PRECISION NULL,
   longitude DOUBLE PRECISION NULL,
+  -- Additive: guest Join claim link (mirrors businesses.guest_claim_*).
+  guest_claim_email VARCHAR(255) NULL,
+  guest_claim_token VARCHAR(64) NULL,
+  guest_claim_expires_at TIMESTAMP NULL,
+  guest_claim_claimed_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -133,6 +138,10 @@ CREATE INDEX IF NOT EXISTS idx_business_locations_business_id
 CREATE INDEX IF NOT EXISTS idx_nonprofits_lat_lng
   ON nonprofits (latitude, longitude)
   WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nonprofits_guest_claim_token
+  ON nonprofits (guest_claim_token)
+  WHERE guest_claim_token IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_business_locations_lat_lng
   ON business_locations (latitude, longitude)

@@ -204,12 +204,16 @@ function normalizeNameQuery(raw) {
         .replace(/\s+/g, " ")
         .trim();
 }
+function orgNameTokensForAlias(normalizedQuery) {
+    return normalizedQuery.split(" ").filter(Boolean);
+}
 function findKnownOrganizationByName(nameQuery) {
     const q = normalizeNameQuery(nameQuery);
     if (!q || q.length < 3)
         return null;
     const compact = q.replace(/\s+/g, "");
-    if (q.includes("headstrong") || q.includes("head strong")) {
+    const qTokens = new Set(orgNameTokensForAlias(q));
+    if (qTokens.has("headstrong") || q === "head strong") {
         const hs = KNOWN_BY_DOMAIN["headstrong.org"];
         return { ...hs, website: "https://headstrong.org" };
     }

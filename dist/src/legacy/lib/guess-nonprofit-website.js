@@ -3,13 +3,22 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.guessNonprofitWebsite = guessNonprofitWebsite;
 const ai_chat_1 = require("./ai-chat");
 const known_organization_profiles_1 = require("./known-organization-profiles");
+const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 async function guessNonprofitWebsite(params) {
     const name = params.organizationName.trim();
     if (!name)
         return { website: null, provider: null };
     const known = (0, known_organization_profiles_1.findKnownOrganizationByName)(name);
     if (known?.website?.trim()) {
-        return { website: normalizeWebsite(known.website), provider: "known_profile" };
+        const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+            organizationName: name,
+            website: known.website,
+            city: params.city,
+            state: params.state,
+        });
+        if (verified.ok && verified.website) {
+            return { website: verified.website, provider: "known_profile" };
+        }
     }
     if ((0, ai_chat_1.aiProviderName)() === "none") {
         return { website: null, provider: null };
@@ -25,7 +34,8 @@ async function guessNonprofitWebsite(params) {
             system: [
                 "You find the official public website URL for a US nonprofit organization.",
                 "Return ONLY JSON: {\"website\": string}.",
-                "Put the organization's OWN official website when you are confident it belongs to this exact organization.",
+                "Put the organization's OWN official website when you are confident it belongs to this EXACT organization name.",
+                "Do NOT return a similar-sounding organization (example: searching \"Head To Head\" must NOT return Headstrong or headstrong.org).",
                 "Do not return affiliate, directory, Facebook, Instagram, GuideStar, Charity Navigator, or donation-processor pages when a real website exists.",
                 "Use https:// when returning a URL.",
                 "If unsure, or no public website exists, return {\"website\": \"\"}. Prefer empty over an assumed domain.",
@@ -46,7 +56,19 @@ async function guessNonprofitWebsite(params) {
         const raw = typeof parsed.website === "string" ? parsed.website.trim() : "";
         if (!raw)
             return { website: null, provider: null };
-        return { website: normalizeWebsite(raw), provider: (0, ai_chat_1.aiProviderName)() };
+        const normalized = normalizeWebsite(raw);
+        if (!normalized)
+            return { website: null, provider: null };
+        const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+            organizationName: name,
+            website: normalized,
+            city: params.city,
+            state: params.state,
+        });
+        if (!verified.ok || !verified.website) {
+            return { website: null, provider: null };
+        }
+        return { website: verified.website, provider: (0, ai_chat_1.aiProviderName)() };
     }
     catch {
         return { website: null, provider: null };

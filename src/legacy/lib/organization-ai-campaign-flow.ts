@@ -23,6 +23,7 @@ import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
 import { guessNonprofitWebsite } from "./guess-nonprofit-website";
 import { guessNonprofitSocialLinks } from "./guess-nonprofit-social";
 import { findKnownOrganizationByName, findKnownOrganizationProfile } from "./known-organization-profiles";
+import { verifyWebsiteBelongsToOrg } from "./verify-nonprofit-identity";
 import {
   normalizeFacebookUrl,
   normalizeInstagramUrl,
@@ -414,6 +415,21 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
       state,
     });
     if (guessed.website) website = normalizeWebsiteUrl(guessed.website);
+  }
+
+  // Drop websites that fail identity (lookalike / directory). Keep on timeout.
+  if (website && organizationName) {
+    const verified = await verifyWebsiteBelongsToOrg({
+      organizationName,
+      website,
+      city,
+      state,
+    });
+    if (verified.ok && verified.website) {
+      website = normalizeWebsiteUrl(verified.website);
+    } else if (verified.reason !== "unreachable") {
+      website = null;
+    }
   }
 
   // Always scrape the public website when we have one — fills social + contact.

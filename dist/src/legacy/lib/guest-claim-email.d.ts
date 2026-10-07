@@ -1,4 +1,4 @@
-export type GuestClaimEmailKind = "business" | "campaign";
+export type GuestClaimEmailKind = "business" | "campaign" | "nonprofit";
 export type GuestClaimEmailInput = {
     kind: GuestClaimEmailKind;
     entityName: string;
