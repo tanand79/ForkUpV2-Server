@@ -15,6 +15,10 @@
 
 import { guessNonprofitWebsite } from "./guess-nonprofit-website";
 import { guessNonprofitSocialLinks } from "./guess-nonprofit-social";
+import {
+  nonprofitWebResearchConfigured,
+  researchNonprofitProfile,
+} from "./nonprofit-web-research";
 import { discoverSocialLinksFromWebsite } from "./suggest-social-images";
 import {
   filterByOrgIdentityMatch,
@@ -382,6 +386,57 @@ async function attachVerifiedContactLayer(params: {
   if (verifiedWebsite && confidence === "low") confidence = "medium";
   if (verifiedWebsite && (facebookUrl || contactEmail || contactPhone)) {
     confidence = confidence === "low" ? "medium" : confidence;
+  }
+
+  // Last resort: full Tavily+Bedrock research when still thin (no site / no social).
+  const stillThin =
+    !website && !facebookUrl && !instagramUrl;
+  if (stillThin && nonprofitWebResearchConfigured() && params.organizationName.trim()) {
+    try {
+      const researched = await researchNonprofitProfile({
+        organizationName: params.organizationName,
+        ein: params.ein,
+        city: params.city,
+        state: params.state,
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (researched.status === "found" && researched.provider) {
+        providers.push(researched.provider);
+        if (!website && researched.website) {
+          const verified = await verifyWebsiteBelongsToOrg({
+            organizationName: researched.name || params.organizationName,
+            website: researched.website,
+            city: params.city,
+            state: params.state,
+          });
+          if (verified.ok && verified.website) {
+            website = verified.website;
+            verifiedWebsite = true;
+            confidence = verified.confidence;
+          } else if (verified.reason === "unreachable" && researched.website) {
+            website = researched.website;
+            confidence = "low";
+          }
+        }
+        if (!mission && researched.mission) mission = researched.mission;
+        else if (!mission && researched.about) mission = researched.about;
+        if (!facebookUrl && researched.facebookUrl) facebookUrl = researched.facebookUrl;
+        if (!instagramUrl && researched.instagramUrl) {
+          instagramUrl = researched.instagramUrl;
+        }
+        if (!linkedinUrl && researched.linkedinUrl) linkedinUrl = researched.linkedinUrl;
+        if (!youtubeUrl && researched.youtubeUrl) youtubeUrl = researched.youtubeUrl;
+        if (!contactEmail && researched.contactEmail) {
+          contactEmail = researched.contactEmail;
+        }
+        if (!contactPhone && researched.contactPhone) {
+          contactPhone = researched.contactPhone;
+        }
+        if (website && confidence === "low") confidence = "medium";
+      }
+    } catch {
+      /* keep thin enrich — research is best-effort */
+    }
   }
 
   return {

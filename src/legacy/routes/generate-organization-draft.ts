@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { aiChat, aiProviderName, parseAiJson } from "../lib/ai-chat";
 import { findKnownOrganizationProfile, findKnownOrganizationByName } from "../lib/known-organization-profiles";
+import {
+  nonprofitWebResearchConfigured,
+  researchNonprofitProfile,
+} from "../lib/nonprofit-web-research";
 
 export const generateOrganizationDraftRouter = Router();
 
@@ -69,9 +73,89 @@ generateOrganizationDraftRouter.post("/generate-organization-draft", async (req,
       return;
     }
 
-    // ── 2) Name-only (no website): known profile already checked; AI draft from name ──
+    // ── 2) Name-only (no website): known profile already checked; web research then AI ──
     // Never return an empty name_seed stub — that caused blank "AI Draft" reviews.
     if (!website && nameQuery) {
+      // Prefer evidence-based Tavily+Bedrock research (forkupnpo) when configured.
+      if (nonprofitWebResearchConfigured()) {
+        try {
+          const researched = await researchNonprofitProfile({
+            organizationName: nameQuery,
+            signal: AbortSignal.timeout(100_000),
+          });
+          if (researched.status === "found") {
+            const generatedFields: Record<string, string> = {
+              organizationName: researched.name || nameQuery,
+              missionStatement: researched.mission || "",
+              about: researched.about || "",
+              website: researched.website || "",
+              contactEmail: researched.contactEmail || "",
+              phone: researched.contactPhone || "",
+              location: researched.address || researched.location || "",
+              causeCategory: "",
+              city: "",
+              state: "",
+              ein: "",
+            };
+            // Best-effort city/state split from "City, ST"
+            const loc = (researched.location || researched.address || "").trim();
+            const m = loc.match(/^(.+?),\s*([A-Za-z]{2})\b/);
+            if (m) {
+              generatedFields.city = m[1]!.trim();
+              generatedFields.state = m[2]!.toUpperCase();
+            }
+
+            const social: string[] = [];
+            if (researched.facebookUrl) social.push(researched.facebookUrl);
+            if (researched.instagramUrl) social.push(researched.instagramUrl);
+            if (researched.linkedinUrl) social.push(researched.linkedinUrl);
+            if (researched.youtubeUrl) social.push(researched.youtubeUrl);
+
+            const missingFields: string[] = ["Primary contact name"];
+            if (!generatedFields.contactEmail?.trim()) {
+              missingFields.push("Primary contact email");
+            }
+            if (!generatedFields.website?.trim()) missingFields.push("Website");
+            if (
+              !generatedFields.missionStatement?.trim() &&
+              !generatedFields.about?.trim()
+            ) {
+              missingFields.push("Mission or short description");
+            }
+            if (!generatedFields.city?.trim() && !generatedFields.location?.trim()) {
+              missingFields.push("City / state");
+            }
+
+            res.json({
+              website: generatedFields.website || "",
+              kind,
+              generatedFields,
+              orgType: "Nonprofit",
+              social,
+              missingFields,
+              lastAiGeneratedAt: new Date().toISOString(),
+              confirmationStatus: "AI Draft",
+              provider: researched.provider || "tavily_bedrock",
+              researchWarnings: researched.warnings,
+            });
+            return;
+          }
+          if (researched.status === "ambiguous") {
+            res.status(422).json({
+              error:
+                researched.reason ||
+                "Multiple organizations match that name. Add a city, state, or EIN.",
+              status: "ambiguous",
+            });
+            return;
+          }
+          // not_found / unavailable → fall through to memory AI draft when available
+        } catch (err) {
+          console.error("Name-only web research failed:", err);
+          // fall through to legacy AI draft
+        }
+      }
+
       if (aiProviderName() === "none") {
         res.status(503).json({
           error:

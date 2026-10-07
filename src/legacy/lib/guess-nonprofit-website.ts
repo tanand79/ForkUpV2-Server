@@ -1,9 +1,19 @@
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
 import { findKnownOrganizationByName } from "./known-organization-profiles";
+import {
+  discoverNonprofitWebsite,
+  nonprofitWebResearchConfigured,
+} from "./nonprofit-web-research";
 import { verifyWebsiteBelongsToOrg } from "./verify-nonprofit-identity";
 
 /**
  * Best-effort official website lookup when IRS/Every.org enrichment has no URL.
+ *
+ * Order:
+ * 1) Known profile registry
+ * 2) Tavily + Bedrock evidence search (when TAVILY_API_KEY configured)
+ * 3) AI memory guess (Bedrock/Lovable) — legacy fallback
+ * Then live page identity verify before returning a URL.
  *
  * Inputs: organizationName (required), optional ein/city/state for disambiguation.
  * Output: normalized https URL string, or null when unknown / AI unavailable /
@@ -30,6 +40,35 @@ export async function guessNonprofitWebsite(params: {
       return { website: verified.website, provider: "known_profile" };
     }
     // Known registry miss on live verify — fall through to AI rather than return wrong site.
+  }
+
+  // Live web evidence (forkupnpo research) before LLM memory guess.
+  if (nonprofitWebResearchConfigured()) {
+    const discovered = await discoverNonprofitWebsite({
+      organizationName: name,
+      ein: params.ein,
+      city: params.city,
+      state: params.state,
+    });
+    if (discovered.status === "found" && discovered.website) {
+      const verified = await verifyWebsiteBelongsToOrg({
+        organizationName: discovered.name || name,
+        website: discovered.website,
+        city: params.city,
+        state: params.state,
+      });
+      if (verified.ok && verified.website) {
+        return { website: verified.website, provider: "tavily_bedrock" };
+      }
+      // Evidence URL failed page verify — still prefer it over inventing another domain
+      // only when verify was unreachable (timeout), not identity reject.
+      if (verified.reason === "unreachable") {
+        const normalized = normalizeWebsite(discovered.website);
+        if (normalized) {
+          return { website: normalized, provider: "tavily_bedrock" };
+        }
+      }
+    }
   }
 
   if (aiProviderName() === "none") {
