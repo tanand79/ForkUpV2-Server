@@ -14,6 +14,39 @@ const booking_platform_links_1 = require("../lib/booking-platform-links");
 const s3_1 = require("../lib/s3");
 const invite_sender_1 = require("../lib/invite-sender");
 const persist_business_public_links_1 = require("../lib/persist-business-public-links");
+const persist_nonprofit_public_links_1 = require("../lib/persist-nonprofit-public-links");
+async function persistClaimRequestHydrateMedia(nonprofitId, body) {
+    await (0, persist_nonprofit_public_links_1.fillNonprofitPublicProfileNullOnly)(nonprofitId, {
+        website: body.website,
+        facebookUrl: body.facebookUrl,
+        instagramUrl: body.instagramUrl,
+        linkedinUrl: body.linkedinUrl,
+        youtubeUrl: body.youtubeUrl,
+        city: body.city,
+        state: body.state,
+        about: body.mission,
+        mission: body.mission,
+        logoUrl: body.logoUrl,
+    });
+    const gallery = Array.isArray(body.galleryImageUrls)
+        ? body.galleryImageUrls
+            .filter((u) => typeof u === "string" && u.trim().length > 0)
+            .map((u) => u.trim())
+            .slice(0, 24)
+        : [];
+    const cover = typeof body.coverUrl === "string" && body.coverUrl.trim()
+        ? body.coverUrl.trim()
+        : null;
+    if (gallery.length === 0 && !cover)
+        return;
+    try {
+        await (0, persist_nonprofit_public_links_1.replaceNonprofitGalleryUrls)(nonprofitId, gallery.length > 0 ? gallery : cover ? [cover] : []);
+        await (0, persist_nonprofit_public_links_1.persistNonprofitCoverUrl)(nonprofitId, cover || gallery[0] || null);
+    }
+    catch (err) {
+        console.error("claim-request gallery hydrate failed:", err);
+    }
+}
 exports.profilesRouter = (0, express_1.Router)();
 const DIRECTORY_HIDDEN_SEED_SLUGS = [
     "olive-and-oak",
@@ -615,6 +648,7 @@ exports.profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
                     riskReason: "Contact email domain does not match organization website",
                 });
             }
+            await persistClaimRequestHydrateMedia(org.id, body);
             const { rows: updated } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE id = $1", [org.id]);
             let claimEmailSent = false;
             if (!requestedByUserId) {
@@ -680,6 +714,7 @@ exports.profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
                 riskReason: "New organization created with a non-matching or missing website domain",
             });
         }
+        await persistClaimRequestHydrateMedia(result[0].id, body);
         const { rows: created } = await pool_1.pool.query("SELECT * FROM nonprofits WHERE id = $1", [result[0].id]);
         let claimEmailSent = false;
         if (!requestedByUserId) {

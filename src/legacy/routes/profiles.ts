@@ -23,6 +23,67 @@ import {
   type OrganizationType,
 } from "../lib/invite-sender";
 import { normalizeVenueDiscountHours } from "../lib/persist-business-public-links";
+import {
+  fillNonprofitPublicProfileNullOnly,
+  persistNonprofitCoverUrl,
+  replaceNonprofitGalleryUrls,
+} from "../lib/persist-nonprofit-public-links";
+
+/**
+ * Persist Join-hydrate social + gallery on claim-request (guest-safe, no auth).
+ * Additive optional body fields — never required for claim to succeed.
+ */
+async function persistClaimRequestHydrateMedia(
+  nonprofitId: number,
+  body: {
+    website?: string;
+    facebookUrl?: string;
+    instagramUrl?: string;
+    linkedinUrl?: string;
+    youtubeUrl?: string;
+    mission?: string;
+    city?: string;
+    state?: string;
+    logoUrl?: string;
+    galleryImageUrls?: unknown;
+    coverUrl?: string;
+  },
+): Promise<void> {
+  await fillNonprofitPublicProfileNullOnly(nonprofitId, {
+    website: body.website,
+    facebookUrl: body.facebookUrl,
+    instagramUrl: body.instagramUrl,
+    linkedinUrl: body.linkedinUrl,
+    youtubeUrl: body.youtubeUrl,
+    city: body.city,
+    state: body.state,
+    about: body.mission,
+    mission: body.mission,
+    logoUrl: body.logoUrl,
+  });
+
+  const gallery = Array.isArray(body.galleryImageUrls)
+    ? body.galleryImageUrls
+        .filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+        .map((u) => u.trim())
+        .slice(0, 24)
+    : [];
+  const cover =
+    typeof body.coverUrl === "string" && body.coverUrl.trim()
+      ? body.coverUrl.trim()
+      : null;
+  if (gallery.length === 0 && !cover) return;
+
+  try {
+    await replaceNonprofitGalleryUrls(
+      nonprofitId,
+      gallery.length > 0 ? gallery : cover ? [cover] : [],
+    );
+    await persistNonprofitCoverUrl(nonprofitId, cover || gallery[0] || null);
+  } catch (err) {
+    console.error("claim-request gallery hydrate failed:", err);
+  }
+}
 
 export const profilesRouter = Router();
 
@@ -738,6 +799,14 @@ profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
       city?: string;
       state?: string;
       zip?: string;
+      /** Additive: Join-hydrate social / gallery (guest-safe). */
+      facebookUrl?: string;
+      instagramUrl?: string;
+      linkedinUrl?: string;
+      youtubeUrl?: string;
+      logoUrl?: string;
+      galleryImageUrls?: string[];
+      coverUrl?: string;
     };
 
     if (!body.organizationName?.trim()) {
@@ -863,6 +932,8 @@ profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
         });
       }
 
+      await persistClaimRequestHydrateMedia(org.id, body);
+
       const { rows: updated } = await pool.query<NonprofitRow>(
         "SELECT * FROM nonprofits WHERE id = $1",
         [org.id],
@@ -947,6 +1018,8 @@ profilesRouter.post("/nonprofits/claim-request", async (req, res) => {
         riskReason: "New organization created with a non-matching or missing website domain",
       });
     }
+
+    await persistClaimRequestHydrateMedia(result[0].id, body);
 
     const { rows: created } = await pool.query<NonprofitRow>(
       "SELECT * FROM nonprofits WHERE id = $1",
