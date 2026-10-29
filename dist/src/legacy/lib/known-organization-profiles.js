@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeProfileDomain = normalizeProfileDomain;
 exports.findKnownOrganizationProfile = findKnownOrganizationProfile;
 exports.findKnownOrganizationByName = findKnownOrganizationByName;
+const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 function normalizeProfileDomain(raw) {
     let s = raw.trim().toLowerCase();
     if (!s)
@@ -171,30 +172,6 @@ function findKnownOrganizationProfile(websiteOrDomain) {
     }
     return null;
 }
-const WEAK_NAME_TOKENS = new Set([
-    "the",
-    "and",
-    "for",
-    "of",
-    "inc",
-    "llc",
-    "org",
-    "america",
-    "american",
-    "national",
-    "united",
-    "youth",
-    "community",
-    "foundation",
-    "association",
-    "society",
-    "club",
-    "team",
-    "group",
-    "school",
-    "center",
-    "centre",
-]);
 function normalizeNameQuery(raw) {
     return raw
         .trim()
@@ -235,27 +212,7 @@ function findKnownOrganizationByName(nameQuery) {
         }
     }
     for (const [domain, profile] of Object.entries(KNOWN_BY_DOMAIN)) {
-        const name = normalizeNameQuery(profile.organizationName);
-        if (!name)
-            continue;
-        if (name === q || name.includes(q) || q.includes(name)) {
-            return { ...profile, website: `https://${domain}` };
-        }
-    }
-    const queryTokens = q.split(/\s+/).filter((t) => t.length > 3 && !WEAK_NAME_TOKENS.has(t));
-    if (queryTokens.length === 0)
-        return null;
-    for (const [domain, profile] of Object.entries(KNOWN_BY_DOMAIN)) {
-        const nameTokens = normalizeNameQuery(profile.organizationName)
-            .split(/\s+/)
-            .filter((t) => t.length > 3 && !WEAK_NAME_TOKENS.has(t));
-        if (nameTokens.length === 0)
-            continue;
-        const hits = queryTokens.filter((t) => nameTokens.some((n) => n === t || n.startsWith(t) || t.startsWith(n)));
-        if (hits.length >= 2) {
-            return { ...profile, website: `https://${domain}` };
-        }
-        if (hits.length === 1 && hits[0].length >= 8) {
+        if ((0, verify_nonprofit_identity_1.scoreOrgNameMatch)(nameQuery, profile.organizationName).tier === "exact") {
             return { ...profile, website: `https://${domain}` };
         }
     }

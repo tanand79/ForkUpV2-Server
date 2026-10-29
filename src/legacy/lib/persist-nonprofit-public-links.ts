@@ -47,6 +47,7 @@ export async function fillNonprofitPublicProfileNullOnly(
     about?: string | null;
     mission?: string | null;
     logoUrl?: string | null;
+    phone?: string | null;
   },
 ): Promise<void> {
   if (!Number.isFinite(nonprofitId) || nonprofitId <= 0) return;
@@ -61,6 +62,7 @@ export async function fillNonprofitPublicProfileNullOnly(
   const about = trimOrNull(fill.about);
   const mission = trimOrNull(fill.mission);
   const logoUrl = trimOrNull(fill.logoUrl);
+  const phone = trimOrNull(fill.phone);
 
   if (
     !website &&
@@ -72,7 +74,8 @@ export async function fillNonprofitPublicProfileNullOnly(
     !state &&
     !about &&
     !mission &&
-    !logoUrl
+    !logoUrl &&
+    !phone
   ) {
     return;
   }
@@ -90,6 +93,7 @@ export async function fillNonprofitPublicProfileNullOnly(
          description = COALESCE(NULLIF(TRIM(description), ''), $9),
          mission = COALESCE(NULLIF(TRIM(mission), ''), $10),
          logo_url = COALESCE(NULLIF(TRIM(logo_url), ''), $11),
+         contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $12),
          updated_at = NOW()
        WHERE id = $1`,
       [
@@ -104,6 +108,7 @@ export async function fillNonprofitPublicProfileNullOnly(
         about,
         mission,
         logoUrl,
+        phone,
       ],
     );
   } catch (err) {

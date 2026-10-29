@@ -13,6 +13,7 @@ const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
 const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
 const known_organization_profiles_1 = require("./known-organization-profiles");
 const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
+const nonprofit_web_research_1 = require("./nonprofit-web-research");
 const suggest_social_images_1 = require("./suggest-social-images");
 const persist_nonprofit_public_links_1 = require("./persist-nonprofit-public-links");
 const SESSION_TTL_DAYS = 7;
@@ -234,6 +235,68 @@ async function resolveAnalysisSources(input) {
         if (!facebookUrl && social.includes("Facebook") && known.website) {
         }
     }
+    let aboutNarrative = null;
+    let vision = null;
+    let streetAddress = null;
+    let imageUrls = [];
+    let websiteFromResearch = false;
+    if ((0, nonprofit_web_research_1.nonprofitWebResearchConfigured)()) {
+        try {
+            const researched = await (0, nonprofit_web_research_1.researchNonprofitProfile)({
+                organizationName,
+                ein,
+                city,
+                state,
+                signal: AbortSignal.timeout(90_000),
+            });
+            if (researched.status === "found") {
+                if (researched.website) {
+                    const researchedSite = (0, suggest_social_images_1.normalizeWebsiteUrl)(researched.website);
+                    if (researchedSite && !(0, verify_nonprofit_identity_1.isRejectedDirectoryHost)(researchedSite)) {
+                        website = researchedSite;
+                        websiteFromResearch = true;
+                    }
+                }
+                if (!facebookUrl && researched.facebookUrl) {
+                    facebookUrl = (0, suggest_social_images_1.normalizeFacebookUrl)(researched.facebookUrl);
+                }
+                if (!instagramRaw && researched.instagramUrl) {
+                    instagramRaw = researched.instagramUrl;
+                }
+                if (!linkedinUrl && researched.linkedinUrl) {
+                    linkedinUrl = researched.linkedinUrl;
+                }
+                if (!youtubeUrl && researched.youtubeUrl) {
+                    youtubeUrl = (0, suggest_social_images_1.normalizeYouTubeUrl)(researched.youtubeUrl) || researched.youtubeUrl;
+                }
+                if (!phone && researched.contactPhone)
+                    phone = researched.contactPhone;
+                if (!email && researched.contactEmail)
+                    email = researched.contactEmail;
+                if (researched.about.trim())
+                    aboutNarrative = researched.about.trim();
+                if (researched.mission.trim())
+                    mission = researched.mission.trim();
+                else if (!mission && researched.about.trim())
+                    mission = researched.about.trim();
+                vision = researched.vision.trim() || null;
+                const publishedAddress = researched.address
+                    .split(/\n+/)
+                    .map((line) => line.trim())
+                    .find(Boolean);
+                streetAddress =
+                    (publishedAddress
+                        ? publishedAddress.replace(/^[^:]{0,40}:\s*/, "")
+                        : "") ||
+                        researched.location ||
+                        null;
+                imageUrls = researched.imageUrls;
+            }
+        }
+        catch (err) {
+            console.error("resolveAnalysisSources web research failed:", err instanceof Error ? err.message.slice(0, 200) : err);
+        }
+    }
     if (!website) {
         const guessed = await (0, guess_nonprofit_website_1.guessNonprofitWebsite)({
             organizationName,
@@ -254,7 +317,7 @@ async function resolveAnalysisSources(input) {
         if (verified.ok && verified.website) {
             website = (0, suggest_social_images_1.normalizeWebsiteUrl)(verified.website);
         }
-        else if (verified.reason !== "unreachable") {
+        else if (verified.reason !== "unreachable" && !websiteFromResearch) {
             website = null;
         }
     }
@@ -280,7 +343,8 @@ async function resolveAnalysisSources(input) {
         if (!email && discovered.email)
             email = discovered.email;
     }
-    if (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl) {
+    if (!websiteFromResearch &&
+        (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)) {
         const guessedSocial = await (0, guess_nonprofit_social_1.guessNonprofitSocialLinks)({
             organizationName,
             ein,
@@ -300,7 +364,7 @@ async function resolveAnalysisSources(input) {
             youtubeUrl = guessedSocial.youtubeUrl;
         }
     }
-    if (website && !mission) {
+    if (website && !mission && !aboutNarrative) {
         const pageMeta = await extractOrgPageMeta(website);
         if (pageMeta?.description?.trim()) {
             mission = pageMeta.description.trim();
@@ -335,6 +399,10 @@ async function resolveAnalysisSources(input) {
         causeCategory,
         city,
         state,
+        aboutNarrative,
+        vision,
+        streetAddress,
+        imageUrls,
     };
 }
 async function generateCampaignIdeasFromAnalysis(params) {

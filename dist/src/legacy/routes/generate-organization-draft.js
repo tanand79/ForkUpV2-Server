@@ -4,6 +4,7 @@ exports.generateOrganizationDraftRouter = void 0;
 const express_1 = require("express");
 const ai_chat_1 = require("../lib/ai-chat");
 const known_organization_profiles_1 = require("../lib/known-organization-profiles");
+const nonprofit_web_research_1 = require("../lib/nonprofit-web-research");
 exports.generateOrganizationDraftRouter = (0, express_1.Router)();
 exports.generateOrganizationDraftRouter.post("/generate-organization-draft", async (req, res) => {
     try {
@@ -48,6 +49,81 @@ exports.generateOrganizationDraftRouter.post("/generate-organization-draft", asy
             return;
         }
         if (!website && nameQuery) {
+            if ((0, nonprofit_web_research_1.nonprofitWebResearchConfigured)()) {
+                try {
+                    const researched = await (0, nonprofit_web_research_1.researchNonprofitProfile)({
+                        organizationName: nameQuery,
+                        signal: AbortSignal.timeout(100_000),
+                    });
+                    if (researched.status === "found") {
+                        const generatedFields = {
+                            organizationName: researched.name || nameQuery,
+                            missionStatement: researched.mission || "",
+                            about: researched.about || "",
+                            website: researched.website || "",
+                            contactEmail: researched.contactEmail || "",
+                            phone: researched.contactPhone || "",
+                            location: researched.address || researched.location || "",
+                            causeCategory: "",
+                            city: "",
+                            state: "",
+                            ein: "",
+                        };
+                        const loc = (researched.location || researched.address || "").trim();
+                        const m = loc.match(/^(.+?),\s*([A-Za-z]{2})\b/);
+                        if (m) {
+                            generatedFields.city = m[1].trim();
+                            generatedFields.state = m[2].toUpperCase();
+                        }
+                        const social = [];
+                        if (researched.facebookUrl)
+                            social.push(researched.facebookUrl);
+                        if (researched.instagramUrl)
+                            social.push(researched.instagramUrl);
+                        if (researched.linkedinUrl)
+                            social.push(researched.linkedinUrl);
+                        if (researched.youtubeUrl)
+                            social.push(researched.youtubeUrl);
+                        const missingFields = ["Primary contact name"];
+                        if (!generatedFields.contactEmail?.trim()) {
+                            missingFields.push("Primary contact email");
+                        }
+                        if (!generatedFields.website?.trim())
+                            missingFields.push("Website");
+                        if (!generatedFields.missionStatement?.trim() &&
+                            !generatedFields.about?.trim()) {
+                            missingFields.push("Mission or short description");
+                        }
+                        if (!generatedFields.city?.trim() && !generatedFields.location?.trim()) {
+                            missingFields.push("City / state");
+                        }
+                        res.json({
+                            website: generatedFields.website || "",
+                            kind,
+                            generatedFields,
+                            orgType: "Nonprofit",
+                            social,
+                            missingFields,
+                            lastAiGeneratedAt: new Date().toISOString(),
+                            confirmationStatus: "AI Draft",
+                            provider: researched.provider || "tavily_bedrock",
+                            researchWarnings: researched.warnings,
+                        });
+                        return;
+                    }
+                    if (researched.status === "ambiguous") {
+                        res.status(422).json({
+                            error: researched.reason ||
+                                "Multiple organizations match that name. Add a city, state, or EIN.",
+                            status: "ambiguous",
+                        });
+                        return;
+                    }
+                }
+                catch (err) {
+                    console.error("Name-only web research failed:", err);
+                }
+            }
             if ((0, ai_chat_1.aiProviderName)() === "none") {
                 res.status(503).json({
                     error: "No AI provider configured. Set AWS Bedrock credentials or LOVABLE_API_KEY, or enter the official website URL.",

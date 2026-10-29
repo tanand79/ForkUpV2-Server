@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.guessNonprofitSocialLinks = guessNonprofitSocialLinks;
 const ai_chat_1 = require("./ai-chat");
+const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 const suggest_social_images_1 = require("./suggest-social-images");
 const VERIFY_TIMEOUT_MS = 6_000;
 const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
@@ -19,7 +20,9 @@ async function isReachablePublicUrl(url) {
                 "Accept-Language": "en-US,en;q=0.9",
             },
         });
-        return res.ok;
+        if (!res.ok || (0, verify_nonprofit_identity_1.isUnsafeFetchUrl)(res.url || url))
+            return false;
+        return true;
     }
     catch {
         return false;
@@ -77,15 +80,31 @@ async function guessNonprofitSocialLinks(params) {
         const rawIg = typeof parsed.instagramUrl === "string" ? parsed.instagramUrl.trim() : "";
         const rawLi = typeof parsed.linkedinUrl === "string" ? parsed.linkedinUrl.trim() : "";
         const rawYt = typeof parsed.youtubeUrl === "string" ? parsed.youtubeUrl.trim() : "";
-        const facebookCandidate = rawFb ? (0, suggest_social_images_1.normalizeFacebookUrl)(rawFb) : null;
-        const instagramCandidate = rawIg ? (0, suggest_social_images_1.normalizeInstagramUrl)(rawIg) : null;
-        const linkedinCandidate = rawLi ? (0, suggest_social_images_1.normalizeLinkedInUrl)(rawLi) : null;
-        const youtubeCandidate = rawYt ? (0, suggest_social_images_1.normalizeYouTubeUrl)(rawYt) : null;
+        const facebookCandidate = rawFb && (0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(name, (0, suggest_social_images_1.normalizeFacebookUrl)(rawFb) ?? "")
+            ? (0, suggest_social_images_1.normalizeFacebookUrl)(rawFb)
+            : null;
+        const instagramCandidate = rawIg && (0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(name, (0, suggest_social_images_1.normalizeInstagramUrl)(rawIg) ?? "")
+            ? (0, suggest_social_images_1.normalizeInstagramUrl)(rawIg)
+            : null;
+        const linkedinCandidate = rawLi && (0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(name, (0, suggest_social_images_1.normalizeLinkedInUrl)(rawLi) ?? "")
+            ? (0, suggest_social_images_1.normalizeLinkedInUrl)(rawLi)
+            : null;
+        const youtubeCandidate = rawYt && (0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(name, (0, suggest_social_images_1.normalizeYouTubeUrl)(rawYt) ?? "")
+            ? (0, suggest_social_images_1.normalizeYouTubeUrl)(rawYt)
+            : null;
         const [fbOk, igOk, liOk, ytOk] = await Promise.all([
-            facebookCandidate ? isReachablePublicUrl(facebookCandidate) : Promise.resolve(false),
-            instagramCandidate ? isReachablePublicUrl(instagramCandidate) : Promise.resolve(false),
-            linkedinCandidate ? isReachablePublicUrl(linkedinCandidate) : Promise.resolve(false),
-            youtubeCandidate ? isReachablePublicUrl(youtubeCandidate) : Promise.resolve(false),
+            facebookCandidate && !(0, verify_nonprofit_identity_1.isUnsafeFetchUrl)(facebookCandidate)
+                ? isReachablePublicUrl(facebookCandidate)
+                : Promise.resolve(false),
+            instagramCandidate && !(0, verify_nonprofit_identity_1.isUnsafeFetchUrl)(instagramCandidate)
+                ? isReachablePublicUrl(instagramCandidate)
+                : Promise.resolve(false),
+            linkedinCandidate && !(0, verify_nonprofit_identity_1.isUnsafeFetchUrl)(linkedinCandidate)
+                ? isReachablePublicUrl(linkedinCandidate)
+                : Promise.resolve(false),
+            youtubeCandidate && !(0, verify_nonprofit_identity_1.isUnsafeFetchUrl)(youtubeCandidate)
+                ? isReachablePublicUrl(youtubeCandidate)
+                : Promise.resolve(false),
         ]);
         return {
             facebookUrl: fbOk ? facebookCandidate : null,

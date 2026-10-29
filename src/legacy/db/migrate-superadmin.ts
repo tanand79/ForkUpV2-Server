@@ -7,6 +7,7 @@
 import { isDirectRun, type DbTaskOptions } from "./cli";
 import { pool } from "./pool";
 import { hashPassword } from "../lib/auth";
+import { DEFAULT_BEDROCK_MODEL_ID } from "../lib/bedrock-model-catalog";
 
 async function columnExists(table: string, column: string): Promise<boolean> {
   const { rowCount } = await pool.query(
@@ -70,10 +71,10 @@ export async function migrateSuperadmin(options: DbTaskOptions = {}) {
     `);
 
     const defaults: [string, string][] = [
-      ["ai_model_id", process.env.BEDROCK_MODEL_ID?.trim() || "amazon.nova-lite-v1:0"],
+      ["ai_model_id", process.env.BEDROCK_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID],
       [
         "receipt_ai_model_id",
-        process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || "amazon.nova-lite-v1:0",
+        process.env.BEDROCK_RECEIPT_MODEL_ID?.trim() || DEFAULT_BEDROCK_MODEL_ID,
       ],
       ["platform_fee_percent", "15"],
       ["email_provider", "ses"],

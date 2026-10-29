@@ -68,7 +68,7 @@ async function chatViaBedrock(options) {
         ? `${options.system}\nReturn ONLY valid JSON. No markdown fences or commentary.`
         : options.system;
     const command = new client_bedrock_runtime_1.ConverseCommand({
-        modelId: await resolveBedrockModelId(options.modelId, options.userId),
+        modelId: (0, bedrock_model_catalog_1.toBedrockInvokeModelId)(await resolveBedrockModelId(options.modelId, options.userId)),
         system: [{ text: systemText }],
         messages: [
             {
@@ -146,7 +146,7 @@ async function chatViaBedrockMultimodal(options) {
         })),
     ];
     const command = new client_bedrock_runtime_1.ConverseCommand({
-        modelId: await resolveReceiptBedrockModelId(options.modelId, options.userId),
+        modelId: (0, bedrock_model_catalog_1.toBedrockInvokeModelId)(await resolveReceiptBedrockModelId(options.modelId, options.userId)),
         system: [{ text: systemText }],
         messages: [{ role: "user", content }],
         inferenceConfig: {

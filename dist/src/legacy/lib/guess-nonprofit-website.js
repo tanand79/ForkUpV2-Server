@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.guessNonprofitWebsite = guessNonprofitWebsite;
 const ai_chat_1 = require("./ai-chat");
 const known_organization_profiles_1 = require("./known-organization-profiles");
+const nonprofit_web_research_1 = require("./nonprofit-web-research");
 const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 async function guessNonprofitWebsite(params) {
     const name = params.organizationName.trim();
@@ -18,6 +19,31 @@ async function guessNonprofitWebsite(params) {
         });
         if (verified.ok && verified.website) {
             return { website: verified.website, provider: "known_profile" };
+        }
+    }
+    if ((0, nonprofit_web_research_1.nonprofitWebResearchConfigured)()) {
+        const discovered = await (0, nonprofit_web_research_1.discoverNonprofitWebsite)({
+            organizationName: name,
+            ein: params.ein,
+            city: params.city,
+            state: params.state,
+        });
+        if (discovered.status === "found" && discovered.website) {
+            const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+                organizationName: discovered.name || name,
+                website: discovered.website,
+                city: params.city,
+                state: params.state,
+            });
+            if (verified.ok && verified.website) {
+                return { website: verified.website, provider: "tavily_bedrock" };
+            }
+            if (verified.reason === "unreachable") {
+                const normalized = normalizeWebsite(discovered.website);
+                if (normalized) {
+                    return { website: normalized, provider: "tavily_bedrock" };
+                }
+            }
         }
     }
     if ((0, ai_chat_1.aiProviderName)() === "none") {

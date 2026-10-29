@@ -22,6 +22,7 @@ import {
 import { discoverSocialLinksFromWebsite } from "./suggest-social-images";
 import {
   filterByOrgIdentityMatch,
+  mergeKeepingTrustedIrs,
   scoreOrgNameMatch,
   verifyWebsiteBelongsToOrg,
   type IdentityMatchTier,
@@ -332,9 +333,17 @@ async function attachVerifiedContactLayer(params: {
       if (!mission && verified.pageDescription) {
         mission = verified.pageDescription;
       }
-    } else if (verified.reason === "unreachable") {
-      // Keep provider URL when fetch times out; scrape may still succeed via www.
-      providers.push("website_unverified_unreachable");
+    } else if (
+      verified.reason === "unreachable" ||
+      verified.reason === "identity_inconclusive"
+    ) {
+      // Timeout or a generic page title is not proof of the wrong org.
+      // Keep the URL so social and contact scraping can still run.
+      providers.push(
+        verified.reason === "unreachable"
+          ? "website_unverified_unreachable"
+          : "website_unverified_inconclusive",
+      );
       confidence = "low";
     } else {
       // Do not return an identity-rejected lookalike website.
@@ -401,38 +410,58 @@ async function attachVerifiedContactLayer(params: {
         signal: AbortSignal.timeout(90_000),
       });
       if (researched.status === "found" && researched.provider) {
-        providers.push(researched.provider);
-        if (!website && researched.website) {
-          const verified = await verifyWebsiteBelongsToOrg({
-            organizationName: researched.name || params.organizationName,
-            website: researched.website,
-            city: params.city,
-            state: params.state,
-          });
-          if (verified.ok && verified.website) {
-            website = verified.website;
-            verifiedWebsite = true;
-            confidence = verified.confidence;
-          } else if (verified.reason === "unreachable" && researched.website) {
-            website = researched.website;
-            confidence = "low";
+        const nameTier = scoreOrgNameMatch(
+          params.organizationName,
+          researched.name || params.organizationName,
+        );
+        if (nameTier.tier === "exact" || nameTier.tier === "near") {
+          providers.push(researched.provider);
+          let researchedWebsite: string | null = null;
+          if (!website && researched.website) {
+            const verified = await verifyWebsiteBelongsToOrg({
+              organizationName: researched.name || params.organizationName,
+              website: researched.website,
+              city: params.city,
+              state: params.state,
+            });
+            if (verified.ok && verified.website) {
+              researchedWebsite = verified.website;
+            }
           }
+          const merged = mergeKeepingTrustedIrs(
+            {
+              organizationName: params.organizationName,
+              ein: params.ein,
+              website,
+              contactEmail,
+              contactPhone,
+            },
+            {
+              organizationName: researched.name || params.organizationName,
+              ein: params.ein,
+              website: researchedWebsite,
+              contactEmail: researched.contactEmail,
+              contactPhone: researched.contactPhone,
+              identityTier: nameTier.tier,
+            },
+          );
+          website = merged.website;
+          contactEmail = merged.contactEmail;
+          contactPhone = merged.contactPhone;
+          if (researchedWebsite) {
+            verifiedWebsite = true;
+            confidence = nameTier.tier === "exact" ? "high" : "medium";
+          }
+          if (!mission && researched.mission) mission = researched.mission;
+          else if (!mission && researched.about) mission = researched.about;
+          if (!facebookUrl && researched.facebookUrl) facebookUrl = researched.facebookUrl;
+          if (!instagramUrl && researched.instagramUrl) {
+            instagramUrl = researched.instagramUrl;
+          }
+          if (!linkedinUrl && researched.linkedinUrl) linkedinUrl = researched.linkedinUrl;
+          if (!youtubeUrl && researched.youtubeUrl) youtubeUrl = researched.youtubeUrl;
+          if (website && confidence === "low") confidence = "medium";
         }
-        if (!mission && researched.mission) mission = researched.mission;
-        else if (!mission && researched.about) mission = researched.about;
-        if (!facebookUrl && researched.facebookUrl) facebookUrl = researched.facebookUrl;
-        if (!instagramUrl && researched.instagramUrl) {
-          instagramUrl = researched.instagramUrl;
-        }
-        if (!linkedinUrl && researched.linkedinUrl) linkedinUrl = researched.linkedinUrl;
-        if (!youtubeUrl && researched.youtubeUrl) youtubeUrl = researched.youtubeUrl;
-        if (!contactEmail && researched.contactEmail) {
-          contactEmail = researched.contactEmail;
-        }
-        if (!contactPhone && researched.contactPhone) {
-          contactPhone = researched.contactPhone;
-        }
-        if (website && confidence === "low") confidence = "medium";
       }
     } catch {
       /* keep thin enrich — research is best-effort */

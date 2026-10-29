@@ -41,7 +41,10 @@ async function persistClaimRequestHydrateMedia(
     instagramUrl?: string;
     linkedinUrl?: string;
     youtubeUrl?: string;
+    /** About / description — preferred over collapsing into mission. */
+    about?: string;
     mission?: string;
+    phone?: string;
     city?: string;
     state?: string;
     logoUrl?: string;
@@ -49,6 +52,16 @@ async function persistClaimRequestHydrateMedia(
     coverUrl?: string;
   },
 ): Promise<void> {
+  const about =
+    typeof body.about === "string" && body.about.trim()
+      ? body.about.trim()
+      : typeof body.mission === "string" && body.mission.trim()
+        ? body.mission.trim()
+        : null;
+  const mission =
+    typeof body.mission === "string" && body.mission.trim()
+      ? body.mission.trim()
+      : null;
   await fillNonprofitPublicProfileNullOnly(nonprofitId, {
     website: body.website,
     facebookUrl: body.facebookUrl,
@@ -57,9 +70,11 @@ async function persistClaimRequestHydrateMedia(
     youtubeUrl: body.youtubeUrl,
     city: body.city,
     state: body.state,
-    about: body.mission,
-    mission: body.mission,
+    about,
+    // Keep Mission distinct; do not invent by copying About when Mission absent.
+    mission,
     logoUrl: body.logoUrl,
+    phone: typeof body.phone === "string" ? body.phone : null,
   });
 
   const gallery = Array.isArray(body.galleryImageUrls)

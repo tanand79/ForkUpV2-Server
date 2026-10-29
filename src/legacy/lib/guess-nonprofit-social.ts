@@ -12,6 +12,10 @@
  */
 import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
 import {
+  isUnsafeFetchUrl,
+  socialProfileMatchesOrg,
+} from "./verify-nonprofit-identity";
+import {
   normalizeFacebookUrl,
   normalizeInstagramUrl,
   normalizeLinkedInUrl,
@@ -48,7 +52,8 @@ async function isReachablePublicUrl(url: string): Promise<boolean> {
         "Accept-Language": "en-US,en;q=0.9",
       },
     });
-    return res.ok;
+    if (!res.ok || isUnsafeFetchUrl(res.url || url)) return false;
+    return true;
   } catch {
     return false;
   } finally {
@@ -127,16 +132,36 @@ export async function guessNonprofitSocialLinks(params: {
     const rawLi = typeof parsed.linkedinUrl === "string" ? parsed.linkedinUrl.trim() : "";
     const rawYt = typeof parsed.youtubeUrl === "string" ? parsed.youtubeUrl.trim() : "";
 
-    const facebookCandidate = rawFb ? normalizeFacebookUrl(rawFb) : null;
-    const instagramCandidate = rawIg ? normalizeInstagramUrl(rawIg) : null;
-    const linkedinCandidate = rawLi ? normalizeLinkedInUrl(rawLi) : null;
-    const youtubeCandidate = rawYt ? normalizeYouTubeUrl(rawYt) : null;
+    const facebookCandidate =
+      rawFb && socialProfileMatchesOrg(name, normalizeFacebookUrl(rawFb) ?? "")
+        ? normalizeFacebookUrl(rawFb)
+        : null;
+    const instagramCandidate =
+      rawIg && socialProfileMatchesOrg(name, normalizeInstagramUrl(rawIg) ?? "")
+        ? normalizeInstagramUrl(rawIg)
+        : null;
+    const linkedinCandidate =
+      rawLi && socialProfileMatchesOrg(name, normalizeLinkedInUrl(rawLi) ?? "")
+        ? normalizeLinkedInUrl(rawLi)
+        : null;
+    const youtubeCandidate =
+      rawYt && socialProfileMatchesOrg(name, normalizeYouTubeUrl(rawYt) ?? "")
+        ? normalizeYouTubeUrl(rawYt)
+        : null;
 
     const [fbOk, igOk, liOk, ytOk] = await Promise.all([
-      facebookCandidate ? isReachablePublicUrl(facebookCandidate) : Promise.resolve(false),
-      instagramCandidate ? isReachablePublicUrl(instagramCandidate) : Promise.resolve(false),
-      linkedinCandidate ? isReachablePublicUrl(linkedinCandidate) : Promise.resolve(false),
-      youtubeCandidate ? isReachablePublicUrl(youtubeCandidate) : Promise.resolve(false),
+      facebookCandidate && !isUnsafeFetchUrl(facebookCandidate)
+        ? isReachablePublicUrl(facebookCandidate)
+        : Promise.resolve(false),
+      instagramCandidate && !isUnsafeFetchUrl(instagramCandidate)
+        ? isReachablePublicUrl(instagramCandidate)
+        : Promise.resolve(false),
+      linkedinCandidate && !isUnsafeFetchUrl(linkedinCandidate)
+        ? isReachablePublicUrl(linkedinCandidate)
+        : Promise.resolve(false),
+      youtubeCandidate && !isUnsafeFetchUrl(youtubeCandidate)
+        ? isReachablePublicUrl(youtubeCandidate)
+        : Promise.resolve(false),
     ]);
 
     return {

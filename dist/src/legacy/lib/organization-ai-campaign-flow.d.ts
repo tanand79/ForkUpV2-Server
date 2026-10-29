@@ -85,6 +85,10 @@ export declare function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<
     causeCategory: string | null;
     city: string | null;
     state: string | null;
+    aboutNarrative?: string | null;
+    vision?: string | null;
+    streetAddress?: string | null;
+    imageUrls?: string[];
 }>;
 export declare function generateCampaignIdeasFromAnalysis(params: {
     organizationName: string;

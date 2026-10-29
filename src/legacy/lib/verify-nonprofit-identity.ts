@@ -7,49 +7,74 @@
  * Inputs: query name + candidate name / website URL.
  * Outputs: match tier, website verification result, page identity signals.
  *
+ * Name comparison keeps meaningful words ("to", "for", "of"). A shared prefix
+ * such as "head" is not a match for "headstrong".
+ *
  * Additive — used by guess-nonprofit-website + us-nonprofit-directory.
  */
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 
 const FETCH_TIMEOUT_MS = 6_000;
 const MAX_HTML_BYTES = 400_000;
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
-/** Tokens too common to prove identity alone. */
-const WEAK_NAME_TOKENS = new Set([
-  "the",
-  "and",
-  "for",
-  "of",
-  "to",
-  "a",
-  "an",
+/** Trailing legal-entity words. They are not a different organization. */
+const LEGAL_SUFFIXES = new Set([
   "inc",
+  "incorporated",
   "llc",
   "ltd",
-  "org",
-  "co",
   "corp",
   "corporation",
+  "co",
+  "company",
+  "lp",
+  "pllc",
+]);
+
+/**
+ * Optional org-type words. "Headstrong" and "Headstrong Foundation" can be the
+ * same org. "Head" and "Head To Head" cannot.
+ */
+const OPTIONAL_ORG_TYPE = new Set([
+  "foundation",
+  "association",
+  "organization",
+  "organisation",
+  "nonprofit",
+]);
+
+const GENERIC_SINGLE_TOKEN = new Set([
   "america",
   "american",
   "national",
   "united",
-  "youth",
   "community",
+  "youth",
   "foundation",
   "association",
-  "society",
-  "club",
-  "team",
-  "group",
-  "school",
   "center",
   "centre",
-  "inc.",
-  "nonprofit",
-  "non",
-  "profit",
+  "club",
+  "school",
+  "group",
+  "team",
+]);
+
+const GENERIC_TITLE_TOKENS = new Set([
+  "home",
+  "welcome",
+  "official",
+  "site",
+  "website",
+  "homepage",
+  "facebook",
+  "instagram",
+  "linkedin",
+  "youtube",
+  "twitter",
 ]);
 
 /** Hosts that are directories / processors — never treat as an org's official site. */
@@ -98,84 +123,110 @@ export type PageIdentitySignals = {
 };
 
 export function normalizeOrgName(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/^the\s+/, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return identityTokens(raw).join(" ");
 }
 
 export function orgNameTokens(raw: string): string[] {
-  const norm = normalizeOrgName(raw);
-  if (!norm) return [];
-  return norm.split(" ").filter(Boolean);
+  return identityTokens(raw);
 }
 
-function distinctiveTokens(tokens: string[]): string[] {
-  const out = tokens.filter((t) => t.length >= 2 && !WEAK_NAME_TOKENS.has(t));
-  return out.length > 0 ? out : tokens.filter((t) => t.length >= 3);
+/**
+ * Tokens used for identity. Keeps words like "to" and "for".
+ * Drops a leading "the" and trailing Inc/LLC only.
+ */
+export function identityTokens(raw: string): string[] {
+  const norm = raw
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!norm) return [];
+  const parts = norm.split(" ").filter(Boolean);
+  if (parts[0] === "the" && parts.length > 1) parts.shift();
+  while (parts.length > 1 && LEGAL_SUFFIXES.has(parts[parts.length - 1]!)) {
+    parts.pop();
+  }
+  return parts;
+}
+
+function sameToken(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a + "s" === b || b + "s" === a)) return true;
+  return false;
+}
+
+function tokensEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((t, i) => sameToken(t, b[i]!));
+}
+
+/** One token is a longer form of the other: head / headstrong. Plurals are not extensions. */
+function hasExtendingToken(query: string[], candidate: string[]): boolean {
+  for (const q of query) {
+    if (q.length < 3) continue;
+    for (const c of candidate) {
+      if (c.length < 3 || sameToken(q, c)) continue;
+      if (c.startsWith(q) || q.startsWith(c)) return true;
+    }
+  }
+  return false;
+}
+
+function withoutOrgType(tokens: string[]): string[] {
+  const core = tokens.filter((t) => !OPTIONAL_ORG_TYPE.has(t));
+  return core.length > 0 ? core : tokens;
+}
+
+function containsContiguousPhrase(haystack: string[], query: string[]): boolean {
+  if (query.length === 0 || haystack.length < query.length) return false;
+  for (let i = 0; i <= haystack.length - query.length; i++) {
+    if (query.every((t, j) => sameToken(haystack[i + j]!, t))) return true;
+  }
+  return false;
 }
 
 /**
  * Score how closely a candidate organization name matches the user query.
- * Prefer empty/reject over lookalike names that only share a weak token.
+ * Whole tokens only. "Head To Head" does not match "Headstrong" or "Head to Toe".
  */
 export function scoreOrgNameMatch(
   queryName: string,
   candidateName: string,
 ): { tier: IdentityMatchTier; score: number } {
-  const q = normalizeOrgName(queryName);
-  const c = normalizeOrgName(candidateName);
-  if (!q || !c) return { tier: "reject", score: 0 };
+  const q = identityTokens(queryName);
+  const c = identityTokens(candidateName);
+  if (q.length === 0 || c.length === 0) return { tier: "reject", score: 0 };
 
-  if (q === c) return { tier: "exact", score: 1 };
-
-  const qCompact = q.replace(/\s+/g, "");
-  const cCompact = c.replace(/\s+/g, "");
+  const qCompact = q.join("");
+  const cCompact = c.join("");
   if (qCompact.length >= 4 && qCompact === cCompact) {
-    return { tier: "exact", score: 0.98 };
+    return { tier: "exact", score: 1 };
   }
 
-  // Whole-phrase containment (either direction) — still require enough length.
-  if (q.length >= 6 && (c.includes(q) || q.includes(c))) {
+  if (hasExtendingToken(q, c)) return { tier: "reject", score: 0 };
+  if (tokensEqual(q, c)) return { tier: "exact", score: 1 };
+
+  const qCore = withoutOrgType(q);
+  const cCore = withoutOrgType(c);
+  if (qCore.length > 0 && tokensEqual(qCore, cCore)) {
+    return { tier: "near", score: 0.92 };
+  }
+
+  // Longer legal name that still contains the full requested phrase, in order.
+  if (c.length > q.length && containsContiguousPhrase(c, q)) {
+    if (q.length === 1 && GENERIC_SINGLE_TOKEN.has(q[0]!)) {
+      return { tier: "reject", score: 0 };
+    }
     return { tier: "near", score: 0.9 };
   }
 
-  const qTok = distinctiveTokens(orgNameTokens(q));
-  const cTok = distinctiveTokens(orgNameTokens(c));
-  if (qTok.length === 0 || cTok.length === 0) {
-    return { tier: "reject", score: 0 };
-  }
-
-  const cSet = new Set(cTok);
-  const hit = qTok.filter((t) => cSet.has(t));
-  const coverage = hit.length / qTok.length;
-
-  // Compact substring only when distinctive and long enough ("brandywine" in host).
-  const sharedCompact =
-    qCompact.length >= 8 &&
-    cCompact.length >= 8 &&
-    (qCompact.includes(cCompact) || cCompact.includes(qCompact));
-
-  if (coverage >= 1 && qTok.length >= 2) {
-    return { tier: "exact", score: 0.95 };
-  }
-  if (coverage >= 1 && qTok.length === 1 && qTok[0]!.length >= 5) {
-    // Single strong token (e.g. "Headstrong") — near, not auto-exact vs longer names.
-    return { tier: "near", score: 0.85 };
-  }
-  if (coverage >= 0.75 || sharedCompact) {
-    return { tier: "near", score: 0.8 };
-  }
-  if (coverage >= 0.5) {
-    return { tier: "partial", score: 0.55 };
-  }
-  if (coverage > 0) {
-    return { tier: "weak", score: 0.25 };
-  }
   return { tier: "reject", score: 0 };
+}
+
+export function namesReferToSameOrg(queryName: string, candidateName: string): boolean {
+  const tier = scoreOrgNameMatch(queryName, candidateName).tier;
+  return tier === "exact" || tier === "near";
 }
 
 export function identityTierRank(tier: IdentityMatchTier): number {
@@ -253,28 +304,124 @@ export function isRejectedDirectoryHost(url: string): boolean {
   );
 }
 
-async function fetchHtml(url: string): Promise<string | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+function isNonPublicIp(ip: string): boolean {
+  const value = ip.toLowerCase();
+  if (value.includes(":")) {
+    if (value === "::1" || value === "::") return true;
+    if (value.startsWith("fe80:") || value.startsWith("fc") || value.startsWith("fd")) {
+      return true;
+    }
+    if (value.startsWith("::ffff:")) return isNonPublicIp(value.slice("::ffff:".length));
+    return false;
+  }
+  const parts = value.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return true;
+  }
+  const a = parts[0]!;
+  const b = parts[1]!;
+  if (a === 0 || a === 10 || a === 127 || a === 255) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+/**
+ * Reject localhost, private networks, and cloud metadata targets before fetch.
+ * Inputs: absolute URL. Outputs: true when the URL must not be requested.
+ */
+export function isUnsafeFetchUrl(raw: string): boolean {
   try {
-    const res = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": BROWSER_UA,
-        Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    return buf.slice(0, MAX_HTML_BYTES).toString("utf8");
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+    if (u.username || u.password) return true;
+    const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+    if (!host) return true;
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      host.endsWith(".localdomain") ||
+      host === "metadata.google.internal" ||
+      host.endsWith(".metadata.google.internal") ||
+      host === "instance-data"
+    ) {
+      return true;
+    }
+    if (isIP(host)) return isNonPublicIp(host);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Resolve a redirect and reject private, metadata, and non-http targets. */
+export function safeRedirectTarget(current: string, location: string): string | null {
+  try {
+    const next = new URL(location, current).toString();
+    return isUnsafeFetchUrl(next) ? null : next;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+async function resolvesToPublicAddresses(hostname: string): Promise<boolean> {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) return !isNonPublicIp(host);
+  try {
+    const records = await lookup(host, { all: true });
+    if (records.length === 0) return false;
+    return records.every((record) => !isNonPublicIp(record.address));
+  } catch {
+    return false;
+  }
+}
+
+async function fetchHtml(url: string): Promise<string | null> {
+  let current = url;
+  for (let hop = 0; hop < 3; hop++) {
+    if (isUnsafeFetchUrl(current)) return null;
+    let hostname = "";
+    try {
+      hostname = new URL(current).hostname;
+    } catch {
+      return null;
+    }
+    if (!(await resolvesToPublicAddresses(hostname))) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(current, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": BROWSER_UA,
+          Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        const next = loc ? safeRedirectTarget(current, loc) : null;
+        if (!next) return null;
+        current = next;
+        continue;
+      }
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      return buf.slice(0, MAX_HTML_BYTES).toString("utf8");
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
 }
 
 /** Homepage variants (www ↔ apex) so a hung apex does not fail verify. */
@@ -339,6 +486,160 @@ export function extractPageIdentitySignals(html: string): PageIdentitySignals {
   return { title, description, siteName, textSample: stripped };
 }
 
+function isGenericTitle(title: string): boolean {
+  const tokens = identityTokens(title);
+  if (tokens.length === 0) return true;
+  return tokens.every((token) => GENERIC_TITLE_TOKENS.has(token));
+}
+
+function hostLabel(url: string): string {
+  const host = hostOf(url);
+  const stem = host.split(".")[0] ?? "";
+  return stem.replace(/[-_]+/g, " ");
+}
+
+function titleContradicts(organizationName: string, title: string): boolean {
+  if (!title.trim() || isGenericTitle(title)) return false;
+  return scoreOrgNameMatch(organizationName, title).tier === "reject";
+}
+
+/**
+ * Decide whether page title / site name / host belong to this organization.
+ * Page body text is not used as the organization name.
+ */
+export function decideWebsiteIdentity(params: {
+  organizationName: string;
+  website: string;
+  signals: PageIdentitySignals;
+}): { ok: boolean; confidence: "high" | "medium" | "low"; reason: string } {
+  const labels = [params.signals.siteName, params.signals.title]
+    .flatMap((label) => label.split(/\s+[|–—-]\s+/))
+    .map((label) => label.trim())
+    .filter((label) => label && !isGenericTitle(label));
+
+  let best: { tier: IdentityMatchTier; score: number } = { tier: "reject", score: 0 };
+  for (const label of labels) {
+    const match = scoreOrgNameMatch(params.organizationName, label);
+    if (match.score > best.score) best = match;
+  }
+
+  if (best.tier === "exact" || best.tier === "near") {
+    return {
+      ok: true,
+      confidence: best.tier === "exact" ? "high" : "medium",
+      reason: `identity_${best.tier}`,
+    };
+  }
+
+  const contradicted = labels.some((label) => titleContradicts(params.organizationName, label));
+  if (contradicted) {
+    return { ok: false, confidence: "low", reason: "identity_reject" };
+  }
+
+  const hostMatch = scoreOrgNameMatch(params.organizationName, hostLabel(params.website));
+  if (hostMatch.tier === "exact") {
+    return { ok: true, confidence: "medium", reason: "identity_exact_host" };
+  }
+
+  // Title did not name a different organization. Keep the URL for scraping,
+  // but do not call it a verified identity match.
+  return { ok: false, confidence: "low", reason: "identity_inconclusive" };
+}
+
+/**
+ * Keep a search hit only when its title or exact host matches the organization.
+ * A similar name in the title is rejected before a model sees it.
+ */
+export function evidenceMatchesOrganization(
+  organizationName: string,
+  title: string,
+  url: string,
+): boolean {
+  if (isUnsafeFetchUrl(url) || isRejectedDirectoryHost(url)) return false;
+  const labels = title
+    .split(/\s+[|–—-]\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (labels.some((label) => namesReferToSameOrg(organizationName, label))) return true;
+  if (labels.some((label) => titleContradicts(organizationName, label))) return false;
+  return scoreOrgNameMatch(organizationName, hostLabel(url)).tier === "exact";
+}
+
+/** Social profile URL or title must name this organization, not a lookalike. */
+export function socialProfileMatchesOrg(
+  organizationName: string,
+  url: string,
+  title = "",
+): boolean {
+  if (isUnsafeFetchUrl(url)) return false;
+  if (title && !isGenericTitle(title)) {
+    const titled = scoreOrgNameMatch(organizationName, title.split(/\s+[|–—-]\s+/)[0] ?? title);
+    if (titled.tier === "reject") return false;
+    if (titled.tier === "exact" || titled.tier === "near") return true;
+  }
+  try {
+    const parts = new URL(url).pathname.split("/").filter(Boolean);
+    const skip = new Set([
+      "p",
+      "posts",
+      "reel",
+      "reels",
+      "watch",
+      "channel",
+      "c",
+      "user",
+      "in",
+      "company",
+      "school",
+      "showcase",
+      "share",
+    ]);
+    const seg = [...parts].reverse().find((part) => !skip.has(part.toLowerCase())) ?? "";
+    const slug = decodeURIComponent(seg).replace(/^@/, "").replace(/[-_.]+/g, " ");
+    if (!slug) return false;
+    return namesReferToSameOrg(organizationName, slug);
+  } catch {
+    return false;
+  }
+}
+
+export type TrustedIrsIdentity = {
+  organizationName: string;
+  ein: string | null;
+  website: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+};
+
+/**
+ * Copy verified contact fields into empty slots. Never replace the IRS name or EIN.
+ * Rejected lookalikes leave the IRS record unchanged.
+ */
+export function mergeKeepingTrustedIrs<T extends TrustedIrsIdentity>(
+  irs: T,
+  candidate: {
+    organizationName: string;
+    ein?: string | null;
+    website?: string | null;
+    contactEmail?: string | null;
+    contactPhone?: string | null;
+    identityTier: IdentityMatchTier;
+  },
+): T {
+  if (candidate.identityTier !== "exact" && candidate.identityTier !== "near") return irs;
+  const irsEin = (irs.ein ?? "").replace(/\D/g, "");
+  const candidateEin = (candidate.ein ?? "").replace(/\D/g, "");
+  if (irsEin && candidateEin && irsEin !== candidateEin) return irs;
+  return {
+    ...irs,
+    organizationName: irs.organizationName,
+    ein: irs.ein,
+    website: irs.website?.trim() || candidate.website?.trim() || null,
+    contactEmail: irs.contactEmail?.trim() || candidate.contactEmail?.trim() || null,
+    contactPhone: irs.contactPhone?.trim() || candidate.contactPhone?.trim() || null,
+  };
+}
+
 /**
  * Verify a candidate website belongs to the given organization name.
  * Fetches the homepage and checks identity signals against the exact org name.
@@ -362,12 +663,12 @@ export async function verifyWebsiteBelongsToOrg(params: {
     };
   }
 
-  if (isRejectedDirectoryHost(website)) {
+  if (isUnsafeFetchUrl(website) || isRejectedDirectoryHost(website)) {
     return {
       ok: false,
       website: null,
       confidence: "low",
-      reason: "directory_or_social_host",
+      reason: isUnsafeFetchUrl(website) ? "unsafe_url" : "directory_or_social_host",
       pageTitle: null,
       pageDescription: null,
     };
@@ -389,73 +690,27 @@ export async function verifyWebsiteBelongsToOrg(params: {
   }
 
   const signals = extractPageIdentitySignals(html);
-  const haystacks = [
-    signals.siteName,
-    signals.title,
-    signals.description,
-    signals.textSample.slice(0, 1500),
-  ].filter(Boolean);
-
-  let best: { tier: IdentityMatchTier; score: number } = {
-    tier: "reject",
-    score: 0,
-  };
-  for (const hay of haystacks) {
-    const m = scoreOrgNameMatch(organizationName, hay);
-    if (m.score > best.score) best = m;
-  }
-
-  // Host slug soft signal (headstrong.org vs "Headstrong Foundation").
-  const host = hostOf(website).replace(/\.[a-z.]+$/i, "").replace(/[^a-z0-9]/g, "");
-  const nameCompact = normalizeOrgName(organizationName).replace(/\s+/g, "");
-  if (
-    host.length >= 5 &&
-    nameCompact.length >= 5 &&
-    (host === nameCompact ||
-      nameCompact.includes(host) ||
-      host.includes(nameCompact.slice(0, Math.min(12, nameCompact.length))))
-  ) {
-    if (best.score < 0.8) {
-      best = { tier: "near", score: Math.max(best.score, 0.82) };
-    }
-  }
-
-  const locationHint = [params.city?.trim(), params.state?.trim()]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  const textLower = haystacks.join(" ").toLowerCase();
-  if (locationHint && textLower.includes(locationHint.toLowerCase()) && best.score >= 0.5) {
-    best = { tier: best.tier === "reject" ? "partial" : best.tier, score: Math.min(1, best.score + 0.05) };
-  }
-
-  if (best.tier === "exact" || best.tier === "near") {
+  const decision = decideWebsiteIdentity({
+    organizationName,
+    website,
+    signals,
+  });
+  if (!decision.ok) {
     return {
-      ok: true,
-      website,
-      confidence: best.tier === "exact" ? "high" : "medium",
-      reason: `identity_${best.tier}`,
-      pageTitle: signals.title || null,
-      pageDescription: signals.description || null,
-    };
-  }
-
-  if (best.tier === "partial" && best.score >= 0.55) {
-    return {
-      ok: true,
-      website,
+      ok: false,
+      website: null,
       confidence: "low",
-      reason: "identity_partial",
+      reason: decision.reason,
       pageTitle: signals.title || null,
       pageDescription: signals.description || null,
     };
   }
 
   return {
-    ok: false,
-    website: null,
-    confidence: "low",
-    reason: `identity_${best.tier}`,
+    ok: true,
+    website,
+    confidence: decision.confidence,
+    reason: decision.reason,
     pageTitle: signals.title || null,
     pageDescription: signals.description || null,
   };

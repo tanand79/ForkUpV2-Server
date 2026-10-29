@@ -69,6 +69,8 @@
     "db:campaign-partner-join-requests:production": "tsx src/legacy/db/run-campaign-partner-join-requests-production.ts",
     "db:venue-cover-url": "tsx src/legacy/db/migrate-venue-cover-url.ts",
     "db:venue-discount-hours": "tsx src/legacy/db/migrate-venue-discount-hours.ts",
+    "db:business-mission": "tsx src/legacy/db/migrate-business-mission.ts",
+    "db:business-mission:production": "tsx src/legacy/db/run-business-mission-production.ts",
     "db:venue-discount-hours:production": "tsx src/legacy/db/run-venue-discount-hours-production.ts",
     "db:nonprofit-gallery": "tsx src/legacy/db/migrate-nonprofit-gallery.ts",
     "db:nonprofit-gallery:production": "tsx src/legacy/db/run-nonprofit-gallery-production.ts",

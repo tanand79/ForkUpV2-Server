@@ -1,7 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEPRECATED_BEDROCK_MODELS = exports.DEFAULT_BEDROCK_MODEL_ID = exports.BEDROCK_MODEL_CATALOG = void 0;
+exports.BEDROCK_INVOKE_FALLBACK_MODEL_ID = exports.DEPRECATED_BEDROCK_MODELS = exports.DEFAULT_BEDROCK_MODEL_ID = exports.BEDROCK_MODEL_CATALOG = void 0;
 exports.isAllowedBedrockModel = isAllowedBedrockModel;
+exports.bedrockAnthropicAccessBlocked = bedrockAnthropicAccessBlocked;
+exports.toBedrockInvokeModelId = toBedrockInvokeModelId;
 exports.migrateBedrockModelId = migrateBedrockModelId;
 exports.BEDROCK_MODEL_CATALOG = [
     {
@@ -69,6 +71,19 @@ exports.DEPRECATED_BEDROCK_MODELS = {
 function isAllowedBedrockModel(id) {
     const trimmed = id.trim();
     return exports.BEDROCK_MODEL_CATALOG.some((m) => m.id === trimmed);
+}
+exports.BEDROCK_INVOKE_FALLBACK_MODEL_ID = "amazon.nova-lite-v1:0";
+function bedrockAnthropicAccessBlocked(err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    return /use case details have not been submitted|on-demand throughput isn/i.test(message);
+}
+function toBedrockInvokeModelId(catalogOrInvokeId) {
+    const id = catalogOrInvokeId.trim();
+    if (!id.startsWith("anthropic."))
+        return id;
+    if (/^(us|eu|global|jp|apac|au)\./.test(id))
+        return id;
+    return `us.${id}`;
 }
 function migrateBedrockModelId(stored) {
     const trimmed = String(stored ?? "").trim();

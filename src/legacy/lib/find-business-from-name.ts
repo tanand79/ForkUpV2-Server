@@ -32,6 +32,11 @@ import { extractVenueCopyFromPage, type VenuePageCopy } from "./venue-page-extra
 import { normalizeJoinDoorType, type JoinDoorType } from "./join-door-type";
 import { searchNamedBusinessNear } from "./geo-distance";
 import { persistBusinessPublicLinks, persistBusinessGalleryUrls, replaceBusinessGalleryUrls, persistVenueDiscountHours, persistPrimaryBusinessLocationDetails, normalizeVenueDiscountHours, venueDiscountHoursHaveOpenDay } from "./persist-business-public-links";
+import {
+  nonprofitWebResearchConfigured,
+  researchBusinessProfile,
+} from "./nonprofit-web-research";
+import { googlePlacesConfigured } from "./google-places-client";
 import { pool } from "../db/pool";
 import { resolveStoredImageUrl } from "./s3";
 
@@ -47,6 +52,8 @@ export type FindBusinessFromNameResult = {
   website: string;
   businessType: string;
   about: string;
+  /** Evidence-only Mission from public site; empty when not published. */
+  mission: string;
   contactEmail: string;
   phone: string;
   city: string;
@@ -87,13 +94,6 @@ function normalizeWebsite(raw: string): string {
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
-function suggestHostName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 40);
-}
-
 function cleanNearZip(raw: unknown): string {
   if (typeof raw !== "string") return "";
   return raw.replace(/\D/g, "").slice(0, 5);
@@ -130,6 +130,7 @@ async function loadHydratedBusinessFromDb(input: {
       business_name: string;
       business_type: string | null;
       description: string | null;
+      mission: string | null;
       website: string | null;
       facebook_url: string | null;
       instagram_url: string | null;
@@ -152,6 +153,7 @@ async function loadHydratedBusinessFromDb(input: {
          b.business_name,
          b.business_type,
          b.description,
+         b.mission,
          b.website,
          b.facebook_url,
          b.instagram_url,
@@ -187,6 +189,7 @@ async function loadHydratedBusinessFromDb(input: {
     if (!website && imageUrls.length === 0) return null;
 
     const about = row.description?.trim() || "";
+    const mission = row.mission?.trim() || "";
     const hoursResolved = row.venue_discount_hours != null;
     // Incomplete → let AI scrape fill DB (hours column NULL means never resolved).
     if (!about || !hoursResolved) return null;
@@ -210,6 +213,7 @@ async function loadHydratedBusinessFromDb(input: {
         row.business_type?.trim() ||
         (door === "local" ? "Local Business" : "Restaurant"),
       about,
+      mission,
       contactEmail,
       phone,
       city,
@@ -310,15 +314,61 @@ export async function findBusinessFromName(input: {
 
   let website = knownWebsite;
   let about = "";
+  let mission = "";
   let contactEmail = "";
   let phone = "";
-  let city = "";
-  let state = "";
+  let city = nearCity;
+  let state = nearState;
   let aiAddress = "";
-  let aiZip = "";
+  let aiZip = nearZip;
   let businessType = joinDoorType === "local" ? "Local Business" : "Restaurant";
+  let researchImageUrls: string[] = [];
+  let researchProvider = "";
 
-  if (!website && aiProviderName() !== "none") {
+  // Evidence path: Google Places (optional) + Tavily/Bedrock — never invent Mission.
+  if (
+    !website &&
+    (nonprofitWebResearchConfigured() || googlePlacesConfigured())
+  ) {
+    try {
+      const researched = await researchBusinessProfile({
+        businessName,
+        city: nearCity || null,
+        state: nearState || null,
+        zip: nearZip || null,
+        signal: AbortSignal.timeout(95_000),
+      });
+      if (researched.status === "found") {
+        if (researched.website) {
+          website = normalizeWebsite(researched.website);
+        }
+        if (researched.about.trim()) about = researched.about.trim();
+        if (researched.mission.trim()) mission = researched.mission.trim();
+        if (researched.contactEmail) contactEmail = researched.contactEmail;
+        if (researched.contactPhone) phone = researched.contactPhone;
+        if (researched.address.trim()) aiAddress = researched.address.trim();
+        if (researched.location.trim() && !city) {
+          const parts = researched.location.split(",").map((p) => p.trim());
+          if (parts[0] && isEmptyLocationValue(city)) city = parts[0];
+          if (parts[1] && isEmptyLocationValue(state)) {
+            state = parts[1].slice(0, 2).toUpperCase();
+          }
+        }
+        researchImageUrls = Array.isArray(researched.imageUrls)
+          ? researched.imageUrls.filter(Boolean)
+          : [];
+        researchProvider = researched.provider || "tavily_bedrock";
+      }
+    } catch (err) {
+      console.error(
+        "findBusinessFromName research failed:",
+        err instanceof Error ? err.message.slice(0, 200) : err,
+      );
+    }
+  }
+
+  // Legacy memory guess only when live research is unavailable — never invent a host.
+  if (!website && aiProviderName() !== "none" && !nonprofitWebResearchConfigured()) {
     const nearHint =
       nearZip.length === 5
         ? `Near US ZIP ${nearZip}. Return the specific store location closest to that ZIP (street address, city, state, zip) — not corporate HQ.`
@@ -328,9 +378,9 @@ export async function findBusinessFromName(input: {
     const system = [
       `You help ForkUp find a public ${doorLabel} website from a business name.`,
       "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state, address, zip.",
-      "website must be the official public homepage URL when reasonably known; otherwise guess the most likely official site.",
+      "website must be the official public homepage URL when reasonably known; otherwise leave website empty.",
       nearHint,
-      "Never invent private emails or phones. Leave unknown fields as empty strings.",
+      "Never invent private emails, phones, or Mission/About text. Leave unknown fields as empty strings.",
       "Do not use placeholder phrases like 'Not provided on the website'.",
     ].join("\n");
     const content = await aiChat({
@@ -347,22 +397,17 @@ export async function findBusinessFromName(input: {
         return typeof v === "string" ? v.trim() : "";
       };
       website = normalizeWebsite(str("website"));
-      about = str("about");
-      contactEmail = str("contactEmail");
-      phone = str("phone");
-      city = isEmptyLocationValue(str("city")) ? "" : str("city");
-      state = isEmptyLocationValue(str("state")) ? "" : str("state");
+      if (!about) about = str("about");
+      contactEmail = str("contactEmail") || contactEmail;
+      phone = str("phone") || phone;
+      city = isEmptyLocationValue(str("city")) ? city : str("city");
+      state = isEmptyLocationValue(str("state")) ? state : str("state");
       businessType = str("businessType") || businessType;
-      aiAddress = isEmptyLocationValue(str("address")) ? "" : str("address");
-      aiZip = cleanNearZip(str("zip"));
+      aiAddress = isEmptyLocationValue(str("address")) ? aiAddress : str("address");
+      aiZip = cleanNearZip(str("zip")) || aiZip;
     } catch {
-      /* scrape may still help if we can guess a host */
+      /* scrape may still help when a known website was supplied */
     }
-  }
-
-  if (!website) {
-    const hostGuess = suggestHostName(businessName);
-    if (hostGuess) website = `https://www.${hostGuess}.com`;
   }
 
   const emptyHints = {
@@ -420,7 +465,16 @@ export async function findBusinessFromName(input: {
   }
 
   const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
-    website ? suggestSocialImages({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
+    website
+      ? suggestSocialImages({
+          websiteUrl: website,
+          facebookUrl: social.facebookUrl || undefined,
+          instagramHandle: social.instagramUrl || undefined,
+          linkedinUrl: social.linkedinUrl || undefined,
+          youtubeUrl: social.youtubeUrl || undefined,
+          limit: 10,
+        })
+      : Promise.resolve([]),
     website
       ? scrapeBusinessVenueImages({
           websiteUrl: website,
@@ -450,6 +504,7 @@ export async function findBusinessFromName(input: {
       phone: social.phone || phone || null,
       venueEmail: social.email || contactEmail || null,
       description: about || null,
+      mission: mission || null,
     });
     // Re-scrape: only overwrite durable hours when the fresh scrape found open days.
     // Empty scrape must not wipe user-edited / previously saved giveback hours.
@@ -491,7 +546,11 @@ export async function findBusinessFromName(input: {
               !looksLikeLogoUrl(u) &&
               /\.(jpe?g|webp)(\?|$)/i.test(u),
           );
-  const mergedImages = [...venuePhotos, ...suggestionUrls].filter(
+  const mergedImages = [
+    ...venuePhotos,
+    ...researchImageUrls,
+    ...suggestionUrls,
+  ].filter(
     (u) => u && !looksLikeDecorativeAssetUrl(u) && !looksLikeLogoUrl(u),
   );
   const imageUrls = [...new Set(mergedImages)];
@@ -546,6 +605,7 @@ export async function findBusinessFromName(input: {
     website,
     businessType,
     about,
+    mission,
     contactEmail,
     phone,
     city,
@@ -568,6 +628,8 @@ export async function findBusinessFromName(input: {
     locationSourceUrl: hints.sourceUrl,
     joinDoorType,
     confirmationStatus: "Find Draft",
-    provider: aiProviderName() === "none" ? "website_scrape" : aiProviderName(),
+    provider:
+      researchProvider ||
+      (aiProviderName() === "none" ? "website_scrape" : aiProviderName()),
   };
 }

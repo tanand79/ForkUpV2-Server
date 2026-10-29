@@ -85,6 +85,27 @@ export function isAllowedBedrockModel(id: string): boolean {
   return BEDROCK_MODEL_CATALOG.some((m) => m.id === trimmed);
 }
 
+/**
+ * Newer Claude models reject the bare catalog id ("on-demand throughput isn't
+ * supported"). Converse must use the US geo inference profile, e.g.
+ * us.anthropic.claude-sonnet-4-6. Nova ids stay unchanged. Stored settings
+ * keep the catalog id so the picker still matches.
+ */
+/** Used only when AWS rejects the selected Claude inference profile. */
+export const BEDROCK_INVOKE_FALLBACK_MODEL_ID = "amazon.nova-lite-v1:0";
+
+export function bedrockAnthropicAccessBlocked(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return /use case details have not been submitted|on-demand throughput isn/i.test(message);
+}
+
+export function toBedrockInvokeModelId(catalogOrInvokeId: string): string {
+  const id = catalogOrInvokeId.trim();
+  if (!id.startsWith("anthropic.")) return id;
+  if (/^(us|eu|global|jp|apac|au)\./.test(id)) return id;
+  return `us.${id}`;
+}
+
 export function migrateBedrockModelId(stored: string | null | undefined): string {
   const trimmed = String(stored ?? "").trim();
   if (!trimmed) return DEFAULT_BEDROCK_MODEL_ID;

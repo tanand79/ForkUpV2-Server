@@ -23,7 +23,14 @@ import { aiChat, aiProviderName, parseAiJson } from "./ai-chat";
 import { guessNonprofitWebsite } from "./guess-nonprofit-website";
 import { guessNonprofitSocialLinks } from "./guess-nonprofit-social";
 import { findKnownOrganizationByName, findKnownOrganizationProfile } from "./known-organization-profiles";
-import { verifyWebsiteBelongsToOrg } from "./verify-nonprofit-identity";
+import {
+  isRejectedDirectoryHost,
+  verifyWebsiteBelongsToOrg,
+} from "./verify-nonprofit-identity";
+import {
+  nonprofitWebResearchConfigured,
+  researchNonprofitProfile,
+} from "./nonprofit-web-research";
 import {
   normalizeFacebookUrl,
   normalizeInstagramUrl,
@@ -349,6 +356,11 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
   causeCategory: string | null;
   city: string | null;
   state: string | null;
+  /** Additive: evidence-based about / vision / address / photos (Tavily research). */
+  aboutNarrative?: string | null;
+  vision?: string | null;
+  streetAddress?: string | null;
+  imageUrls?: string[];
 }> {
   const organizationName = trimStr(input.organizationName);
   let nonprofitId =
@@ -407,6 +419,68 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     }
   }
 
+  let aboutNarrative: string | null = null;
+  let vision: string | null = null;
+  let streetAddress: string | null = null;
+  let imageUrls: string[] = [];
+  let websiteFromResearch = false;
+
+  // One evidence pass (forkupnpo research) instead of a memory-only website guess.
+  if (nonprofitWebResearchConfigured()) {
+    try {
+      const researched = await researchNonprofitProfile({
+        organizationName,
+        ein,
+        city,
+        state,
+        signal: AbortSignal.timeout(90_000),
+      });
+      if (researched.status === "found") {
+        if (researched.website) {
+          const researchedSite = normalizeWebsiteUrl(researched.website);
+          if (researchedSite && !isRejectedDirectoryHost(researchedSite)) {
+            website = researchedSite;
+            websiteFromResearch = true;
+          }
+        }
+        if (!facebookUrl && researched.facebookUrl) {
+          facebookUrl = normalizeFacebookUrl(researched.facebookUrl);
+        }
+        if (!instagramRaw && researched.instagramUrl) {
+          instagramRaw = researched.instagramUrl;
+        }
+        if (!linkedinUrl && researched.linkedinUrl) {
+          linkedinUrl = researched.linkedinUrl;
+        }
+        if (!youtubeUrl && researched.youtubeUrl) {
+          youtubeUrl = normalizeYouTubeUrl(researched.youtubeUrl) || researched.youtubeUrl;
+        }
+        if (!phone && researched.contactPhone) phone = researched.contactPhone;
+        if (!email && researched.contactEmail) email = researched.contactEmail;
+        if (researched.about.trim()) aboutNarrative = researched.about.trim();
+        if (researched.mission.trim()) mission = researched.mission.trim();
+        else if (!mission && researched.about.trim()) mission = researched.about.trim();
+        vision = researched.vision.trim() || null;
+        const publishedAddress = researched.address
+          .split(/\n+/)
+          .map((line) => line.trim())
+          .find(Boolean);
+        streetAddress =
+          (publishedAddress
+            ? publishedAddress.replace(/^[^:]{0,40}:\s*/, "")
+            : "") ||
+          researched.location ||
+          null;
+        imageUrls = researched.imageUrls;
+      }
+    } catch (err) {
+      console.error(
+        "resolveAnalysisSources web research failed:",
+        err instanceof Error ? err.message.slice(0, 200) : err,
+      );
+    }
+  }
+
   if (!website) {
     const guessed = await guessNonprofitWebsite({
       organizationName,
@@ -427,7 +501,11 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     });
     if (verified.ok && verified.website) {
       website = normalizeWebsiteUrl(verified.website);
-    } else if (verified.reason !== "unreachable") {
+    } else if (
+      verified.reason === "identity_reject" ||
+      verified.reason === "directory_or_social_host" ||
+      verified.reason === "unsafe_url"
+    ) {
       website = null;
     }
   }
@@ -454,8 +532,11 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     if (!email && discovered.email) email = discovered.email;
   }
 
-  // No website (or site had no social links): AI-guess public profiles, verify HTTP.
-  if (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl) {
+  // Research already searched official social pages. Skip a second memory guess.
+  if (
+    !websiteFromResearch &&
+    (!facebookUrl || !instagramRaw || !linkedinUrl || !youtubeUrl)
+  ) {
     const guessedSocial = await guessNonprofitSocialLinks({
       organizationName,
       ein,
@@ -476,20 +557,12 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     }
   }
 
-  // About / mission from public OG / meta when still empty.
-  if (website && !mission) {
+  // About from public OG / meta when research did not supply About or Mission.
+  // Do not invent a Mission from a page title/description.
+  if (website && !mission && !aboutNarrative) {
     const pageMeta = await extractOrgPageMeta(website);
     if (pageMeta?.description?.trim()) {
-      mission = pageMeta.description.trim();
-    } else if (pageMeta?.title?.trim()) {
-      const title = pageMeta.title
-        .replace(/&#\d+;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (title && !/ymca of the roses/i.test(title)) {
-        mission = title;
-      }
+      aboutNarrative = pageMeta.description.trim();
     }
   }
 
@@ -513,6 +586,10 @@ export async function resolveAnalysisSources(input: AnalyzeOrgInput): Promise<{
     causeCategory,
     city,
     state,
+    aboutNarrative,
+    vision,
+    streetAddress,
+    imageUrls,
   };
 }
 
@@ -794,15 +871,33 @@ export async function runOrganizationAiCampaignFlow(
       }),
     ]);
 
-    const mission = sources.mission || pageMeta?.description || null;
+    const aboutText =
+      sources.aboutNarrative?.trim() || pageMeta?.description?.trim() || null;
+    const mission = sources.mission?.trim() || null;
+    const ideaContext = mission || aboutText;
+    const researchImageUrls = (sources.imageUrls ?? []).filter(
+      (u): u is string => typeof u === "string" && u.trim().length > 0,
+    );
+    const mergedImageList = [
+      ...images,
+      ...researchImageUrls.map((url) => ({
+        url,
+        source: "research" as const,
+        sourceUrl: sources.website,
+      })),
+    ].filter(
+      (img, index, all) =>
+        Boolean(img.url) &&
+        all.findIndex((other) => other.url === img.url) === index,
+    );
     const ai = await generateCampaignIdeasFromAnalysis({
       organizationName: sources.organizationName,
-      mission,
+      mission: ideaContext,
       causeCategory: sources.causeCategory,
       city: sources.city,
       state: sources.state,
       pageMeta,
-      imageCount: images.length,
+      imageCount: mergedImageList.length,
     });
 
     const analysis: AnalysisPayload = {
@@ -813,12 +908,12 @@ export async function runOrganizationAiCampaignFlow(
       instagramUrl: sources.instagramUrl,
       linkedinUrl: sources.linkedinUrl,
       youtubeUrl: sources.youtubeUrl,
-      mission,
+      mission: mission || aboutText,
       causeCategory: sources.causeCategory,
       city: sources.city,
       state: sources.state,
       pageMeta,
-      images,
+      images: mergedImageList,
       themes: ai.themes,
       summary: ai.summary,
       provider: ai.provider,
@@ -880,10 +975,11 @@ export async function runOrganizationAiCampaignFlow(
           youtubeUrl: sources.youtubeUrl,
           city: sources.city,
           state: sources.state,
-          about: mission,
+          about: aboutText,
           mission,
+          phone: sources.phone,
         });
-        const imageUrls = images
+        const imageUrls = mergedImageList
           .map((img) => (typeof img.url === "string" ? img.url.trim() : ""))
           .filter(Boolean);
         if (imageUrls.length > 0) {

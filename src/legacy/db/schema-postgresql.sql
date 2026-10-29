@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS businesses (
   business_type VARCHAR(100),
   logo_url VARCHAR(512),
   description TEXT,
+  -- Additive: evidence-only Mission from public site (null when absent).
+  mission TEXT NULL,
   website VARCHAR(512),
   default_giveback_percentage DECIMAL(5,2),
   contact_name VARCHAR(255),

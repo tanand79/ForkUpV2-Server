@@ -2,7 +2,10 @@ import {
   BedrockRuntimeClient,
   ConverseCommand,
 } from "@aws-sdk/client-bedrock-runtime";
-import { DEFAULT_BEDROCK_MODEL_ID } from "./bedrock-model-catalog";
+import {
+  DEFAULT_BEDROCK_MODEL_ID,
+  toBedrockInvokeModelId,
+} from "./bedrock-model-catalog";
 import { resolveUserBedrockModelId } from "./user-ai-settings";
 
 /**
@@ -114,7 +117,9 @@ async function chatViaBedrock(options: AiChatOptions): Promise<string> {
     : options.system;
 
   const command = new ConverseCommand({
-    modelId: await resolveBedrockModelId(options.modelId, options.userId),
+    modelId: toBedrockInvokeModelId(
+      await resolveBedrockModelId(options.modelId, options.userId),
+    ),
     system: [{ text: systemText }],
     messages: [
       {
@@ -202,7 +207,9 @@ async function chatViaBedrockMultimodal(
   ];
 
   const command = new ConverseCommand({
-    modelId: await resolveReceiptBedrockModelId(options.modelId, options.userId),
+    modelId: toBedrockInvokeModelId(
+      await resolveReceiptBedrockModelId(options.modelId, options.userId),
+    ),
     system: [{ text: systemText }],
     messages: [{ role: "user", content }],
     inferenceConfig: {

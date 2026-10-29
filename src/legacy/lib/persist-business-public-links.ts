@@ -22,6 +22,8 @@ export type BusinessPublicLinks = {
   venueEmail?: string | null;
   /** Maps to businesses.description (About). */
   description?: string | null;
+  /** Evidence-only Mission → businesses.mission (null/empty when absent). */
+  mission?: string | null;
   /** Giveback weekday labels — maps to venue_discount_hours JSONB. */
   discountHours?: Record<string, string> | null;
   /** Free-text eligible window — maps to venue_eligible_window. */
@@ -239,6 +241,7 @@ export async function persistBusinessPublicLinks(
   const phone = trimOrNull(links.phone);
   const venueEmail = trimOrNull(links.venueEmail);
   const description = trimOrNull(links.description);
+  const mission = trimOrNull(links.mission);
   const hasHoursInput =
     links.discountHours != null ||
     Object.prototype.hasOwnProperty.call(links, "eligibleWindow");
@@ -252,6 +255,7 @@ export async function persistBusinessPublicLinks(
     !phone &&
     !venueEmail &&
     !description &&
+    !mission &&
     !hasHoursInput
   ) {
     return;
@@ -268,6 +272,7 @@ export async function persistBusinessPublicLinks(
          contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
          venue_email = COALESCE(NULLIF(TRIM(venue_email), ''), $8),
          description = COALESCE(NULLIF(TRIM(description), ''), $9),
+         mission = COALESCE(NULLIF(TRIM(mission), ''), $10),
          updated_at = NOW()
        WHERE id = $1`,
       [
@@ -280,12 +285,13 @@ export async function persistBusinessPublicLinks(
         phone,
         venueEmail,
         description,
+        mission,
       ],
     );
   } catch (err) {
-    // venue_email may not exist until migration — retry without it.
+    // venue_email / mission may not exist until migration — retry without them.
     const message = err instanceof Error ? err.message : String(err);
-    if (!/venue_email/i.test(message)) {
+    if (!/venue_email|mission/i.test(message)) {
       console.error("persistBusinessPublicLinks failed:", err);
       return;
     }

@@ -18,7 +18,9 @@ import {
 } from "./organization-ai-campaign-flow";
 import {
   fillNonprofitPublicProfileNullOnly,
+  mergeNonprofitGalleryUrls,
   parseNonprofitGalleryUrls,
+  persistNonprofitCoverUrl,
 } from "./persist-nonprofit-public-links";
 
 export type NonprofitOrgProfilePayload = {
@@ -125,7 +127,11 @@ function needsHydrate(payload: NonprofitOrgProfilePayload): boolean {
       payload.website,
   );
   const hasLocation = Boolean(payload.city || payload.state);
-  return !hasSocial || !hasLocation;
+  const hasAboutOrMission = Boolean(
+    payload.about?.trim() || payload.mission?.trim(),
+  );
+  const hasGallery = payload.galleryImageUrls.length > 0;
+  return !hasSocial || !hasLocation || !hasAboutOrMission || !hasGallery;
 }
 
 async function loadLatestAiAnalysis(
@@ -253,7 +259,11 @@ export async function loadAndHydrateNonprofitOrgProfile(
       : null;
 
     const about =
-      sources.mission || pageMeta?.description || payload.about || null;
+      sources.aboutNarrative?.trim() ||
+      pageMeta?.description ||
+      payload.about ||
+      null;
+    const mission = sources.mission?.trim() || null;
 
     await fillNonprofitPublicProfileNullOnly(nonprofitId, {
       website: sources.website,
@@ -264,8 +274,23 @@ export async function loadAndHydrateNonprofitOrgProfile(
       city: sources.city,
       state: sources.state,
       about,
-      mission: sources.mission || about,
+      mission,
+      phone: sources.phone,
     });
+
+    const researchedImages = (sources.imageUrls ?? [])
+      .filter((u): u is string => typeof u === "string" && u.trim().length > 0)
+      .map((u) => u.trim())
+      .slice(0, 12);
+    if (researchedImages.length > 0) {
+      const merged = await mergeNonprofitGalleryUrls(
+        nonprofitId,
+        researchedImages,
+      );
+      if (merged.length > 0 && !payload.coverUrl) {
+        await persistNonprofitCoverUrl(nonprofitId, merged[0]!);
+      }
+    }
   } catch (err) {
     console.error("nonprofit org profile live hydrate failed:", err);
   }

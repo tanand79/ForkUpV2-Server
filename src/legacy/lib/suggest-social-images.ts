@@ -22,7 +22,9 @@ export type SuggestedImageSource =
   | "website"
   | "facebook"
   | "instagram"
-  | "social_suggest";
+  | "social_suggest"
+  /** Additive: Tavily/Bedrock official-site research photos. */
+  | "research";
 
 export interface SuggestedImage {
   url: string;
@@ -391,7 +393,7 @@ export function extractImageUrlsFromHtml(html: string, pageUrl: string): string[
   return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
 
-async function fetchHtml(url: string): Promise<string | null> {
+async function fetchHtmlOnce(url: string, userAgent: string): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -400,7 +402,7 @@ async function fetchHtml(url: string): Promise<string | null> {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "User-Agent": BROWSER_UA,
+        "User-Agent": userAgent,
         Accept: "text/html,application/xhtml+xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
@@ -423,8 +425,30 @@ async function fetchHtml(url: string): Promise<string | null> {
   }
 }
 
+function looksLikeBotChallenge(html: string): boolean {
+  if (html.length > 20_000) return false;
+  return /just a moment|cf-browser-verification|attention required|enable javascript|captcha/i.test(
+    html,
+  );
+}
+
+async function fetchHtml(url: string): Promise<string | null> {
+  const first = await fetchHtmlOnce(url, BROWSER_UA);
+  if (first && !looksLikeBotChallenge(first)) return first;
+  const second = await fetchHtmlOnce(
+    url,
+    "Mozilla/5.0 (compatible; ForkUpBot/1.0; +https://forkup.org)",
+  );
+  return second && !looksLikeBotChallenge(second) ? second : first;
+}
+
 /** Confirm a candidate URL looks like a real image (skip HTML 404 pages). */
+function trustedSocialImageHost(url: string): boolean {
+  return /cdninstagram\.com|fbcdn\.net|scontent|ytimg\.com|ggpht\.com|licdn\.com/i.test(url);
+}
+
 async function isReachableImage(url: string): Promise<boolean> {
+  if (trustedSocialImageHost(url)) return true;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5_000);
   try {
@@ -519,6 +543,28 @@ export function normalizeTikTokUrl(url: string): string | null {
  * Purpose: Prefill Connect Social when the organizer did not type links.
  * Inputs: raw HTML string. Outputs: normalized social URLs (null when missing).
  */
+function unescapeEmbeddedUrls(html: string): string {
+  return html.replace(/\\u002F/gi, "/").replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
+}
+
+function socialCandidateRank(kind: "facebook" | "instagram" | "linkedin" | "youtube" | "tiktok", url: string): number {
+  if (kind === "facebook") {
+    return isFacebookUtilityLink(url) ? 0 : 2;
+  }
+  if (kind === "instagram") {
+    return /instagram\.com\/(p|reel|stories|explore)\b/i.test(url) ? 0 : 2;
+  }
+  if (kind === "linkedin") {
+    return /linkedin\.com\/(shareArticle|sharing)\b/i.test(url) ? 0 : 2;
+  }
+  if (kind === "youtube") {
+    if (/\/@|\/channel\/|\/c\/|\/user\//i.test(url)) return 3;
+    if (/\/watch\b|youtu\.be/i.test(url)) return 1;
+    return 2;
+  }
+  return url ? 2 : 0;
+}
+
 export function extractSocialLinksFromHtml(html: string): {
   facebookUrl: string | null;
   instagramUrl: string | null;
@@ -531,48 +577,54 @@ export function extractSocialLinksFromHtml(html: string): {
   let linkedinUrl: string | null = null;
   let youtubeUrl: string | null = null;
   let tiktokUrl: string | null = null;
+  let facebookRank = 0;
+  let instagramRank = 0;
+  let linkedinRank = 0;
+  let youtubeRank = 0;
+  let tiktokRank = 0;
 
+  const decoded = unescapeEmbeddedUrls(html);
   const candidates: string[] = [];
-  const hrefRe = /href=["']([^"']+)["']/gi;
+  const attrRe = /(?:href|data-href|data-url|data-link)=["']([^"']+)["']/gi;
   let m: RegExpExecArray | null;
-  while ((m = hrefRe.exec(html)) !== null) {
+  while ((m = attrRe.exec(decoded)) !== null) {
     if (m[1]) candidates.push(decodeHtmlEntities(m[1].trim()));
   }
-  // Catch bare social URLs that are not wrapped in href (JSON-LD / scripts).
   const bareRe =
-    /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
-  while ((m = bareRe.exec(html)) !== null) {
+    /(?:https?:)?\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
+  while ((m = bareRe.exec(decoded)) !== null) {
     if (m[0]) candidates.push(m[0].replace(/[),.;]+$/, ""));
   }
 
+  const consider = (
+    current: string | null,
+    currentRank: number,
+    next: string | null,
+    kind: "facebook" | "instagram" | "linkedin" | "youtube" | "tiktok",
+  ): { url: string | null; rank: number } => {
+    if (!next) return { url: current, rank: currentRank };
+    const rank = socialCandidateRank(kind, next);
+    if (rank <= 0 || rank <= currentRank) return { url: current, rank: currentRank };
+    return { url: next, rank };
+  };
+
   for (const raw of candidates) {
-    if (!facebookUrl) {
-      const fb = normalizeFacebookUrl(raw);
-      if (fb && !isFacebookUtilityLink(fb)) {
-        facebookUrl = fb;
-      }
-    }
-    if (!instagramUrl) {
-      const ig = normalizeInstagramUrl(raw);
-      if (ig && !/instagram\.com\/(p|reel|stories|explore)\b/i.test(ig)) {
-        instagramUrl = ig;
-      }
-    }
-    if (!linkedinUrl) {
-      const li = normalizeLinkedInUrl(raw);
-      if (li && !/linkedin\.com\/(shareArticle|sharing)\b/i.test(li)) {
-        linkedinUrl = li;
-      }
-    }
-    if (!youtubeUrl) {
-      const yt = normalizeYouTubeUrl(raw);
-      if (yt) youtubeUrl = yt;
-    }
-    if (!tiktokUrl) {
-      const tt = normalizeTikTokUrl(raw);
-      if (tt) tiktokUrl = tt;
-    }
-    if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl && tiktokUrl) break;
+    const prepared = raw.startsWith("//") ? `https:${raw}` : raw;
+    const fb = consider(facebookUrl, facebookRank, normalizeFacebookUrl(prepared), "facebook");
+    facebookUrl = fb.url;
+    facebookRank = fb.rank;
+    const ig = consider(instagramUrl, instagramRank, normalizeInstagramUrl(prepared), "instagram");
+    instagramUrl = ig.url;
+    instagramRank = ig.rank;
+    const li = consider(linkedinUrl, linkedinRank, normalizeLinkedInUrl(prepared), "linkedin");
+    linkedinUrl = li.url;
+    linkedinRank = li.rank;
+    const yt = consider(youtubeUrl, youtubeRank, normalizeYouTubeUrl(prepared), "youtube");
+    youtubeUrl = yt.url;
+    youtubeRank = yt.rank;
+    const tt = consider(tiktokUrl, tiktokRank, normalizeTikTokUrl(prepared), "tiktok");
+    tiktokUrl = tt.url;
+    tiktokRank = tt.rank;
   }
 
   return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl, tiktokUrl };
@@ -738,8 +790,10 @@ export async function discoverSocialLinksFromWebsite(websiteUrl: string): Promis
     if (!email && contact.email) email = contact.email;
   }
 
-  // Email/phone often live on /contact or nested /location/... pages (e.g. The Pear).
-  if (workingOrigin && (!phone || !email)) {
+  // Social icons and contact details are often only on About / Contact, even when
+  // the homepage already shows a phone number.
+  const missingSocial = !facebookUrl || !instagramUrl || !linkedinUrl || !youtubeUrl;
+  if (workingOrigin && (missingSocial || !phone || !email)) {
     const pathUrls = CONTACT_PATHS.flatMap((path) => [
       `${workingOrigin}${path}`,
       `${workingOrigin}${path}/`,
@@ -885,8 +939,8 @@ export async function suggestSocialImages(input: {
     if (facebook) await collectFromPage(facebook, "facebook", out, poolLimit);
   }
 
-  // Website fallback: no social URLs, or social pages blocked/empty images.
-  if (website && out.length === 0) {
+  // Social photos first. Website photos fill any slots social did not cover.
+  if (website && out.length < poolLimit) {
     for (const variant of websiteUrlVariants(website)) {
       if (out.length >= poolLimit) break;
       await collectFromPage(variant, "website", out, poolLimit);

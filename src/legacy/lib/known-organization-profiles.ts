@@ -9,6 +9,8 @@
  * Additive only — unknown domains still fall through to AI draft.
  */
 
+import { scoreOrgNameMatch } from "./verify-nonprofit-identity";
+
 export type KnownOrganizationProfile = {
   organizationName: string;
   missionStatement: string;
@@ -221,32 +223,6 @@ export function findKnownOrganizationProfile(
   return null;
 }
 
-/** Words too common to identify an organization alone (prevents Red Cross → Feeding America). */
-const WEAK_NAME_TOKENS = new Set([
-  "the",
-  "and",
-  "for",
-  "of",
-  "inc",
-  "llc",
-  "org",
-  "america",
-  "american",
-  "national",
-  "united",
-  "youth",
-  "community",
-  "foundation",
-  "association",
-  "society",
-  "club",
-  "team",
-  "group",
-  "school",
-  "center",
-  "centre",
-]);
-
 function normalizeNameQuery(raw: string): string {
   return raw
     .trim()
@@ -300,31 +276,9 @@ export function findKnownOrganizationByName(nameQuery: string): KnownOrganizatio
     }
   }
 
-  // Full name containment either direction (whole phrase, not a weak token)
+  // Exact organization name only. Prefix overlap ("head" → "headstrong") is not a match.
   for (const [domain, profile] of Object.entries(KNOWN_BY_DOMAIN)) {
-    const name = normalizeNameQuery(profile.organizationName);
-    if (!name) continue;
-    if (name === q || name.includes(q) || q.includes(name)) {
-      return { ...profile, website: `https://${domain}` };
-    }
-  }
-
-  // Strong multi-token overlap: require at least 2 distinctive tokens, or 1 long distinctive token
-  const queryTokens = q.split(/\s+/).filter((t) => t.length > 3 && !WEAK_NAME_TOKENS.has(t));
-  if (queryTokens.length === 0) return null;
-
-  for (const [domain, profile] of Object.entries(KNOWN_BY_DOMAIN)) {
-    const nameTokens = normalizeNameQuery(profile.organizationName)
-      .split(/\s+/)
-      .filter((t) => t.length > 3 && !WEAK_NAME_TOKENS.has(t));
-    if (nameTokens.length === 0) continue;
-    const hits = queryTokens.filter((t) =>
-      nameTokens.some((n) => n === t || n.startsWith(t) || t.startsWith(n)),
-    );
-    if (hits.length >= 2) {
-      return { ...profile, website: `https://${domain}` };
-    }
-    if (hits.length === 1 && hits[0]!.length >= 8) {
+    if (scoreOrgNameMatch(nameQuery, profile.organizationName).tier === "exact") {
       return { ...profile, website: `https://${domain}` };
     }
   }

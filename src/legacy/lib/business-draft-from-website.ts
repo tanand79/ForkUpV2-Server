@@ -105,7 +105,14 @@ export async function generateBusinessDraftFromWebsite(
     discoverSocialLinksFromWebsite(website),
   ]);
   const [imageSuggestions, venuePhotos] = await Promise.all([
-    suggestSocialImages({ websiteUrl: website, limit: 10 }),
+    suggestSocialImages({
+      websiteUrl: website,
+      facebookUrl: social.facebookUrl || undefined,
+      instagramHandle: social.instagramUrl || undefined,
+      linkedinUrl: social.linkedinUrl || undefined,
+      youtubeUrl: social.youtubeUrl || undefined,
+      limit: 10,
+    }),
     scrapeBusinessVenueImages({
       websiteUrl: website,
       reservationUrl: locationHints.reservationUrl,

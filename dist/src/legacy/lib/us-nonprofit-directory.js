@@ -4,6 +4,7 @@ exports.enrichUsNonprofitByEin = enrichUsNonprofitByEin;
 exports.suggestUsNonprofits = suggestUsNonprofits;
 const guess_nonprofit_website_1 = require("./guess-nonprofit-website");
 const guess_nonprofit_social_1 = require("./guess-nonprofit-social");
+const nonprofit_web_research_1 = require("./nonprofit-web-research");
 const suggest_social_images_1 = require("./suggest-social-images");
 const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
 const PROPUBLICA_SEARCH = "https://projects.propublica.org/nonprofits/api/v2/search.json";
@@ -217,6 +218,74 @@ async function attachVerifiedContactLayer(params) {
         confidence = "medium";
     if (verifiedWebsite && (facebookUrl || contactEmail || contactPhone)) {
         confidence = confidence === "low" ? "medium" : confidence;
+    }
+    const stillThin = !website && !facebookUrl && !instagramUrl;
+    if (stillThin && (0, nonprofit_web_research_1.nonprofitWebResearchConfigured)() && params.organizationName.trim()) {
+        try {
+            const researched = await (0, nonprofit_web_research_1.researchNonprofitProfile)({
+                organizationName: params.organizationName,
+                ein: params.ein,
+                city: params.city,
+                state: params.state,
+                signal: AbortSignal.timeout(90_000),
+            });
+            if (researched.status === "found" && researched.provider) {
+                const nameTier = (0, verify_nonprofit_identity_1.scoreOrgNameMatch)(params.organizationName, researched.name || params.organizationName);
+                if (nameTier.tier === "exact" || nameTier.tier === "near") {
+                    providers.push(researched.provider);
+                    let researchedWebsite = null;
+                    if (!website && researched.website) {
+                        const verified = await (0, verify_nonprofit_identity_1.verifyWebsiteBelongsToOrg)({
+                            organizationName: researched.name || params.organizationName,
+                            website: researched.website,
+                            city: params.city,
+                            state: params.state,
+                        });
+                        if (verified.ok && verified.website) {
+                            researchedWebsite = verified.website;
+                        }
+                    }
+                    const merged = (0, verify_nonprofit_identity_1.mergeKeepingTrustedIrs)({
+                        organizationName: params.organizationName,
+                        ein: params.ein,
+                        website,
+                        contactEmail,
+                        contactPhone,
+                    }, {
+                        organizationName: researched.name || params.organizationName,
+                        ein: params.ein,
+                        website: researchedWebsite,
+                        contactEmail: researched.contactEmail,
+                        contactPhone: researched.contactPhone,
+                        identityTier: nameTier.tier,
+                    });
+                    website = merged.website;
+                    contactEmail = merged.contactEmail;
+                    contactPhone = merged.contactPhone;
+                    if (researchedWebsite) {
+                        verifiedWebsite = true;
+                        confidence = nameTier.tier === "exact" ? "high" : "medium";
+                    }
+                    if (!mission && researched.mission)
+                        mission = researched.mission;
+                    else if (!mission && researched.about)
+                        mission = researched.about;
+                    if (!facebookUrl && researched.facebookUrl)
+                        facebookUrl = researched.facebookUrl;
+                    if (!instagramUrl && researched.instagramUrl) {
+                        instagramUrl = researched.instagramUrl;
+                    }
+                    if (!linkedinUrl && researched.linkedinUrl)
+                        linkedinUrl = researched.linkedinUrl;
+                    if (!youtubeUrl && researched.youtubeUrl)
+                        youtubeUrl = researched.youtubeUrl;
+                    if (website && confidence === "low")
+                        confidence = "medium";
+                }
+            }
+        }
+        catch {
+        }
     }
     return {
         website,
