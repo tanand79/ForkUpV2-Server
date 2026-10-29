@@ -9,6 +9,8 @@ const venue_page_extract_1 = require("./venue-page-extract");
 const join_door_type_1 = require("./join-door-type");
 const geo_distance_1 = require("./geo-distance");
 const persist_business_public_links_1 = require("./persist-business-public-links");
+const nonprofit_web_research_1 = require("./nonprofit-web-research");
+const google_places_client_1 = require("./google-places-client");
 const pool_1 = require("../db/pool");
 const s3_1 = require("./s3");
 function normalizeWebsite(raw) {
@@ -16,12 +18,6 @@ function normalizeWebsite(raw) {
     if (!trimmed)
         return "";
     return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-}
-function suggestHostName(name) {
-    return name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "")
-        .slice(0, 40);
 }
 function cleanNearZip(raw) {
     if (typeof raw !== "string")
@@ -50,6 +46,7 @@ async function loadHydratedBusinessFromDb(input) {
          b.business_name,
          b.business_type,
          b.description,
+         b.mission,
          b.website,
          b.facebook_url,
          b.instagram_url,
@@ -81,6 +78,7 @@ async function loadHydratedBusinessFromDb(input) {
         if (!website && imageUrls.length === 0)
             return null;
         const about = row.description?.trim() || "";
+        const mission = row.mission?.trim() || "";
         const hoursResolved = row.venue_discount_hours != null;
         if (!about || !hoursResolved)
             return null;
@@ -99,6 +97,7 @@ async function loadHydratedBusinessFromDb(input) {
             businessType: row.business_type?.trim() ||
                 (door === "local" ? "Local Business" : "Restaurant"),
             about,
+            mission,
             contactEmail,
             phone,
             city,
@@ -176,14 +175,59 @@ async function findBusinessFromName(input) {
     }
     let website = knownWebsite;
     let about = "";
+    let mission = "";
     let contactEmail = "";
     let phone = "";
-    let city = "";
-    let state = "";
+    let city = nearCity;
+    let state = nearState;
     let aiAddress = "";
-    let aiZip = "";
+    let aiZip = nearZip;
     let businessType = joinDoorType === "local" ? "Local Business" : "Restaurant";
-    if (!website && (0, ai_chat_1.aiProviderName)() !== "none") {
+    let researchImageUrls = [];
+    let researchProvider = "";
+    if (!website &&
+        ((0, nonprofit_web_research_1.nonprofitWebResearchConfigured)() || (0, google_places_client_1.googlePlacesConfigured)())) {
+        try {
+            const researched = await (0, nonprofit_web_research_1.researchBusinessProfile)({
+                businessName,
+                city: nearCity || null,
+                state: nearState || null,
+                zip: nearZip || null,
+                signal: AbortSignal.timeout(95_000),
+            });
+            if (researched.status === "found") {
+                if (researched.website) {
+                    website = normalizeWebsite(researched.website);
+                }
+                if (researched.about.trim())
+                    about = researched.about.trim();
+                if (researched.mission.trim())
+                    mission = researched.mission.trim();
+                if (researched.contactEmail)
+                    contactEmail = researched.contactEmail;
+                if (researched.contactPhone)
+                    phone = researched.contactPhone;
+                if (researched.address.trim())
+                    aiAddress = researched.address.trim();
+                if (researched.location.trim() && !city) {
+                    const parts = researched.location.split(",").map((p) => p.trim());
+                    if (parts[0] && (0, business_website_location_1.isEmptyLocationValue)(city))
+                        city = parts[0];
+                    if (parts[1] && (0, business_website_location_1.isEmptyLocationValue)(state)) {
+                        state = parts[1].slice(0, 2).toUpperCase();
+                    }
+                }
+                researchImageUrls = Array.isArray(researched.imageUrls)
+                    ? researched.imageUrls.filter(Boolean)
+                    : [];
+                researchProvider = researched.provider || "tavily_bedrock";
+            }
+        }
+        catch (err) {
+            console.error("findBusinessFromName research failed:", err instanceof Error ? err.message.slice(0, 200) : err);
+        }
+    }
+    if (!website && (0, ai_chat_1.aiProviderName)() !== "none" && !(0, nonprofit_web_research_1.nonprofitWebResearchConfigured)()) {
         const nearHint = nearZip.length === 5
             ? `Near US ZIP ${nearZip}. Return the specific store location closest to that ZIP (street address, city, state, zip) — not corporate HQ.`
             : nearCity || nearState
@@ -192,9 +236,9 @@ async function findBusinessFromName(input) {
         const system = [
             `You help ForkUp find a public ${doorLabel} website from a business name.`,
             "Return ONLY JSON with keys: website, businessName, businessType, about, contactEmail, phone, city, state, address, zip.",
-            "website must be the official public homepage URL when reasonably known; otherwise guess the most likely official site.",
+            "website must be the official public homepage URL when reasonably known; otherwise leave website empty.",
             nearHint,
-            "Never invent private emails or phones. Leave unknown fields as empty strings.",
+            "Never invent private emails, phones, or Mission/About text. Leave unknown fields as empty strings.",
             "Do not use placeholder phrases like 'Not provided on the website'.",
         ].join("\n");
         const content = await (0, ai_chat_1.aiChat)({
@@ -211,22 +255,18 @@ async function findBusinessFromName(input) {
                 return typeof v === "string" ? v.trim() : "";
             };
             website = normalizeWebsite(str("website"));
-            about = str("about");
-            contactEmail = str("contactEmail");
-            phone = str("phone");
-            city = (0, business_website_location_1.isEmptyLocationValue)(str("city")) ? "" : str("city");
-            state = (0, business_website_location_1.isEmptyLocationValue)(str("state")) ? "" : str("state");
+            if (!about)
+                about = str("about");
+            contactEmail = str("contactEmail") || contactEmail;
+            phone = str("phone") || phone;
+            city = (0, business_website_location_1.isEmptyLocationValue)(str("city")) ? city : str("city");
+            state = (0, business_website_location_1.isEmptyLocationValue)(str("state")) ? state : str("state");
             businessType = str("businessType") || businessType;
-            aiAddress = (0, business_website_location_1.isEmptyLocationValue)(str("address")) ? "" : str("address");
-            aiZip = cleanNearZip(str("zip"));
+            aiAddress = (0, business_website_location_1.isEmptyLocationValue)(str("address")) ? aiAddress : str("address");
+            aiZip = cleanNearZip(str("zip")) || aiZip;
         }
         catch {
         }
-    }
-    if (!website) {
-        const hostGuess = suggestHostName(businessName);
-        if (hostGuess)
-            website = `https://www.${hostGuess}.com`;
     }
     const emptyHints = {
         address: "",
@@ -282,7 +322,16 @@ async function findBusinessFromName(input) {
         }
     }
     const [imageSuggestions, venuePhotos, pageCopy] = await Promise.all([
-        website ? (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }) : Promise.resolve([]),
+        website
+            ? (0, suggest_social_images_1.suggestSocialImages)({
+                websiteUrl: website,
+                facebookUrl: social.facebookUrl || undefined,
+                instagramHandle: social.instagramUrl || undefined,
+                linkedinUrl: social.linkedinUrl || undefined,
+                youtubeUrl: social.youtubeUrl || undefined,
+                limit: 10,
+            })
+            : Promise.resolve([]),
         website
             ? (0, business_venue_images_1.scrapeBusinessVenueImages)({
                 websiteUrl: website,
@@ -315,6 +364,7 @@ async function findBusinessFromName(input) {
             phone: social.phone || phone || null,
             venueEmail: social.email || contactEmail || null,
             description: about || null,
+            mission: mission || null,
         });
         const scrapedHours = (0, persist_business_public_links_1.normalizeVenueDiscountHours)(pageCopy?.discountHours ?? null);
         await (0, persist_business_public_links_1.persistVenueDiscountHours)(businessId, scrapedHours, pageCopy?.eligibleWindow ?? "", {
@@ -338,7 +388,11 @@ async function findBusinessFromName(input) {
             !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) &&
             !(0, suggest_social_images_1.looksLikeLogoUrl)(u) &&
             /\.(jpe?g|webp)(\?|$)/i.test(u));
-    const mergedImages = [...venuePhotos, ...suggestionUrls].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) && !(0, suggest_social_images_1.looksLikeLogoUrl)(u));
+    const mergedImages = [
+        ...venuePhotos,
+        ...researchImageUrls,
+        ...suggestionUrls,
+    ].filter((u) => u && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u) && !(0, suggest_social_images_1.looksLikeLogoUrl)(u));
     const imageUrls = [...new Set(mergedImages)];
     const logoCandidate = imageUrls.find((u) => (0, suggest_social_images_1.looksLikeLogoUrl)(u)) ?? imageUrls[0] ?? null;
     let photoUrls = imageUrls.filter((u) => !(0, suggest_social_images_1.looksLikeLogoUrl)(u) && !(0, suggest_social_images_1.looksLikeDecorativeAssetUrl)(u));
@@ -379,6 +433,7 @@ async function findBusinessFromName(input) {
         website,
         businessType,
         about,
+        mission,
         contactEmail,
         phone,
         city,
@@ -401,7 +456,8 @@ async function findBusinessFromName(input) {
         locationSourceUrl: hints.sourceUrl,
         joinDoorType,
         confirmationStatus: "Find Draft",
-        provider: (0, ai_chat_1.aiProviderName)() === "none" ? "website_scrape" : (0, ai_chat_1.aiProviderName)(),
+        provider: researchProvider ||
+            ((0, ai_chat_1.aiProviderName)() === "none" ? "website_scrape" : (0, ai_chat_1.aiProviderName)()),
     };
 }
 //# sourceMappingURL=find-business-from-name.js.map

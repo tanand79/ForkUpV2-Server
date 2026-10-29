@@ -52,6 +52,8 @@
     "src/legacy/db/migrate-guest-fundraiser-invite.ts",
     "src/legacy/db/migrate-staff-product-email-split.ts",
     "src/legacy/db/migrate-business-paperwork.ts",
+    "src/legacy/db/migrate-business-mission.ts",
+    "src/legacy/db/run-business-mission-production.ts",
     "src/legacy/db/migrate-join-door-type.ts",
     "src/legacy/db/migrate-join-giveback-prefs.ts",
     "src/legacy/db/migrate-campaign-partner-join-requests.ts",

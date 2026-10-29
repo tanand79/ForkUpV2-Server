@@ -8,6 +8,7 @@ export type BusinessPublicLinks = {
     phone?: string | null;
     venueEmail?: string | null;
     description?: string | null;
+    mission?: string | null;
     discountHours?: Record<string, string> | null;
     eligibleWindow?: string | null;
 };

@@ -165,8 +165,11 @@ async function attachVerifiedContactLayer(params) {
                 mission = verified.pageDescription;
             }
         }
-        else if (verified.reason === "unreachable") {
-            providers.push("website_unverified_unreachable");
+        else if (verified.reason === "unreachable" ||
+            verified.reason === "identity_inconclusive") {
+            providers.push(verified.reason === "unreachable"
+                ? "website_unverified_unreachable"
+                : "website_unverified_inconclusive");
             confidence = "low";
         }
         else {

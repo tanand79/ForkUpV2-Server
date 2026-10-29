@@ -480,7 +480,7 @@ function decideWebsiteIdentity(params) {
     if (hostMatch.tier === "exact") {
         return { ok: true, confidence: "medium", reason: "identity_exact_host" };
     }
-    return { ok: false, confidence: "low", reason: "identity_reject" };
+    return { ok: false, confidence: "low", reason: "identity_inconclusive" };
 }
 function evidenceMatchesOrganization(organizationName, title, url) {
     if (isUnsafeFetchUrl(url) || isRejectedDirectoryHost(url))

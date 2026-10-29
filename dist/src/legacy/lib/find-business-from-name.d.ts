@@ -11,6 +11,7 @@ export type FindBusinessFromNameResult = {
     website: string;
     businessType: string;
     about: string;
+    mission: string;
     contactEmail: string;
     phone: string;
     city: string;

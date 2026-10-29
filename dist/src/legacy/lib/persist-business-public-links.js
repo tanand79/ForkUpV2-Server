@@ -164,6 +164,7 @@ async function persistBusinessPublicLinks(businessId, links) {
     const phone = trimOrNull(links.phone);
     const venueEmail = trimOrNull(links.venueEmail);
     const description = trimOrNull(links.description);
+    const mission = trimOrNull(links.mission);
     const hasHoursInput = links.discountHours != null ||
         Object.prototype.hasOwnProperty.call(links, "eligibleWindow");
     if (!website &&
@@ -174,6 +175,7 @@ async function persistBusinessPublicLinks(businessId, links) {
         !phone &&
         !venueEmail &&
         !description &&
+        !mission &&
         !hasHoursInput) {
         return;
     }
@@ -187,6 +189,7 @@ async function persistBusinessPublicLinks(businessId, links) {
          contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $7),
          venue_email = COALESCE(NULLIF(TRIM(venue_email), ''), $8),
          description = COALESCE(NULLIF(TRIM(description), ''), $9),
+         mission = COALESCE(NULLIF(TRIM(mission), ''), $10),
          updated_at = NOW()
        WHERE id = $1`, [
             businessId,
@@ -198,11 +201,12 @@ async function persistBusinessPublicLinks(businessId, links) {
             phone,
             venueEmail,
             description,
+            mission,
         ]);
     }
     catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        if (!/venue_email/i.test(message)) {
+        if (!/venue_email|mission/i.test(message)) {
             console.error("persistBusinessPublicLinks failed:", err);
             return;
         }

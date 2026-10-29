@@ -6,11 +6,13 @@ exports.matchEvidenceWebsite = matchEvidenceWebsite;
 exports.attributedContact = attributedContact;
 exports.discoverNonprofitWebsite = discoverNonprofitWebsite;
 exports.researchNonprofitProfile = researchNonprofitProfile;
+exports.researchBusinessProfile = researchBusinessProfile;
 const node_net_1 = require("node:net");
 const client_bedrock_runtime_1 = require("@aws-sdk/client-bedrock-runtime");
 const bedrock_model_catalog_1 = require("./bedrock-model-catalog");
 const user_ai_settings_1 = require("./user-ai-settings");
 const verify_nonprofit_identity_1 = require("./verify-nonprofit-identity");
+const google_places_client_1 = require("./google-places-client");
 const DISCOVERY_EXCLUDE_DOMAINS = [
     "idealist.org",
     "leadiq.com",
@@ -715,6 +717,302 @@ async function researchNonprofitProfile(params) {
             return emptyResearch("unavailable", "Web research timed out.");
         }
         console.error("nonprofit-web-research profile failed:", err instanceof Error ? err.message.slice(0, 200) : err);
+        return emptyResearch("unavailable", "Web research could not finish.");
+    }
+}
+async function enrichOfficialWebsiteProfile(params) {
+    const { orgName, website, signal, warnings, kind, provider } = params;
+    const host = new URL(website).hostname;
+    const searches = await Promise.allSettled([
+        tavily("search", {
+            query: `${orgName} about mission contact address`,
+            include_domains: [host],
+            search_depth: "advanced",
+            max_results: 6,
+            include_raw_content: true,
+        }, signal),
+        tavily("search", {
+            query: `${quotedOrgName(orgName)} ${host} official social media`,
+            include_domains: [
+                "instagram.com",
+                "facebook.com",
+                "linkedin.com",
+                "youtube.com",
+            ],
+            max_results: 4,
+            include_raw_content: true,
+        }, signal),
+    ]);
+    let pages = [];
+    for (const settled of searches) {
+        if (settled.status === "fulfilled") {
+            pages.push(...pagesFrom(settled.value.results));
+        }
+    }
+    pages = pages.filter((page, index, all) => all.findIndex((other) => other.url === page.url) === index);
+    const extractUrls = [
+        website,
+        ...pages.map((p) => p.url).filter((u) => hostKey(u) === hostKey(website)),
+    ].slice(0, 8);
+    try {
+        const extracted = await tavily("extract", {
+            urls: extractUrls,
+            include_images: true,
+            extract_depth: "advanced",
+        }, signal);
+        pages = [
+            ...pagesFrom(extracted.results),
+            ...pages,
+        ].filter((page, index, all) => all.findIndex((other) => other.url === page.url) === index);
+        if (Array.isArray(extracted.failed_results) &&
+            extracted.failed_results.length > 0) {
+            warnings.push("Some pages, including social media, blocked extraction.");
+        }
+    }
+    catch (error) {
+        if (signal.aborted)
+            throw error;
+        warnings.push("Page extraction was unavailable; content is based on search evidence.");
+    }
+    pages = pages.slice(0, 16);
+    const pageEvidence = pages.map((p) => p.text + "\n" + p.url).join("\n");
+    const kindLabel = kind === "business" ? "US local business or restaurant" : "US nonprofit";
+    const rawProfile = await claudeTool(`Build a profile for the identified ${kindLabel} only. Copy or lightly summarize About and Mission separately from the supplied evidence; absent facts must have empty text and sourceIds. Do not invent Mission, About, Vision, email, or phone. Every nonempty fact requires supplied source indices supporting it. Address must be the published contact address when present. Only return socialUrls explicitly present in the evidence and belonging to this organization. Name must match the identified organization.`, {
+        identity: { name: orgName, website },
+        pages: pages.map((p, id) => ({ id, ...p })),
+    }, PROFILE_SCHEMA, signal);
+    const about = verifiedFact(parseFact(rawProfile.about), pages);
+    const mission = verifiedFact(parseFact(rawProfile.mission), pages);
+    const vision = verifiedFact(parseFact(rawProfile.vision), pages);
+    const location = verifiedFact(parseFact(rawProfile.location), pages) ||
+        (params.seedLocation?.trim() ?? "");
+    const address = verifiedFact(parseFact(rawProfile.address), pages) ||
+        (params.seedAddress?.trim() ?? "");
+    const socialUrls = Array.isArray(rawProfile.socialUrls)
+        ? rawProfile.socialUrls
+            .filter((u) => typeof u === "string")
+            .map((u) => publicUrl(u))
+            .filter((u) => u != null &&
+            pageEvidence.includes(u) &&
+            (0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(orgName, u))
+        : [];
+    let facebookUrl = null;
+    let instagramUrl = null;
+    let linkedinUrl = null;
+    let youtubeUrl = null;
+    for (const url of socialUrls) {
+        const c = classifySocial(url);
+        if (!facebookUrl && c.facebookUrl)
+            facebookUrl = c.facebookUrl;
+        if (!instagramUrl && c.instagramUrl)
+            instagramUrl = c.instagramUrl;
+        if (!linkedinUrl && c.linkedinUrl)
+            linkedinUrl = c.linkedinUrl;
+        if (!youtubeUrl && c.youtubeUrl)
+            youtubeUrl = c.youtubeUrl;
+    }
+    for (const page of pages) {
+        if (!(0, verify_nonprofit_identity_1.socialProfileMatchesOrg)(orgName, page.url, page.title))
+            continue;
+        const c = classifySocial(page.url);
+        if (!facebookUrl && c.facebookUrl)
+            facebookUrl = c.facebookUrl;
+        if (!instagramUrl && c.instagramUrl)
+            instagramUrl = c.instagramUrl;
+        if (!linkedinUrl && c.linkedinUrl)
+            linkedinUrl = c.linkedinUrl;
+        if (!youtubeUrl && c.youtubeUrl)
+            youtubeUrl = c.youtubeUrl;
+    }
+    const modelEmail = typeof rawProfile.contactEmail === "string" && rawProfile.contactEmail.trim()
+        ? rawProfile.contactEmail.trim().slice(0, 320)
+        : null;
+    const modelPhone = typeof rawProfile.contactPhone === "string" && rawProfile.contactPhone.trim()
+        ? rawProfile.contactPhone.trim().slice(0, 40)
+        : null;
+    const officialText = pages
+        .filter((page) => hostKey(page.url) === hostKey(website))
+        .map((page) => page.text)
+        .join("\n");
+    const scraped = extractEmailPhone(officialText);
+    const attributed = attributedContact(pages, website, modelEmail || scraped.email, modelPhone || scraped.phone || params.seedPhone || null);
+    const contactPhone = attributed.phone ||
+        (params.seedPhone?.trim() ? params.seedPhone.trim().slice(0, 40) : null);
+    return {
+        status: "found",
+        name: orgName,
+        website,
+        about,
+        mission,
+        vision,
+        location,
+        address,
+        facebookUrl,
+        instagramUrl,
+        linkedinUrl,
+        youtubeUrl,
+        contactEmail: attributed.email,
+        contactPhone,
+        contactEmailSource: attributed.emailSource,
+        contactPhoneSource: attributed.phoneSource,
+        imageUrls: collectOfficialImages(pages, website),
+        reason: "",
+        warnings,
+        provider,
+    };
+}
+async function researchBusinessProfile(params) {
+    if (!nonprofitWebResearchConfigured() && !(0, google_places_client_1.googlePlacesConfigured)()) {
+        return emptyResearch("unavailable", "Tavily + Bedrock or Google Places not configured.");
+    }
+    const businessName = params.businessName.trim();
+    if (businessName.length < 2 || businessName.length > 180) {
+        return emptyResearch("not_found", "Business name is too short or too long.");
+    }
+    const signal = params.signal ?? AbortSignal.timeout(100_000);
+    const warnings = [];
+    try {
+        let website = null;
+        let orgName = businessName;
+        let seedPhone = null;
+        let seedAddress = null;
+        let seedLocation = null;
+        let provider = "tavily_bedrock";
+        if ((0, google_places_client_1.googlePlacesConfigured)()) {
+            const place = await (0, google_places_client_1.searchGooglePlace)({
+                businessName,
+                city: params.city,
+                state: params.state,
+                zip: params.zip,
+                signal,
+            });
+            if (place?.website) {
+                const normalized = publicUrl(place.website) || place.website;
+                if (normalized && !(0, verify_nonprofit_identity_1.isRejectedDirectoryHost)(normalized)) {
+                    website = normalized.startsWith("http")
+                        ? normalized
+                        : `https://${normalized}`;
+                    try {
+                        website = publicUrl(website) || website;
+                    }
+                    catch {
+                    }
+                    orgName = place.name || businessName;
+                    seedPhone = place.phone;
+                    seedAddress = place.formattedAddress;
+                    seedLocation = [place.city, place.state].filter(Boolean).join(", ");
+                    provider = "google_places_tavily_bedrock";
+                }
+            }
+            else if (place && !place.website) {
+                warnings.push("Google Places matched a venue without a public website.");
+                orgName = place.name || businessName;
+                seedPhone = place.phone;
+                seedAddress = place.formattedAddress;
+                seedLocation = [place.city, place.state].filter(Boolean).join(", ");
+            }
+        }
+        if (!website && nonprofitWebResearchConfigured()) {
+            const discovery = await tavily("search", {
+                query: `${quotedOrgName(businessName)} official website restaurant OR business`,
+                search_depth: "advanced",
+                max_results: 6,
+                include_raw_content: true,
+                exclude_domains: DISCOVERY_EXCLUDE_DOMAINS,
+            }, signal);
+            let pages = pagesFrom(discovery.results).filter((page) => (0, verify_nonprofit_identity_1.evidenceMatchesOrganization)(businessName, page.title, page.url));
+            if (pages.length === 0) {
+                if (seedPhone || seedAddress) {
+                    return {
+                        ...emptyResearch("found", "Venue found without a verifiable official website."),
+                        name: orgName,
+                        contactPhone: seedPhone,
+                        address: seedAddress || "",
+                        location: seedLocation || "",
+                        provider: (0, google_places_client_1.googlePlacesConfigured)()
+                            ? "google_places_tavily_bedrock"
+                            : "tavily_bedrock",
+                        warnings,
+                    };
+                }
+                return emptyResearch("not_found", "No public web evidence found for that business.");
+            }
+            const rawIdentity = await claudeTool("Identify the official website of the requested US business or restaurant. The website must exactly match a supplied source URL. Set ambiguous if multiple businesses match; ask for city/state/ZIP in reason. Set not_found if identity is unsupported. Do not treat directories or review sites as official websites.", {
+                query: buildQuery({
+                    organizationName: businessName,
+                    city: params.city,
+                    state: params.state,
+                }),
+                pages,
+            }, IDENTITY_SCHEMA, signal);
+            const identity = parseIdentity(rawIdentity);
+            if (!identity) {
+                return emptyResearch("unavailable", "Could not parse identity result.");
+            }
+            if (identity.status !== "found") {
+                return {
+                    ...emptyResearch(identity.status, identity.reason || "Please add a city, state, or ZIP."),
+                    name: identity.name || businessName,
+                    provider: "tavily_bedrock",
+                    warnings,
+                };
+            }
+            const matched = matchEvidenceWebsite(identity.website, pages);
+            if (!matched) {
+                return emptyResearch("not_found", "Official website could not be verified against search evidence.");
+            }
+            website = matched;
+            orgName = identity.name || businessName;
+            provider = "tavily_bedrock";
+        }
+        if (!website) {
+            if (seedPhone || seedAddress) {
+                return {
+                    ...emptyResearch("found", "Venue found without a verifiable official website."),
+                    name: orgName,
+                    contactPhone: seedPhone,
+                    address: seedAddress || "",
+                    location: seedLocation || "",
+                    provider: (0, google_places_client_1.googlePlacesConfigured)()
+                        ? "google_places_tavily_bedrock"
+                        : null,
+                    warnings,
+                };
+            }
+            return emptyResearch("unavailable", "Could not resolve an official website (configure Tavily+Bedrock and/or Google Places).");
+        }
+        if (!nonprofitWebResearchConfigured()) {
+            return {
+                ...emptyResearch("found", "Website from Google Places; page extract skipped (Tavily/Bedrock not configured)."),
+                name: orgName,
+                website,
+                contactPhone: seedPhone,
+                address: seedAddress || "",
+                location: seedLocation || "",
+                provider: "google_places_tavily_bedrock",
+                warnings: [
+                    ...warnings,
+                    "About/Mission require Tavily + Bedrock; only Places identity was available.",
+                ],
+            };
+        }
+        return await enrichOfficialWebsiteProfile({
+            orgName,
+            website,
+            signal,
+            warnings,
+            seedPhone,
+            seedAddress,
+            seedLocation,
+            kind: "business",
+            provider,
+        });
+    }
+    catch (err) {
+        if (signal.aborted) {
+            return emptyResearch("unavailable", "Web research timed out.");
+        }
+        console.error("business-web-research profile failed:", err instanceof Error ? err.message.slice(0, 200) : err);
         return emptyResearch("unavailable", "Web research could not finish.");
     }
 }

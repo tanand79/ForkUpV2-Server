@@ -24,6 +24,7 @@ export declare function fillNonprofitPublicProfileNullOnly(nonprofitId: number, 
     about?: string | null;
     mission?: string | null;
     logoUrl?: string | null;
+    phone?: string | null;
 }): Promise<void>;
 export declare function parseNonprofitGalleryUrls(raw: unknown): string[];
 export declare function updateNonprofitPublicLinks(nonprofitId: number, links: NonprofitPublicLinksUpdate): Promise<NonprofitPublicLinksUpdate | null>;

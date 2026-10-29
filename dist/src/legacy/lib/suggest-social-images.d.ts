@@ -1,4 +1,4 @@
-export type SuggestedImageSource = "website" | "facebook" | "instagram" | "social_suggest";
+export type SuggestedImageSource = "website" | "facebook" | "instagram" | "social_suggest" | "research";
 export interface SuggestedImage {
     url: string;
     source: SuggestedImageSource;

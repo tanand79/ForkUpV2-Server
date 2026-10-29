@@ -40,7 +40,14 @@ async function generateBusinessDraftFromWebsite(websiteInput, near) {
         (0, suggest_social_images_1.discoverSocialLinksFromWebsite)(website),
     ]);
     const [imageSuggestions, venuePhotos] = await Promise.all([
-        (0, suggest_social_images_1.suggestSocialImages)({ websiteUrl: website, limit: 10 }),
+        (0, suggest_social_images_1.suggestSocialImages)({
+            websiteUrl: website,
+            facebookUrl: social.facebookUrl || undefined,
+            instagramHandle: social.instagramUrl || undefined,
+            linkedinUrl: social.linkedinUrl || undefined,
+            youtubeUrl: social.youtubeUrl || undefined,
+            limit: 10,
+        }),
         (0, business_venue_images_1.scrapeBusinessVenueImages)({
             websiteUrl: website,
             reservationUrl: locationHints.reservationUrl,

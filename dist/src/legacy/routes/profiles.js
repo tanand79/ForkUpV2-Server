@@ -16,6 +16,14 @@ const invite_sender_1 = require("../lib/invite-sender");
 const persist_business_public_links_1 = require("../lib/persist-business-public-links");
 const persist_nonprofit_public_links_1 = require("../lib/persist-nonprofit-public-links");
 async function persistClaimRequestHydrateMedia(nonprofitId, body) {
+    const about = typeof body.about === "string" && body.about.trim()
+        ? body.about.trim()
+        : typeof body.mission === "string" && body.mission.trim()
+            ? body.mission.trim()
+            : null;
+    const mission = typeof body.mission === "string" && body.mission.trim()
+        ? body.mission.trim()
+        : null;
     await (0, persist_nonprofit_public_links_1.fillNonprofitPublicProfileNullOnly)(nonprofitId, {
         website: body.website,
         facebookUrl: body.facebookUrl,
@@ -24,9 +32,10 @@ async function persistClaimRequestHydrateMedia(nonprofitId, body) {
         youtubeUrl: body.youtubeUrl,
         city: body.city,
         state: body.state,
-        about: body.mission,
-        mission: body.mission,
+        about,
+        mission,
         logoUrl: body.logoUrl,
+        phone: typeof body.phone === "string" ? body.phone : null,
     });
     const gallery = Array.isArray(body.galleryImageUrls)
         ? body.galleryImageUrls

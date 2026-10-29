@@ -317,7 +317,9 @@ async function resolveAnalysisSources(input) {
         if (verified.ok && verified.website) {
             website = (0, suggest_social_images_1.normalizeWebsiteUrl)(verified.website);
         }
-        else if (verified.reason !== "unreachable" && !websiteFromResearch) {
+        else if (verified.reason === "identity_reject" ||
+            verified.reason === "directory_or_social_host" ||
+            verified.reason === "unsafe_url") {
             website = null;
         }
     }
@@ -367,17 +369,7 @@ async function resolveAnalysisSources(input) {
     if (website && !mission && !aboutNarrative) {
         const pageMeta = await extractOrgPageMeta(website);
         if (pageMeta?.description?.trim()) {
-            mission = pageMeta.description.trim();
-        }
-        else if (pageMeta?.title?.trim()) {
-            const title = pageMeta.title
-                .replace(/&#\d+;/g, " ")
-                .replace(/&amp;/g, "&")
-                .replace(/\s+/g, " ")
-                .trim();
-            if (title && !/ymca of the roses/i.test(title)) {
-                mission = title;
-            }
+            aboutNarrative = pageMeta.description.trim();
         }
     }
     const instagramUrl = instagramRaw
@@ -603,15 +595,27 @@ async function runOrganizationAiCampaignFlow(input) {
                 limit: 10,
             }),
         ]);
-        const mission = sources.mission || pageMeta?.description || null;
+        const aboutText = sources.aboutNarrative?.trim() || pageMeta?.description?.trim() || null;
+        const mission = sources.mission?.trim() || null;
+        const ideaContext = mission || aboutText;
+        const researchImageUrls = (sources.imageUrls ?? []).filter((u) => typeof u === "string" && u.trim().length > 0);
+        const mergedImageList = [
+            ...images,
+            ...researchImageUrls.map((url) => ({
+                url,
+                source: "research",
+                sourceUrl: sources.website,
+            })),
+        ].filter((img, index, all) => Boolean(img.url) &&
+            all.findIndex((other) => other.url === img.url) === index);
         const ai = await generateCampaignIdeasFromAnalysis({
             organizationName: sources.organizationName,
-            mission,
+            mission: ideaContext,
             causeCategory: sources.causeCategory,
             city: sources.city,
             state: sources.state,
             pageMeta,
-            imageCount: images.length,
+            imageCount: mergedImageList.length,
         });
         const analysis = {
             organizationName: sources.organizationName,
@@ -621,12 +625,12 @@ async function runOrganizationAiCampaignFlow(input) {
             instagramUrl: sources.instagramUrl,
             linkedinUrl: sources.linkedinUrl,
             youtubeUrl: sources.youtubeUrl,
-            mission,
+            mission: mission || aboutText,
             causeCategory: sources.causeCategory,
             city: sources.city,
             state: sources.state,
             pageMeta,
-            images,
+            images: mergedImageList,
             themes: ai.themes,
             summary: ai.summary,
             provider: ai.provider,
@@ -678,10 +682,11 @@ async function runOrganizationAiCampaignFlow(input) {
                     youtubeUrl: sources.youtubeUrl,
                     city: sources.city,
                     state: sources.state,
-                    about: mission,
+                    about: aboutText,
                     mission,
+                    phone: sources.phone,
                 });
-                const imageUrls = images
+                const imageUrls = mergedImageList
                     .map((img) => (typeof img.url === "string" ? img.url.trim() : ""))
                     .filter(Boolean);
                 if (imageUrls.length > 0) {

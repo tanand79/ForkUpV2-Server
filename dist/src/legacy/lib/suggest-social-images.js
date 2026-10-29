@@ -336,7 +336,7 @@ function extractImageUrlsFromHtml(html, pageUrl) {
     }
     return found.sort((a, b) => photoCoverRank(a) - photoCoverRank(b));
 }
-async function fetchHtml(url) {
+async function fetchHtmlOnce(url, userAgent) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
@@ -345,7 +345,7 @@ async function fetchHtml(url) {
             redirect: "follow",
             signal: controller.signal,
             headers: {
-                "User-Agent": BROWSER_UA,
+                "User-Agent": userAgent,
                 Accept: "text/html,application/xhtml+xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Cache-Control": "no-cache",
@@ -370,7 +370,24 @@ async function fetchHtml(url) {
         clearTimeout(timer);
     }
 }
+function looksLikeBotChallenge(html) {
+    if (html.length > 20_000)
+        return false;
+    return /just a moment|cf-browser-verification|attention required|enable javascript|captcha/i.test(html);
+}
+async function fetchHtml(url) {
+    const first = await fetchHtmlOnce(url, BROWSER_UA);
+    if (first && !looksLikeBotChallenge(first))
+        return first;
+    const second = await fetchHtmlOnce(url, "Mozilla/5.0 (compatible; ForkUpBot/1.0; +https://forkup.org)");
+    return second && !looksLikeBotChallenge(second) ? second : first;
+}
+function trustedSocialImageHost(url) {
+    return /cdninstagram\.com|fbcdn\.net|scontent|ytimg\.com|ggpht\.com|licdn\.com/i.test(url);
+}
 async function isReachableImage(url) {
+    if (trustedSocialImageHost(url))
+        return true;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5_000);
     try {
@@ -464,55 +481,77 @@ function normalizeTikTokUrl(url) {
         return null;
     }
 }
+function unescapeEmbeddedUrls(html) {
+    return html.replace(/\\u002F/gi, "/").replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
+}
+function socialCandidateRank(kind, url) {
+    if (kind === "facebook") {
+        return isFacebookUtilityLink(url) ? 0 : 2;
+    }
+    if (kind === "instagram") {
+        return /instagram\.com\/(p|reel|stories|explore)\b/i.test(url) ? 0 : 2;
+    }
+    if (kind === "linkedin") {
+        return /linkedin\.com\/(shareArticle|sharing)\b/i.test(url) ? 0 : 2;
+    }
+    if (kind === "youtube") {
+        if (/\/@|\/channel\/|\/c\/|\/user\//i.test(url))
+            return 3;
+        if (/\/watch\b|youtu\.be/i.test(url))
+            return 1;
+        return 2;
+    }
+    return url ? 2 : 0;
+}
 function extractSocialLinksFromHtml(html) {
     let facebookUrl = null;
     let instagramUrl = null;
     let linkedinUrl = null;
     let youtubeUrl = null;
     let tiktokUrl = null;
+    let facebookRank = 0;
+    let instagramRank = 0;
+    let linkedinRank = 0;
+    let youtubeRank = 0;
+    let tiktokRank = 0;
+    const decoded = unescapeEmbeddedUrls(html);
     const candidates = [];
-    const hrefRe = /href=["']([^"']+)["']/gi;
+    const attrRe = /(?:href|data-href|data-url|data-link)=["']([^"']+)["']/gi;
     let m;
-    while ((m = hrefRe.exec(html)) !== null) {
+    while ((m = attrRe.exec(decoded)) !== null) {
         if (m[1])
             candidates.push(decodeHtmlEntities(m[1].trim()));
     }
-    const bareRe = /https?:\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
-    while ((m = bareRe.exec(html)) !== null) {
+    const bareRe = /(?:https?:)?\/\/(?:www\.)?(?:facebook\.com|fb\.com|m\.facebook\.com|instagram\.com|linkedin\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s"'<>]+/gi;
+    while ((m = bareRe.exec(decoded)) !== null) {
         if (m[0])
             candidates.push(m[0].replace(/[),.;]+$/, ""));
     }
+    const consider = (current, currentRank, next, kind) => {
+        if (!next)
+            return { url: current, rank: currentRank };
+        const rank = socialCandidateRank(kind, next);
+        if (rank <= 0 || rank <= currentRank)
+            return { url: current, rank: currentRank };
+        return { url: next, rank };
+    };
     for (const raw of candidates) {
-        if (!facebookUrl) {
-            const fb = normalizeFacebookUrl(raw);
-            if (fb && !isFacebookUtilityLink(fb)) {
-                facebookUrl = fb;
-            }
-        }
-        if (!instagramUrl) {
-            const ig = normalizeInstagramUrl(raw);
-            if (ig && !/instagram\.com\/(p|reel|stories|explore)\b/i.test(ig)) {
-                instagramUrl = ig;
-            }
-        }
-        if (!linkedinUrl) {
-            const li = normalizeLinkedInUrl(raw);
-            if (li && !/linkedin\.com\/(shareArticle|sharing)\b/i.test(li)) {
-                linkedinUrl = li;
-            }
-        }
-        if (!youtubeUrl) {
-            const yt = normalizeYouTubeUrl(raw);
-            if (yt)
-                youtubeUrl = yt;
-        }
-        if (!tiktokUrl) {
-            const tt = normalizeTikTokUrl(raw);
-            if (tt)
-                tiktokUrl = tt;
-        }
-        if (facebookUrl && instagramUrl && linkedinUrl && youtubeUrl && tiktokUrl)
-            break;
+        const prepared = raw.startsWith("//") ? `https:${raw}` : raw;
+        const fb = consider(facebookUrl, facebookRank, normalizeFacebookUrl(prepared), "facebook");
+        facebookUrl = fb.url;
+        facebookRank = fb.rank;
+        const ig = consider(instagramUrl, instagramRank, normalizeInstagramUrl(prepared), "instagram");
+        instagramUrl = ig.url;
+        instagramRank = ig.rank;
+        const li = consider(linkedinUrl, linkedinRank, normalizeLinkedInUrl(prepared), "linkedin");
+        linkedinUrl = li.url;
+        linkedinRank = li.rank;
+        const yt = consider(youtubeUrl, youtubeRank, normalizeYouTubeUrl(prepared), "youtube");
+        youtubeUrl = yt.url;
+        youtubeRank = yt.rank;
+        const tt = consider(tiktokUrl, tiktokRank, normalizeTikTokUrl(prepared), "tiktok");
+        tiktokUrl = tt.url;
+        tiktokRank = tt.rank;
     }
     return { facebookUrl, instagramUrl, linkedinUrl, youtubeUrl, tiktokUrl };
 }
@@ -664,7 +703,8 @@ async function discoverSocialLinksFromWebsite(websiteUrl) {
         if (!email && contact.email)
             email = contact.email;
     }
-    if (workingOrigin && (!phone || !email)) {
+    const missingSocial = !facebookUrl || !instagramUrl || !linkedinUrl || !youtubeUrl;
+    if (workingOrigin && (missingSocial || !phone || !email)) {
         const pathUrls = CONTACT_PATHS.flatMap((path) => [
             `${workingOrigin}${path}`,
             `${workingOrigin}${path}/`,
@@ -781,7 +821,7 @@ async function suggestSocialImages(input) {
         if (facebook)
             await collectFromPage(facebook, "facebook", out, poolLimit);
     }
-    if (website && out.length === 0) {
+    if (website && out.length < poolLimit) {
         for (const variant of websiteUrlVariants(website)) {
             if (out.length >= poolLimit)
                 break;

@@ -44,7 +44,9 @@ function needsHydrate(payload) {
         payload.tiktokUrl ||
         payload.website);
     const hasLocation = Boolean(payload.city || payload.state);
-    return !hasSocial || !hasLocation;
+    const hasAboutOrMission = Boolean(payload.about?.trim() || payload.mission?.trim());
+    const hasGallery = payload.galleryImageUrls.length > 0;
+    return !hasSocial || !hasLocation || !hasAboutOrMission || !hasGallery;
 }
 async function loadLatestAiAnalysis(nonprofitId, organizationName) {
     try {
@@ -138,7 +140,11 @@ async function loadAndHydrateNonprofitOrgProfile(nonprofitId) {
         const pageMeta = sources.website
             ? await (0, organization_ai_campaign_flow_1.extractOrgPageMeta)(sources.website)
             : null;
-        const about = sources.mission || pageMeta?.description || payload.about || null;
+        const about = sources.aboutNarrative?.trim() ||
+            pageMeta?.description ||
+            payload.about ||
+            null;
+        const mission = sources.mission?.trim() || null;
         await (0, persist_nonprofit_public_links_1.fillNonprofitPublicProfileNullOnly)(nonprofitId, {
             website: sources.website,
             facebookUrl: sources.facebookUrl,
@@ -148,8 +154,19 @@ async function loadAndHydrateNonprofitOrgProfile(nonprofitId) {
             city: sources.city,
             state: sources.state,
             about,
-            mission: sources.mission || about,
+            mission,
+            phone: sources.phone,
         });
+        const researchedImages = (sources.imageUrls ?? [])
+            .filter((u) => typeof u === "string" && u.trim().length > 0)
+            .map((u) => u.trim())
+            .slice(0, 12);
+        if (researchedImages.length > 0) {
+            const merged = await (0, persist_nonprofit_public_links_1.mergeNonprofitGalleryUrls)(nonprofitId, researchedImages);
+            if (merged.length > 0 && !payload.coverUrl) {
+                await (0, persist_nonprofit_public_links_1.persistNonprofitCoverUrl)(nonprofitId, merged[0]);
+            }
+        }
     }
     catch (err) {
         console.error("nonprofit org profile live hydrate failed:", err);

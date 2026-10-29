@@ -26,6 +26,7 @@ async function fillNonprofitPublicProfileNullOnly(nonprofitId, fill) {
     const about = trimOrNull(fill.about);
     const mission = trimOrNull(fill.mission);
     const logoUrl = trimOrNull(fill.logoUrl);
+    const phone = trimOrNull(fill.phone);
     if (!website &&
         !facebookUrl &&
         !instagramUrl &&
@@ -35,7 +36,8 @@ async function fillNonprofitPublicProfileNullOnly(nonprofitId, fill) {
         !state &&
         !about &&
         !mission &&
-        !logoUrl) {
+        !logoUrl &&
+        !phone) {
         return;
     }
     try {
@@ -50,6 +52,7 @@ async function fillNonprofitPublicProfileNullOnly(nonprofitId, fill) {
          description = COALESCE(NULLIF(TRIM(description), ''), $9),
          mission = COALESCE(NULLIF(TRIM(mission), ''), $10),
          logo_url = COALESCE(NULLIF(TRIM(logo_url), ''), $11),
+         contact_phone = COALESCE(NULLIF(TRIM(contact_phone), ''), $12),
          updated_at = NOW()
        WHERE id = $1`, [
             nonprofitId,
@@ -63,6 +66,7 @@ async function fillNonprofitPublicProfileNullOnly(nonprofitId, fill) {
             about,
             mission,
             logoUrl,
+            phone,
         ]);
     }
     catch (err) {

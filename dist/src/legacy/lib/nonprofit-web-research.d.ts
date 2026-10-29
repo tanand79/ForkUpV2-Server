@@ -3,7 +3,7 @@ export type NonprofitWebIdentity = {
     name: string;
     website: string | null;
     reason: string;
-    provider: "tavily_bedrock" | null;
+    provider: "tavily_bedrock" | "google_places_tavily_bedrock" | null;
 };
 export type NonprofitWebResearchResult = {
     status: "found" | "ambiguous" | "not_found" | "unavailable";
@@ -25,8 +25,9 @@ export type NonprofitWebResearchResult = {
     imageUrls: string[];
     reason: string;
     warnings: string[];
-    provider: "tavily_bedrock" | null;
+    provider: "tavily_bedrock" | "google_places_tavily_bedrock" | null;
 };
+export type BusinessWebResearchResult = NonprofitWebResearchResult;
 type ResearchPage = {
     url: string;
     title: string;
@@ -59,4 +60,11 @@ export declare function researchNonprofitProfile(params: {
     state?: string | null;
     signal?: AbortSignal;
 }): Promise<NonprofitWebResearchResult>;
+export declare function researchBusinessProfile(params: {
+    businessName: string;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
+    signal?: AbortSignal;
+}): Promise<BusinessWebResearchResult>;
 export {};
